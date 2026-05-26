@@ -1,0 +1,59 @@
+{
+  "name": "agentsflow",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Electron + Next.js desktop UI for Claude Code background agents",
+  "main": "dist/electron/electron/main.js",
+  "scripts": {
+    "dev": "concurrently -k -n next,electron -c blue,magenta \"npm:dev:next\" \"npm:dev:electron\"",
+    "dev:next": "cd renderer && next dev -p 3030",
+    "dev:electron": "wait-on tcp:3030 && tsc -p electron/tsconfig.json && cross-env NODE_ENV=development electron dist/electron/electron/main.js",
+    "build": "npm run build:renderer && npm run build:electron",
+    "build:renderer": "cd renderer && next build",
+    "build:electron": "tsc -p electron/tsconfig.json",
+    "start": "cross-env NODE_ENV=production electron dist/electron/electron/main.js",
+    "package": "npm run build && electron-builder",
+    "rebuild": "electron-rebuild -f -w node-pty"
+  },
+  "dependencies": {
+    "electron-serve": "^1.3.0",
+    "electron-store": "^8.2.0",
+    "next": "^14.2.15",
+    "node-pty": "^1.0.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "uuid": "^10.0.0",
+    "xterm": "^5.3.0",
+    "xterm-addon-fit": "^0.8.0",
+    "xterm-addon-web-links": "^0.9.0"
+  },
+  "devDependencies": {
+    "@electron/rebuild": "^3.6.0",
+    "@types/node": "^22.7.4",
+    "@types/react": "^18.3.11",
+    "@types/react-dom": "^18.3.0",
+    "@types/uuid": "^10.0.0",
+    "autoprefixer": "^10.4.20",
+    "concurrently": "^9.0.1",
+    "cross-env": "^7.0.3",
+    "electron": "^32.1.2",
+    "electron-builder": "^25.0.5",
+    "postcss": "^8.4.47",
+    "tailwindcss": "^3.4.13",
+    "typescript": "^5.6.2",
+    "wait-on": "^8.0.1"
+  },
+  "build": {
+    "appId": "com.agentsflow.app",
+    "productName": "AgentsFlow",
+    "files": [
+      "dist/**/*",
+      "renderer/out/**/*",
+      "package.json"
+    ],
+    "mac": {
+      "category": "public.app-category.developer-tools",
+      "target": "dmg"
+    }
+  }
+}
