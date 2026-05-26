@@ -14,6 +14,9 @@ interface Props {
   onSend: (prompt: string, attachments: string[]) => Promise<void>;
 }
 
+// Survives navigation to /session and back. Cleared only after a successful send.
+const draft: { prompt: string; images: PastedImage[] } = { prompt: '', images: [] };
+
 function blobToBase64(blob: Blob): Promise<{ base64: string; dataUrl: string; mime: string }> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -29,11 +32,14 @@ function blobToBase64(blob: Blob): Promise<{ base64: string; dataUrl: string; mi
 }
 
 export default function SpawnBar({ targetDir, onSend }: Props) {
-  const [prompt, setPrompt] = useState('');
+  const [prompt, setPrompt] = useState(draft.prompt);
   const [busy, setBusy] = useState(false);
-  const [images, setImages] = useState<PastedImage[]>([]);
+  const [images, setImages] = useState<PastedImage[]>(draft.images);
   const [previewing, setPreviewing] = useState<PastedImage | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+
+  useEffect(() => { draft.prompt = prompt; }, [prompt]);
+  useEffect(() => { draft.images = images; }, [images]);
 
   useEffect(() => {
     if (textareaRef.current) {
@@ -48,7 +54,6 @@ export default function SpawnBar({ targetDir, onSend }: Props) {
   const [pasteError, setPasteError] = useState<string | null>(null);
 
   const handlePaste = async (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
-    if (!targetDir) return;
     const items = Array.from(e.clipboardData?.items ?? []);
     const imgItems = items.filter((it) => it.kind === 'file' && it.type.startsWith('image/'));
     if (imgItems.length === 0) return;
@@ -65,7 +70,7 @@ export default function SpawnBar({ targetDir, onSend }: Props) {
       if (!file) continue;
       try {
         const { base64, dataUrl, mime } = await blobToBase64(file);
-        const res = await a.saveImageFromPaste(targetDir.path, base64, mime);
+        const res = await a.saveImageFromPaste(targetDir?.path ?? null, base64, mime);
         if (!res?.savedPath) {
           setPasteError('The app saved the image but no path came back. Restart and try again.');
           continue;
@@ -146,7 +151,6 @@ export default function SpawnBar({ targetDir, onSend }: Props) {
                 >✕</button>
               </div>
             ))}
-            <span className="text-[11px] text-muted ml-1">{images.length} image{images.length === 1 ? '' : 's'} attached</span>
           </div>
         )}
         <div className="flex items-end gap-3">
@@ -167,7 +171,7 @@ export default function SpawnBar({ targetDir, onSend }: Props) {
                 submit();
               }
             }}
-            placeholder={targetDir ? 'Type a prompt or paste images and press Enter…' : 'Click a directory first…'}
+            placeholder={targetDir ? 'Type a prompt or paste images and press Enter…' : 'Paste images now, then click a directory to send…'}
             rows={1}
             className="flex-1 resize-none bg-panel border border-border rounded-md px-3 py-2 text-sm text-text outline-none focus:border-accent placeholder:text-muted/70"
           />

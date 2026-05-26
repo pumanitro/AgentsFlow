@@ -5,6 +5,7 @@ export interface TrackedDirectory {
   addedAt: string;
 }
 
+// test
 export interface Conversation {
   id: string;
   sessionId: string;
@@ -14,7 +15,6 @@ export interface Conversation {
   directoryPath: string;
   displayName: string;
   title: string;
-  titleLocked: boolean;
   description: string;
   pinned: boolean;
   attachments?: string[];
@@ -44,13 +44,15 @@ export interface AgentsFlowApi {
 
   listConversations: () => Promise<Conversation[]>;
   spawnAgent: (req: SpawnRequest) => Promise<SpawnResult>;
-  updateConversationTitle: (id: string, title: string, locked: boolean) => Promise<void>;
+  updateConversationTitle: (id: string, title: string) => Promise<void>;
   setConversationPinned: (id: string, pinned: boolean) => Promise<void>;
   stopAgent: (id: string) => Promise<void>;
   removeAgent: (id: string) => Promise<void>;
   removeDirectoryWithHistory: (id: string) => Promise<{ removedConversations: number }>;
 
   attachTerminal: (conversationId: string, cols: number, rows: number) => Promise<{ channelId: string }>;
+  attachShellTerminal: (shellId: string, cwd: string, cols: number, rows: number) => Promise<{ channelId: string; replay: string }>;
+  killShell: (shellId: string) => Promise<void>;
   writeTerminal: (channelId: string, data: string) => Promise<void>;
   resizeTerminal: (channelId: string, cols: number, rows: number) => Promise<void>;
   detachTerminal: (channelId: string) => Promise<void>;
@@ -61,7 +63,32 @@ export interface AgentsFlowApi {
 
   gitStatus: (dirPath: string) => Promise<GitStatusResult>;
   listFiles: (dirPath: string) => Promise<FileEntry[]>;
-  saveImageFromPaste: (dirPath: string, dataBase64: string, mimeType: string) => Promise<{ savedPath: string }>;
+  saveImageFromPaste: (dirPath: string | null, dataBase64: string, mimeType: string) => Promise<{ savedPath: string }>;
+
+  readTextFile: (filePath: string) => Promise<ReadFileResult>;
+  writeTextFile: (filePath: string, content: string) => Promise<{ ok: true }>;
+  readBinaryFile: (filePath: string) => Promise<ReadBinaryResult>;
+
+  renamePath: (oldPath: string, newPath: string) => Promise<{ ok: true }>;
+  removePath: (targetPath: string) => Promise<{ ok: true }>;
+
+  copyImageToClipboard: (filePath: string) => Promise<{ ok: true } | { ok: false; error: string }>;
+}
+
+export interface ReadBinaryResult {
+  dataUrl: string;
+  mime: string;
+  size: number;
+  truncated: boolean;
+  error?: string;
+}
+
+export interface ReadFileResult {
+  content: string;
+  size: number;
+  truncated: boolean;
+  binary: boolean;
+  error?: string;
 }
 
 export type GitEntryStatus = 'untracked' | 'added' | 'modified' | 'deleted' | 'renamed' | 'unknown';

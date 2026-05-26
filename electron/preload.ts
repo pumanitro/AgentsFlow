@@ -8,8 +8,8 @@ const api: AgentsFlowApi = {
 
   listConversations: () => ipcRenderer.invoke('convs:list'),
   spawnAgent: (req: SpawnRequest) => ipcRenderer.invoke('convs:spawn', req),
-  updateConversationTitle: (id, title, locked) =>
-    ipcRenderer.invoke('convs:updateTitle', id, title, locked),
+  updateConversationTitle: (id, title) =>
+    ipcRenderer.invoke('convs:updateTitle', id, title),
   setConversationPinned: (id, pinned) => ipcRenderer.invoke('convs:setPinned', id, pinned),
   stopAgent: (id) => ipcRenderer.invoke('convs:stop', id),
   removeAgent: (id) => ipcRenderer.invoke('convs:remove', id),
@@ -17,6 +17,9 @@ const api: AgentsFlowApi = {
 
   attachTerminal: (conversationId, cols, rows) =>
     ipcRenderer.invoke('term:attach', conversationId, cols, rows),
+  attachShellTerminal: (shellId, cwd, cols, rows) =>
+    ipcRenderer.invoke('term:attachShell', shellId, cwd, cols, rows),
+  killShell: (shellId) => ipcRenderer.invoke('term:killShell', shellId),
   writeTerminal: (channelId, data) => ipcRenderer.invoke('term:write', channelId, data),
   resizeTerminal: (channelId, cols, rows) => ipcRenderer.invoke('term:resize', channelId, cols, rows),
   detachTerminal: (channelId) => ipcRenderer.invoke('term:detach', channelId),
@@ -41,6 +44,13 @@ const api: AgentsFlowApi = {
   listFiles: (dirPath) => ipcRenderer.invoke('files:list', dirPath),
   saveImageFromPaste: (dirPath, dataBase64, mimeType) =>
     ipcRenderer.invoke('images:saveFromPaste', dirPath, dataBase64, mimeType),
+  readTextFile: (filePath) => ipcRenderer.invoke('files:readText', filePath),
+  writeTextFile: (filePath, content) => ipcRenderer.invoke('files:writeText', filePath, content),
+  readBinaryFile: (filePath) => ipcRenderer.invoke('files:readBinary', filePath),
+  renamePath: (oldPath, newPath) => ipcRenderer.invoke('files:rename', oldPath, newPath),
+  removePath: (targetPath) => ipcRenderer.invoke('files:remove', targetPath),
+
+  copyImageToClipboard: (filePath) => ipcRenderer.invoke('clipboard:copyImage', filePath),
 };
 
 contextBridge.exposeInMainWorld('agentsflow', api);

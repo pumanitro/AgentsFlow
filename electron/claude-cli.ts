@@ -28,6 +28,11 @@ export interface JobState {
   cwd?: string;
   createdAt?: string;
   updatedAt?: string;
+  inFlight?: {
+    tasks?: number;
+    queued?: number;
+    kinds?: string[];
+  };
 }
 
 // Strip ANSI escape sequences. Claude emits colorized output when FORCE_COLOR is set

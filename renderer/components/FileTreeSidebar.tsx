@@ -1,12 +1,13 @@
 import { useEffect, useMemo, useState } from 'react';
 import { api } from '../lib/ipc';
+import { useUIState } from '../lib/ui-state';
 import { FileEntry, GitEntryStatus, GitStatusResult } from '../../shared/types';
-
-type Mode = 'changes' | 'files';
 
 interface Props {
   dirPath: string;
   conversationId: string;
+  onFileOpen?: (absolutePath: string) => void;
+  openedFilePath?: string | null;
 }
 
 function loadExpanded(key: string): Set<string> {
@@ -32,6 +33,7 @@ function useExpanded(key: string): { state: Set<string>; setState: (s: Set<strin
   const setState = (s: Set<string>) => {
     setStateRaw(s);
     saveExpanded(key, s);
+    setWasNew(false);
   };
   return { state, setState, loaded, wasNew };
 }
@@ -155,6 +157,11 @@ function fileExt(name: string): string {
   return name.slice(i + 1).toLowerCase();
 }
 
+const IMAGE_EXTS = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'svg', 'ico', 'avif', 'tif', 'tiff']);
+function isImageFile(name: string): boolean {
+  return IMAGE_EXTS.has(fileExt(name));
+}
+
 function FileIcon({ name }: { name: string }) {
   const ext = fileExt(name);
   const color = EXT_COLOR[ext] ?? '#64748b';
@@ -190,13 +197,16 @@ const STATUS_STYLE: Record<GitEntryStatus, { fg: string; label: string }> = {
   unknown: { fg: 'text-muted', label: '' },
 };
 
-function FileRow({ node, depth }: { node: TreeFile; depth: number }) {
+function FileRow({ node, depth, onOpen, isOpen, onContextMenu }: { node: TreeFile; depth: number; onOpen?: () => void; isOpen?: boolean; onContextMenu?: (e: React.MouseEvent) => void }) {
   const style = node.status ? STATUS_STYLE[node.status] : null;
   const muted = node.isIgnored ? 'opacity-50' : '';
+  const active = isOpen ? 'bg-panel2 border-l-2 border-l-accent' : 'border-l-2 border-l-transparent';
   return (
     <div
-      className={`group flex items-center gap-2 pr-2 py-0.5 hover:bg-panel2 cursor-default ${muted}`}
-      style={{ paddingLeft: 8 + depth * 14 }}
+      onClick={onOpen}
+      onContextMenu={onContextMenu}
+      className={`group flex items-center gap-2 pr-2 py-0.5 hover:bg-panel2 ${onOpen ? 'cursor-pointer' : 'cursor-default'} ${muted} ${active}`}
+      style={{ paddingLeft: 6 + depth * 14 }}
       title={node.path + (node.isIgnored ? ' (ignored)' : '')}
     >
       <FileIcon name={node.name} />
@@ -208,11 +218,12 @@ function FileRow({ node, depth }: { node: TreeFile; depth: number }) {
   );
 }
 
-function DirRow({ node, depth, expanded, onToggle }: { node: TreeDir; depth: number; expanded: boolean; onToggle: () => void }) {
+function DirRow({ node, depth, expanded, onToggle, onContextMenu }: { node: TreeDir; depth: number; expanded: boolean; onToggle: () => void; onContextMenu?: (e: React.MouseEvent) => void }) {
   const muted = node.isIgnored ? 'opacity-50' : '';
   return (
     <div
       onClick={onToggle}
+      onContextMenu={onContextMenu}
       className={`flex items-center gap-1.5 pr-2 py-0.5 hover:bg-panel2 cursor-pointer ${muted}`}
       style={{ paddingLeft: 4 + depth * 14 }}
       title={node.path + (node.isIgnored ? ' (ignored)' : '')}
@@ -227,7 +238,7 @@ function DirRow({ node, depth, expanded, onToggle }: { node: TreeDir; depth: num
   );
 }
 
-function TreeView({ root, expanded, setExpanded }: { root: TreeDir; expanded: Set<string>; setExpanded: (s: Set<string>) => void }) {
+function TreeView({ root, expanded, setExpanded, onFileOpen, dirPath, openedFilePath, onContextMenu }: { root: TreeDir; expanded: Set<string>; setExpanded: (s: Set<string>) => void; onFileOpen?: (absPath: string) => void; dirPath: string; openedFilePath?: string | null; onContextMenu?: (e: React.MouseEvent, node: TreeNode) => void }) {
   const renderNodes = (nodes: TreeNode[], depth: number): React.ReactNode =>
     nodes.map((c) => {
       if (c.kind === 'dir') {
@@ -239,12 +250,28 @@ function TreeView({ root, expanded, setExpanded }: { root: TreeDir; expanded: Se
         };
         return (
           <div key={c.path || c.name}>
-            <DirRow node={c} depth={depth} expanded={isOpen} onToggle={toggle} />
+            <DirRow
+              node={c}
+              depth={depth}
+              expanded={isOpen}
+              onToggle={toggle}
+              onContextMenu={onContextMenu ? (e) => onContextMenu(e, c) : undefined}
+            />
             {isOpen && renderNodes(c.children, depth + 1)}
           </div>
         );
       }
-      return <FileRow key={c.path} node={c} depth={depth} />;
+      const absPath = `${dirPath}/${c.path}`;
+      return (
+        <FileRow
+          key={c.path}
+          node={c}
+          depth={depth}
+          onOpen={onFileOpen ? () => onFileOpen(absPath) : undefined}
+          isOpen={openedFilePath === absPath}
+          onContextMenu={onContextMenu ? (e) => onContextMenu(e, c) : undefined}
+        />
+      );
     });
 
   if (root.children.length === 0) {
@@ -253,8 +280,8 @@ function TreeView({ root, expanded, setExpanded }: { root: TreeDir; expanded: Se
   return <div className="select-none">{renderNodes(root.children, 0)}</div>;
 }
 
-export default function FileTreeSidebar({ dirPath, conversationId }: Props) {
-  const [mode, setMode] = useState<Mode>('changes');
+export default function FileTreeSidebar({ dirPath, conversationId, onFileOpen, openedFilePath }: Props) {
+  const [mode, setMode] = useUIState('sidebarMode');
   const [status, setStatus] = useState<GitStatusResult | null>(null);
   const [files, setFiles] = useState<FileEntry[] | null>(null);
   const changesStore = useExpanded(`agentsflow:tree:${conversationId}:changes`);
@@ -338,6 +365,107 @@ export default function FileTreeSidebar({ dirPath, conversationId }: Props) {
   const expanded = mode === 'changes' ? expandedChanges : expandedFiles;
   const setExpanded = mode === 'changes' ? setExpandedChanges : setExpandedFiles;
 
+  const [menu, setMenu] = useState<{ x: number; y: number; node: TreeNode } | null>(null);
+  useEffect(() => {
+    if (!menu) return;
+    const close = () => setMenu(null);
+    window.addEventListener('click', close);
+    window.addEventListener('contextmenu', close);
+    window.addEventListener('keydown', (e) => { if (e.key === 'Escape') close(); });
+    window.addEventListener('blur', close);
+    return () => {
+      window.removeEventListener('click', close);
+      window.removeEventListener('contextmenu', close);
+      window.removeEventListener('blur', close);
+    };
+  }, [menu]);
+
+  const openContextMenu = (e: React.MouseEvent, node: TreeNode) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setMenu({ x: e.clientX, y: e.clientY, node });
+  };
+
+  const [renaming, setRenaming] = useState<{ node: TreeNode; value: string; error?: string; busy?: boolean } | null>(null);
+  const [removing, setRemoving] = useState<{ node: TreeNode; error?: string; busy?: boolean } | null>(null);
+  const [toast, setToast] = useState<{ kind: 'ok' | 'err'; text: string } | null>(null);
+
+  useEffect(() => {
+    if (!toast) return;
+    const t = setTimeout(() => setToast(null), 1800);
+    return () => clearTimeout(t);
+  }, [toast]);
+
+  const startRename = (node: TreeNode) => {
+    setMenu(null);
+    setRenaming({ node, value: node.name });
+  };
+
+  const startRemove = (node: TreeNode) => {
+    setMenu(null);
+    setRemoving({ node });
+  };
+
+  const copyImage = async (node: TreeNode) => {
+    setMenu(null);
+    if (node.kind !== 'file') return;
+    const fullPath = `${dirPath}/${node.path}`;
+    const a = api();
+    if (typeof a.copyImageToClipboard !== 'function') {
+      setToast({ kind: 'err', text: 'Restart the app to enable copy (preload needs to refresh).' });
+      return;
+    }
+    try {
+      const res = await a.copyImageToClipboard(fullPath);
+      if (res.ok) {
+        setToast({ kind: 'ok', text: `Copied ${node.name} — paste it anywhere.` });
+      } else {
+        setToast({ kind: 'err', text: `Copy failed: ${res.error}` });
+      }
+    } catch (err) {
+      setToast({ kind: 'err', text: `Copy failed: ${(err as Error)?.message ?? String(err)}` });
+    }
+  };
+
+  const submitRename = async () => {
+    if (!renaming) return;
+    const { node, value } = renaming;
+    const newName = value.trim();
+    if (!newName || newName === node.name) { setRenaming(null); return; }
+    if (newName.includes('/') || newName.includes('\\') || newName === '.' || newName === '..') {
+      setRenaming({ ...renaming, error: 'Invalid name. No path separators.' });
+      return;
+    }
+    const oldFullPath = `${dirPath}/${node.path}`;
+    const parentRel = node.path.includes('/') ? node.path.slice(0, node.path.lastIndexOf('/')) : '';
+    const newFullPath = parentRel ? `${dirPath}/${parentRel}/${newName}` : `${dirPath}/${newName}`;
+    setRenaming({ ...renaming, busy: true, error: undefined });
+    try {
+      await api().renamePath(oldFullPath, newFullPath);
+      setRenaming(null);
+      await refresh();
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.error('[agentsflow] rename failed', err);
+      setRenaming({ ...renaming, busy: false, error: (err as Error)?.message ?? String(err) });
+    }
+  };
+
+  const submitRemove = async () => {
+    if (!removing) return;
+    const fullPath = `${dirPath}/${removing.node.path}`;
+    setRemoving({ ...removing, busy: true, error: undefined });
+    try {
+      await api().removePath(fullPath);
+      setRemoving(null);
+      await refresh();
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.error('[agentsflow] remove failed', err);
+      setRemoving({ ...removing, busy: false, error: (err as Error)?.message ?? String(err) });
+    }
+  };
+
   const summary = status && mode === 'changes'
     ? `${status.entries.length} change${status.entries.length === 1 ? '' : 's'}${status.branch ? ` · ${status.branch}` : ''}`
     : files && mode === 'files'
@@ -375,8 +503,116 @@ export default function FileTreeSidebar({ dirPath, conversationId }: Props) {
         {mode === 'changes' && status && !status.isRepo && typeof api().gitStatus === 'function' && (
           <div className="px-3 py-4 text-xs text-muted italic">Not a git repository.</div>
         )}
-        {tree && <TreeView root={tree} expanded={expanded} setExpanded={setExpanded} />}
+        {tree && (
+          <TreeView
+            root={tree}
+            expanded={expanded}
+            setExpanded={setExpanded}
+            dirPath={dirPath}
+            onFileOpen={onFileOpen}
+            openedFilePath={openedFilePath}
+            onContextMenu={openContextMenu}
+          />
+        )}
       </div>
+      {menu && (
+        <div
+          className="fixed z-50 min-w-[160px] rounded-md border border-border bg-panel2 shadow-lg py-1 text-text"
+          style={{ left: menu.x, top: menu.y }}
+          onClick={(e) => e.stopPropagation()}
+          onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); }}
+        >
+          <div className="px-3 py-1 text-[11px] text-muted truncate border-b border-border">{menu.node.path}</div>
+          {menu.node.kind === 'file' && isImageFile(menu.node.name) && (
+            <button
+              className="w-full text-left px-3 py-1.5 text-sm hover:bg-panel"
+              onClick={() => copyImage(menu.node)}
+            >Copy image</button>
+          )}
+          <button
+            className="w-full text-left px-3 py-1.5 text-sm hover:bg-panel"
+            onClick={() => startRename(menu.node)}
+          >Rename…</button>
+          <button
+            className="w-full text-left px-3 py-1.5 text-sm text-err hover:bg-panel"
+            onClick={() => startRemove(menu.node)}
+          >Delete</button>
+        </div>
+      )}
+      {renaming && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-bg/70 backdrop-blur-sm"
+          onClick={() => !renaming.busy && setRenaming(null)}
+        >
+          <div
+            className="bg-panel border border-border rounded-md p-4 w-[420px] max-w-[90vw] shadow-xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="text-sm font-medium text-text mb-1">Rename {renaming.node.kind === 'dir' ? 'directory' : 'file'}</div>
+            <div className="text-[11px] text-muted mb-3 truncate">{renaming.node.path}</div>
+            <input
+              autoFocus
+              value={renaming.value}
+              onChange={(e) => setRenaming({ ...renaming, value: e.target.value, error: undefined })}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') submitRename();
+                if (e.key === 'Escape') setRenaming(null);
+              }}
+              className="w-full bg-panel2 border border-border rounded-md px-3 py-2 text-sm text-text outline-none focus:border-accent"
+            />
+            {renaming.error && (
+              <div className="text-[11px] text-err mt-2">{renaming.error}</div>
+            )}
+            <div className="flex justify-end gap-2 mt-3">
+              <button
+                onClick={() => setRenaming(null)}
+                disabled={renaming.busy}
+                className="px-3 py-1.5 rounded-md text-sm text-muted hover:text-text hover:bg-panel2 disabled:opacity-40"
+              >Cancel</button>
+              <button
+                onClick={submitRename}
+                disabled={renaming.busy || !renaming.value.trim()}
+                className="px-3 py-1.5 rounded-md bg-accent text-bg font-medium text-sm disabled:opacity-40 hover:bg-accent2"
+              >{renaming.busy ? 'Renaming…' : 'Rename'}</button>
+            </div>
+          </div>
+        </div>
+      )}
+      {toast && (
+        <div
+          className={`fixed bottom-4 left-1/2 -translate-x-1/2 z-[60] px-3 py-1.5 rounded-md text-sm shadow-lg border ${toast.kind === 'ok' ? 'bg-panel2 border-accent text-text' : 'bg-panel2 border-err text-err'}`}
+        >{toast.text}</div>
+      )}
+      {removing && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-bg/70 backdrop-blur-sm"
+          onClick={() => !removing.busy && setRemoving(null)}
+        >
+          <div
+            className="bg-panel border border-border rounded-md p-4 w-[420px] max-w-[90vw] shadow-xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="text-sm font-medium text-text mb-1">Delete {removing.node.kind === 'dir' ? 'directory' : 'file'}?</div>
+            <div className="text-[11px] text-muted mb-3 truncate">{removing.node.path}</div>
+            <div className="text-xs text-text/85">This cannot be undone.</div>
+            {removing.error && (
+              <div className="text-[11px] text-err mt-2">{removing.error}</div>
+            )}
+            <div className="flex justify-end gap-2 mt-3">
+              <button
+                onClick={() => setRemoving(null)}
+                disabled={removing.busy}
+                className="px-3 py-1.5 rounded-md text-sm text-muted hover:text-text hover:bg-panel2 disabled:opacity-40"
+              >Cancel</button>
+              <button
+                onClick={submitRemove}
+                disabled={removing.busy}
+                className="px-3 py-1.5 rounded-md bg-err text-bg font-medium text-sm disabled:opacity-40 hover:opacity-90"
+              >{removing.busy ? 'Deleting…' : 'Delete'}</button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

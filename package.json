@@ -1,6 +1,6 @@
 {
   "name": "agentsflow",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "private": true,
   "description": "Electron + Next.js desktop UI for Claude Code background agents",
   "main": "dist/electron/electron/main.js",
@@ -16,12 +16,33 @@
     "rebuild": "electron-rebuild -f -w node-pty"
   },
   "dependencies": {
+    "@blocknote/ariakit": "^0.51.3",
+    "@blocknote/core": "^0.51.3",
+    "@blocknote/mantine": "^0.51.3",
+    "@blocknote/react": "^0.51.3",
+    "@codemirror/lang-css": "^6.3.1",
+    "@codemirror/lang-html": "^6.4.11",
+    "@codemirror/lang-javascript": "^6.2.5",
+    "@codemirror/lang-json": "^6.0.2",
+    "@codemirror/lang-markdown": "^6.5.0",
+    "@codemirror/lang-python": "^6.2.1",
+    "@codemirror/lang-xml": "^6.1.0",
+    "@codemirror/state": "^6.6.0",
+    "@codemirror/theme-one-dark": "^6.1.3",
+    "@codemirror/view": "^6.43.0",
+    "@mantine/core": "^9.2.1",
+    "@mantine/hooks": "^9.2.1",
+    "@uiw/react-codemirror": "^4.25.10",
     "electron-serve": "^1.3.0",
     "electron-store": "^8.2.0",
+    "highlight.js": "^11.11.1",
     "next": "^14.2.15",
     "node-pty": "^1.0.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
+    "react-markdown": "^10.1.0",
+    "rehype-highlight": "^7.0.2",
+    "remark-gfm": "^4.0.1",
     "uuid": "^10.0.0",
     "xterm": "^5.3.0",
     "xterm-addon-fit": "^0.8.0",
@@ -45,15 +66,23 @@
   },
   "build": {
     "appId": "com.agentsflow.app",
-    "productName": "AgentsFlow",
+    "productName": "Agents Flow",
     "files": [
       "dist/**/*",
       "renderer/out/**/*",
+      "assets/**/*",
       "package.json"
     ],
     "mac": {
       "category": "public.app-category.developer-tools",
-      "target": "dmg"
+      "target": "dmg",
+      "icon": "assets/icon.png"
+    },
+    "win": {
+      "icon": "assets/icon.png"
+    },
+    "linux": {
+      "icon": "assets/icon.png"
     }
   }
 }

@@ -1,4 +1,5 @@
 import * as fs from 'fs';
+import * as os from 'os';
 import * as path from 'path';
 import { app } from 'electron';
 import { Conversation, TrackedDirectory } from '../shared/types';
@@ -14,15 +15,45 @@ let filePath: string | null = null;
 function getPath(): string {
   if (!filePath) {
     filePath = path.join(app.getPath('userData'), 'store.json');
+    migrateLegacyStoreIfNeeded(filePath);
   }
   return filePath;
+}
+
+/**
+ * Earlier builds wrote `store.json` to Electron's default `userData` dir, which on macOS is
+ * `~/Library/Application Support/Electron/` until `app.setName(...)` is called. Once we set
+ * the product name to "Agents Flow" the location moves to `…/Agents Flow/` and the old
+ * store would look empty. On first launch in the new location, copy the most recent legacy
+ * store over so the user keeps their tracked directories and conversation history.
+ */
+function migrateLegacyStoreIfNeeded(newPath: string): void {
+  try {
+    if (fs.existsSync(newPath)) return;
+    const home = os.homedir();
+    const candidates = [
+      path.join(home, 'Library', 'Application Support', 'Electron', 'store.json'),
+      path.join(home, 'Library', 'Application Support', 'AgentsFlow', 'store.json'),
+    ];
+    let best: { path: string; mtime: number } | null = null;
+    for (const p of candidates) {
+      try {
+        const st = fs.statSync(p);
+        if (!best || st.mtimeMs > best.mtime) best = { path: p, mtime: st.mtimeMs };
+      } catch { /* not present */ }
+    }
+    if (!best) return;
+    fs.mkdirSync(path.dirname(newPath), { recursive: true });
+    fs.copyFileSync(best.path, newPath);
+    console.log('[agentsflow] migrated legacy store from', best.path, '→', newPath);
+  } catch (err) {
+    console.error('[agentsflow] legacy store migration failed', err);
+  }
 }
 
 function migrateConversation(c: any): Conversation {
   const isLegacy = c.title === undefined && c.summary !== undefined;
   let title: string = isLegacy ? (c.description ?? '') : (c.title ?? '');
-  // Drop stale "agentsflow:<id>" placeholder names from earlier versions so the
-  // poller can replace them with Claude's auto-generated name.
   if (/^agentsflow:[0-9a-f]+$/i.test(title)) title = '';
   return {
     id: c.id,
@@ -33,7 +64,6 @@ function migrateConversation(c: any): Conversation {
     directoryPath: c.directoryPath ?? '',
     displayName: c.displayName ?? '',
     title,
-    titleLocked: isLegacy ? (c.descriptionLocked ?? false) : (c.titleLocked ?? false),
     description: isLegacy ? (c.summary ?? '') : (c.description ?? ''),
     pinned: c.pinned ?? true,
     state: c.state ?? '',

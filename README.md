@@ -1,8 +1,20 @@
 # AgentsFlow
 
+![Home – pinned conversations and tracked directories](./assets/screenshots/home.png)
+![Embedded terminal attached to a background session](./assets/screenshots/terminal.png)
+![File editor with git-aware sidebar](./assets/screenshots/file-editor.png)
+
 Electron + Next.js desktop UI for **Claude Code's background agents** — track only the sessions this app launches, treat them like a to-do list, and inspect the working tree of each one without leaving the window.
 
 > Status: early. Built against Claude Code CLI **v2.1.139+** (`claude agents` / `claude --bg`).
+
+## Why
+
+Built to scratch three specific itches working with Claude Code day-to-day:
+
+1. **Agent management in the CLI is ugly.** `claude agents` is functional but unpleasant to live in — no real overview, no pinning, no per-directory grouping. AgentsFlow turns background sessions into a visual to-do list scoped to the agents *you* launched from this app.
+2. **No native Markdown editor.** When an agent is working in a repo full of `.md` files, there's nowhere to read or edit them comfortably without alt-tabbing to another app. AgentsFlow ships an Obsidian-style live Markdown editor inline, next to the chat.
+3. **No tree preview.** Watching agents touch a codebase is hard without seeing the working tree. AgentsFlow shows a `git status`-colored file tree per session, with an embedded shell, so you can inspect changes the moment the agent finishes — no terminal-juggling.
 
 ## Highlights
 

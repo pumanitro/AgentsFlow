@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#1f2435"/>
+      <stop offset="100%" stop-color="#0c0e14"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.32" cy="0.22" r="0.9">
+      <stop offset="0%" stop-color="#ffffff" stop-opacity="0.10"/>
+      <stop offset="60%" stop-color="#ffffff" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="bar1" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#ff7847"/>
+      <stop offset="100%" stop-color="#ffa274"/>
+    </linearGradient>
+    <linearGradient id="bar2" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#ff7847" stop-opacity="0.78"/>
+      <stop offset="100%" stop-color="#ffa274" stop-opacity="0.78"/>
+    </linearGradient>
+    <linearGradient id="bar3" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#ff7847" stop-opacity="0.52"/>
+      <stop offset="100%" stop-color="#ffa274" stop-opacity="0.52"/>
+    </linearGradient>
+    <filter id="soft" x="-10%" y="-10%" width="120%" height="120%">
+      <feGaussianBlur in="SourceGraphic" stdDeviation="6"/>
+    </filter>
+  </defs>
+
+  <!-- Squircle background -->
+  <rect x="0" y="0" width="1024" height="1024" rx="232" ry="232" fill="url(#bg)"/>
+  <rect x="0" y="0" width="1024" height="1024" rx="232" ry="232" fill="url(#glow)"/>
+  <!-- Subtle inner border for definition -->
+  <rect x="4" y="4" width="1016" height="1016" rx="228" ry="228" fill="none" stroke="#ffffff" stroke-opacity="0.06" stroke-width="2"/>
+
+  <!-- "Agent dots" — small leading circles indicating individual agents -->
+  <circle cx="282" cy="372" r="34" fill="#ff7847"/>
+  <circle cx="282" cy="512" r="34" fill="#ff7847" fill-opacity="0.78"/>
+  <circle cx="282" cy="652" r="34" fill="#ff7847" fill-opacity="0.52"/>
+
+  <!-- Three flow bars, progressively offset to suggest forward motion -->
+  <rect x="350" y="340" width="394" height="64" rx="32" ry="32" fill="url(#bar1)"/>
+  <rect x="350" y="480" width="310" height="64" rx="32" ry="32" fill="url(#bar2)"/>
+  <rect x="350" y="620" width="226" height="64" rx="32" ry="32" fill="url(#bar3)"/>
+
+  <!-- Soft glow under the brightest bar for a touch of depth -->
+  <rect x="354" y="356" width="386" height="40" rx="20" ry="20" fill="#ff7847" fill-opacity="0.28" filter="url(#soft)"/>
+</svg>

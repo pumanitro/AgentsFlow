@@ -73,7 +73,7 @@ export default function HistoryModal({ dir, conversations, onClose, onAttach, on
                   <button
                     onClick={() => onTogglePin(c)}
                     className={`text-xs px-2 py-1 rounded hover:bg-panel flex items-center gap-1 ${c.pinned ? 'text-muted hover:text-ok' : 'text-muted hover:text-accent'}`}
-                    title={c.pinned ? 'Mark done (move to history)' : 'Reopen on home'}
+                    title={c.pinned ? 'Mark done (move to history)' : 'Undo (move back to home)'}
                   >
                     {c.pinned ? (
                       <>
@@ -83,7 +83,7 @@ export default function HistoryModal({ dir, conversations, onClose, onAttach, on
                     ) : (
                       <>
                         <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M8 3a5 5 0 100 10 5 5 0 000-10zM2 8a6 6 0 1112 0A6 6 0 012 8zm7-3v3h2v1H8V5h1z"/></svg>
-                        Reopen
+                        Undo
                       </>
                     )}
                   </button>

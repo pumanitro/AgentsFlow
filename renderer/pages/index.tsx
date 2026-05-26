@@ -6,14 +6,16 @@ import SpawnBar from '../components/SpawnBar';
 import HistoryModal from '../components/HistoryModal';
 import HelpModal from '../components/HelpModal';
 import { api } from '../lib/ipc';
+import { useUIState } from '../lib/ui-state';
 import { Conversation, TrackedDirectory } from '../../shared/types';
 
 export default function Home() {
   const router = useRouter();
   const [dirs, setDirs] = useState<TrackedDirectory[]>([]);
   const [convs, setConvs] = useState<Conversation[]>([]);
-  const [selectedDirId, setSelectedDirId] = useState<string | null>(null);
+  const [selectedDirId, setSelectedDirId] = useUIState('selectedDirId');
   const [focusedConvIdx, setFocusedConvIdx] = useState<number>(-1);
+  const [keyboardNavActive, setKeyboardNavActive] = useState<boolean>(false);
   const [historyDirId, setHistoryDirId] = useState<string | null>(null);
   const [helpOpen, setHelpOpen] = useState(false);
 
@@ -73,18 +75,19 @@ export default function Home() {
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      const tag = (e.target as HTMLElement | null)?.tagName?.toLowerCase();
-      if (tag === 'input' || tag === 'textarea') return;
       if (historyDirId) return;
       if (pinnedConvs.length === 0) return;
+      if (!e.metaKey || e.altKey || e.ctrlKey) return;
 
-      if (e.key === 'ArrowDown' && !e.metaKey && !e.altKey && !e.ctrlKey) {
+      if (e.key === 'ArrowDown') {
         e.preventDefault();
+        setKeyboardNavActive(true);
         setFocusedConvIdx((i) => Math.min(pinnedConvs.length - 1, Math.max(0, i + 1)));
-      } else if (e.key === 'ArrowUp' && !e.metaKey && !e.altKey && !e.ctrlKey) {
+      } else if (e.key === 'ArrowUp') {
         e.preventDefault();
+        setKeyboardNavActive(true);
         setFocusedConvIdx((i) => Math.max(0, i - 1));
-      } else if (e.key === 'ArrowRight' && (e.metaKey || e.altKey)) {
+      } else if (e.key === 'ArrowRight') {
         if (focusedConvIdx >= 0 && focusedConvIdx < pinnedConvs.length) {
           e.preventDefault();
           const c = pinnedConvs[focusedConvIdx];
@@ -95,6 +98,13 @@ export default function Home() {
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, [pinnedConvs, focusedConvIdx, router, historyDirId]);
+
+  useEffect(() => {
+    if (!keyboardNavActive) return;
+    const onMove = () => setKeyboardNavActive(false);
+    window.addEventListener('mousemove', onMove);
+    return () => window.removeEventListener('mousemove', onMove);
+  }, [keyboardNavActive]);
 
   const handleAddDirectory = async () => {
     const dir = await api().addDirectory();
@@ -138,9 +148,17 @@ export default function Home() {
   return (
     <div className="h-screen flex flex-col">
       <header className="shrink-0 px-4 py-2.5 border-b border-border flex items-center justify-between" style={{ WebkitAppRegion: 'drag' } as React.CSSProperties}>
-        <div className="flex items-center gap-2 pl-24">
-          <div className="w-2 h-2 rounded-full bg-accent" />
-          <span className="font-semibold text-sm">AgentsFlow</span>
+        <div className="flex items-center gap-2.5 pl-24">
+          <svg viewBox="0 0 1024 1024" width="20" height="20" aria-hidden="true" className="shrink-0">
+            <rect x="0" y="0" width="1024" height="1024" rx="232" ry="232" fill="#181b25" />
+            <circle cx="282" cy="372" r="34" fill="#ff7847" />
+            <circle cx="282" cy="512" r="34" fill="#ff7847" fillOpacity="0.78" />
+            <circle cx="282" cy="652" r="34" fill="#ff7847" fillOpacity="0.52" />
+            <rect x="350" y="340" width="394" height="64" rx="32" ry="32" fill="#ff7847" />
+            <rect x="350" y="480" width="310" height="64" rx="32" ry="32" fill="#ff7847" fillOpacity="0.78" />
+            <rect x="350" y="620" width="226" height="64" rx="32" ry="32" fill="#ff7847" fillOpacity="0.52" />
+          </svg>
+          <span className="font-semibold text-sm tracking-tight">Agents Flow</span>
         </div>
         <button
           onClick={() => setHelpOpen(true)}
@@ -171,10 +189,10 @@ export default function Home() {
                   key={c.id}
                   conv={c}
                   focused={i === focusedConvIdx}
+                  suppressHover={keyboardNavActive}
                   onFocus={() => setFocusedConvIdx(i)}
                   onAttach={() => attach(c)}
-                  onSaveTitle={(t) => api().updateConversationTitle(c.id, t, true).then(refreshAll)}
-                  onResetTitle={() => api().updateConversationTitle(c.id, c.description || '', false).then(refreshAll)}
+                  onSaveTitle={(t) => api().updateConversationTitle(c.id, t).then(refreshAll)}
                   onMarkDone={() => api().setConversationPinned(c.id, false).then(refreshAll)}
                 />
               ))

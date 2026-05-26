@@ -1,8 +1,26 @@
-import { app, BrowserWindow, dialog, ipcMain } from 'electron';
+import { app, BrowserWindow, clipboard, dialog, ipcMain, nativeImage } from 'electron';
 import * as path from 'path';
 import * as fs from 'fs';
 import { v4 as uuid } from 'uuid';
 import serve from 'electron-serve';
+
+const APP_NAME = 'Agents Flow';
+app.setName(APP_NAME);
+
+// Resolve icon for both dev (running from source) and packaged builds.
+// __dirname in dev is dist/electron/electron, in packaged builds it lives under app.asar.
+function resolveIconPath(): string | null {
+  const candidates = [
+    path.join(__dirname, '..', '..', '..', 'assets', 'icon.png'),
+    path.join(process.resourcesPath || '', 'assets', 'icon.png'),
+    path.join(app.getAppPath(), 'assets', 'icon.png'),
+  ];
+  for (const p of candidates) {
+    try { if (fs.existsSync(p)) return p; } catch { /* ignore */ }
+  }
+  return null;
+}
+const ICON_PATH = resolveIconPath();
 
 import { store } from './store';
 import { computeDisplayName, recomputeAllDisplayNames } from './naming';
@@ -32,7 +50,9 @@ function createWindow() {
     minWidth: 760,
     minHeight: 520,
     backgroundColor: '#0f1115',
+    title: APP_NAME,
     titleBarStyle: 'hiddenInset',
+    ...(ICON_PATH ? { icon: ICON_PATH } : {}),
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -54,8 +74,16 @@ function createWindow() {
 }
 
 app.whenReady().then(() => {
+  if (process.platform === 'darwin' && app.dock && ICON_PATH) {
+    try {
+      const img = nativeImage.createFromPath(ICON_PATH);
+      if (!img.isEmpty()) app.dock.setIcon(img);
+    } catch (err) {
+      console.warn('[agentsflow] failed to set dock icon', err);
+    }
+  }
   createWindow();
-  startPoller(() => mainWindow, 30000);
+  startPoller(() => mainWindow);
 
   try {
     const result = sweepOrphanAttachments(store.getDirectories(), store.getConversations());
@@ -128,7 +156,6 @@ ipcMain.handle('convs:spawn', async (_e, req: SpawnRequest): Promise<{ conversat
     directoryPath: dir.path,
     displayName: dir.displayName,
     title: prompt.slice(0, 60),
-    titleLocked: false,
     description: 'starting…',
     pinned: true,
     attachments: req.attachments ?? [],
@@ -168,11 +195,9 @@ ipcMain.handle('convs:spawn', async (_e, req: SpawnRequest): Promise<{ conversat
 
   const job = readJobState(daemonShort);
   if (job) {
-    const claudeName = (job.name ?? '').trim();
     store.updateConversation(conversationId, {
       state: job.state ?? 'idle',
       description: (job.detail ?? optimistic.description) || 'starting…',
-      title: optimistic.titleLocked ? optimistic.title : (claudeName || optimistic.title),
     });
   }
 
@@ -183,8 +208,8 @@ ipcMain.handle('convs:spawn', async (_e, req: SpawnRequest): Promise<{ conversat
   return { conversationId, sessionId, daemonShort };
 });
 
-ipcMain.handle('convs:updateTitle', (_e, id: string, title: string, locked: boolean) => {
-  store.updateConversation(id, { title, titleLocked: locked });
+ipcMain.handle('convs:updateTitle', (_e, id: string, title: string) => {
+  store.updateConversation(id, { title });
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.webContents.send('conversations:updated', store.getConversations());
   }
@@ -255,6 +280,23 @@ ipcMain.handle('term:attach', (_e, conversationId: string, cols: number, rows: n
   return { channelId };
 });
 
+ipcMain.handle('term:attachShell', (_e, shellId: string, cwd: string, cols: number, rows: number) => {
+  console.log('[agentsflow] term:attachShell received', { shellId, cwd, cols, rows });
+  if (!shellId || typeof shellId !== 'string') throw new Error('shellId required');
+  if (!cwd || typeof cwd !== 'string') throw new Error('cwd required');
+  if (!fs.existsSync(cwd)) throw new Error(`cwd does not exist: ${cwd}`);
+  const win = mainWindow ?? BrowserWindow.fromWebContents(_e.sender);
+  if (!win) throw new Error('no window');
+  const channelId = uuid();
+  const replay = pty.attachShell({ shellId, channelId, cwd, cols, rows, win });
+  return { channelId, replay };
+});
+
+ipcMain.handle('term:killShell', (_e, shellId: string) => {
+  if (!shellId || typeof shellId !== 'string') return;
+  pty.killShell(shellId);
+});
+
 ipcMain.handle('term:write', (_e, channelId: string, data: string) => {
   pty.write(channelId, data);
 });
@@ -270,11 +312,110 @@ ipcMain.handle('term:detach', (_e, channelId: string) => {
 ipcMain.handle('git:status', async (_e, dirPath: string) => gitStatus(dirPath));
 ipcMain.handle('files:list', async (_e, dirPath: string) => listFiles(dirPath));
 
-ipcMain.handle('images:saveFromPaste', async (_e, dirPath: string, dataBase64: string, mimeType: string): Promise<{ savedPath: string }> => {
+ipcMain.handle('files:readText', async (_e, filePath: string) => {
+  const fsMod = require('fs') as typeof import('fs');
+  try {
+    const stat = fsMod.statSync(filePath);
+    const MAX = 2 * 1024 * 1024; // 2 MB cap for the editor
+    if (stat.size > MAX) {
+      return { content: '', size: stat.size, truncated: true, binary: false };
+    }
+    const buf = fsMod.readFileSync(filePath);
+    // Heuristic: any NUL byte in the first 8 KB → binary
+    const sniff = buf.subarray(0, Math.min(buf.length, 8192));
+    const isBinary = sniff.includes(0);
+    if (isBinary) {
+      return { content: '', size: stat.size, truncated: false, binary: true };
+    }
+    return { content: buf.toString('utf8'), size: stat.size, truncated: false, binary: false };
+  } catch (err) {
+    return { content: '', size: 0, truncated: false, binary: false, error: (err as Error).message };
+  }
+});
+
+ipcMain.handle('files:writeText', async (_e, filePath: string, content: string) => {
+  const fsMod = require('fs') as typeof import('fs');
+  fsMod.writeFileSync(filePath, content, 'utf8');
+  return { ok: true as const };
+});
+
+ipcMain.handle('files:readBinary', async (_e, filePath: string) => {
+  const fsMod = require('fs') as typeof import('fs');
+  const pathMod = require('path') as typeof import('path');
+  const MIME: Record<string, string> = {
+    png: 'image/png',
+    jpg: 'image/jpeg', jpeg: 'image/jpeg',
+    gif: 'image/gif',
+    webp: 'image/webp',
+    svg: 'image/svg+xml',
+    bmp: 'image/bmp',
+    ico: 'image/x-icon',
+    avif: 'image/avif',
+  };
+  try {
+    const stat = fsMod.statSync(filePath);
+    const MAX = 8 * 1024 * 1024;
+    if (stat.size > MAX) return { dataUrl: '', mime: '', size: stat.size, truncated: true };
+    const ext = pathMod.extname(filePath).slice(1).toLowerCase();
+    const mime = MIME[ext] || 'application/octet-stream';
+    const buf = fsMod.readFileSync(filePath);
+    return { dataUrl: `data:${mime};base64,${buf.toString('base64')}`, mime, size: stat.size, truncated: false };
+  } catch (err) {
+    return { dataUrl: '', mime: '', size: 0, truncated: false, error: (err as Error).message };
+  }
+});
+
+ipcMain.handle('files:rename', async (_e, oldPath: string, newPath: string) => {
+  const fsMod = require('fs') as typeof import('fs');
+  const pathMod = require('path') as typeof import('path');
+  if (!pathMod.isAbsolute(oldPath) || !pathMod.isAbsolute(newPath)) {
+    throw new Error('rename: paths must be absolute');
+  }
+  if (fsMod.existsSync(newPath)) {
+    throw new Error(`rename: target already exists at ${newPath}`);
+  }
+  fsMod.mkdirSync(pathMod.dirname(newPath), { recursive: true });
+  fsMod.renameSync(oldPath, newPath);
+  return { ok: true as const };
+});
+
+ipcMain.handle('files:remove', async (_e, targetPath: string) => {
+  const fsMod = require('fs') as typeof import('fs');
+  const pathMod = require('path') as typeof import('path');
+  if (!pathMod.isAbsolute(targetPath)) {
+    throw new Error('remove: path must be absolute');
+  }
+  // Guardrails: refuse to nuke roots / very short paths.
+  if (targetPath === '/' || targetPath.split(pathMod.sep).filter(Boolean).length < 2) {
+    throw new Error(`remove: refusing to delete suspicious path ${targetPath}`);
+  }
+  fsMod.rmSync(targetPath, { recursive: true, force: false });
+  return { ok: true as const };
+});
+
+ipcMain.handle('clipboard:copyImage', async (_e, filePath: string): Promise<{ ok: true } | { ok: false; error: string }> => {
+  const pathMod = require('path') as typeof import('path');
+  const IMAGE_EXTS = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'svg', 'ico', 'avif', 'tif', 'tiff']);
+  if (!pathMod.isAbsolute(filePath)) return { ok: false, error: 'path must be absolute' };
+  const ext = pathMod.extname(filePath).slice(1).toLowerCase();
+  if (!IMAGE_EXTS.has(ext)) return { ok: false, error: `not an image (.${ext})` };
+  try {
+    const img = nativeImage.createFromPath(filePath);
+    if (img.isEmpty()) return { ok: false, error: 'failed to decode image' };
+    clipboard.writeImage(img);
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: (err as Error)?.message ?? String(err) };
+  }
+});
+
+ipcMain.handle('images:saveFromPaste', async (_e, dirPath: string | null, dataBase64: string, mimeType: string): Promise<{ savedPath: string }> => {
   const fsMod = require('fs') as typeof import('fs');
   const pathMod = require('path') as typeof import('path');
   const ext = (mimeType.split('/')[1] || 'png').replace(/[^a-z0-9]/gi, '') || 'png';
-  const targetDir = pathMod.join(dirPath, '.agentsflow', 'images');
+  const targetDir = dirPath
+    ? pathMod.join(dirPath, '.agentsflow', 'images')
+    : pathMod.join(app.getPath('userData'), 'pasted-images');
   fsMod.mkdirSync(targetDir, { recursive: true });
   const filename = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${ext}`;
   const fullPath = pathMod.join(targetDir, filename);
