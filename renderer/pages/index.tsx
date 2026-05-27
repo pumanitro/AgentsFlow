@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useRouter } from 'next/router';
 import PinnedRow from '../components/PinnedRow';
 import DividerRow from '../components/DividerRow';
@@ -30,6 +30,8 @@ export default function Home() {
   const [historyDirId, setHistoryDirId] = useState<string | null>(null);
   const [helpOpen, setHelpOpen] = useState(false);
   const [pendingRenameDividerId, setPendingRenameDividerId] = useState<string | null>(null);
+  const awaitingNewConvRef = useRef<Set<string> | null>(null);
+  const [pendingFocusConvId, setPendingFocusConvId] = useState<string | null>(null);
   const [dragKey, setDragKey] = useState<string | null>(null);
   const [dropTargetIdx, setDropTargetIdx] = useState<number | null>(null);
 
@@ -197,10 +199,48 @@ export default function Home() {
 
   const handleSpawn = async (prompt: string, attachments: string[] = []) => {
     if (!selectedDir) return;
+    // Snapshot pinned conv ids *before* the spawn so the effect below can focus whichever
+    // new conv lands first — the optimistic broadcast usually arrives well before the
+    // spawnAgent IPC resolves, and we want the focus to follow it without delay.
+    awaitingNewConvRef.current = new Set(
+      pinnedItems.filter((it) => it.kind === 'conversation').map((it) => it.id),
+    );
     await api().spawnAgent({ directoryId: selectedDir.id, prompt, attachments });
     const c = await api().listConversations();
     setConvs(c);
   };
+
+  // Detect the newly-spawned conv as soon as it lands in pinnedItems.
+  useEffect(() => {
+    const expecting = awaitingNewConvRef.current;
+    if (!expecting) return;
+    for (let i = 0; i < pinnedItems.length; i++) {
+      const it = pinnedItems[i];
+      if (it.kind === 'conversation' && !expecting.has(it.id)) {
+        setFocusedIdx(i);
+        setPendingFocusConvId(it.id);
+        awaitingNewConvRef.current = null;
+        return;
+      }
+    }
+  }, [pinnedItems]);
+
+  // The conversations:updated and pinnedOrder:updated broadcasts can arrive in separate
+  // ticks. While the former has fired but the latter hasn't, the new conv sits at the end
+  // of pinnedItems via the defensive fallback in the useMemo above — focusing there would
+  // strand the cursor on a stale row once pinnedOrder lands. Keep re-resolving focusedIdx
+  // from the conv id until the conv is actually in pinnedOrder (its slot is then stable).
+  useEffect(() => {
+    if (!pendingFocusConvId) return;
+    const idx = pinnedItems.findIndex(
+      (it) => it.kind === 'conversation' && it.id === pendingFocusConvId,
+    );
+    if (idx < 0) return;
+    setFocusedIdx(idx);
+    if (pinnedOrder.some((r) => r.kind === 'conversation' && r.id === pendingFocusConvId)) {
+      setPendingFocusConvId(null);
+    }
+  }, [pendingFocusConvId, pinnedItems, pinnedOrder]);
 
   const attach = (c: Conversation) => {
     // eslint-disable-next-line no-console

@@ -8,7 +8,7 @@ import { Conversation } from '../../shared/types';
 export function statusDotClass(c: Pick<Conversation, 'pinned' | 'state' | 'status'>): string {
   if (!c.pinned) return 'bg-subtle';
   const { state, status } = c;
-  if (state === 'working' || status === 'working') return 'bg-accent animate-pulse';
+  if (state === 'working' || status === 'working') return 'bg-info animate-pulse';
   if (state === 'needs-input' || state === 'blocked' || status === 'needs-input') return 'bg-warn animate-pulse';
   if (state === 'done' || state === 'completed' || status === 'completed') return 'bg-ok';
   if (state === 'failed' || status === 'failed') return 'bg-err';

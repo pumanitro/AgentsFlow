@@ -161,6 +161,20 @@ function prependPinnedRef(s: StoreShape, ref: PinnedItemRef): void {
   s.pinnedOrder = [ref, ...s.pinnedOrder];
 }
 
+function insertPinnedRefAfterFirstDivider(s: StoreShape, ref: PinnedItemRef): void {
+  dropPinnedRef(s, ref);
+  const firstDividerIdx = s.pinnedOrder.findIndex((r) => r.kind === 'divider');
+  if (firstDividerIdx < 0) {
+    s.pinnedOrder = [ref, ...s.pinnedOrder];
+    return;
+  }
+  s.pinnedOrder = [
+    ...s.pinnedOrder.slice(0, firstDividerIdx + 1),
+    ref,
+    ...s.pinnedOrder.slice(firstDividerIdx + 1),
+  ];
+}
+
 export const store = {
   getDirectories(): TrackedDirectory[] {
     return load().directories;
@@ -179,7 +193,7 @@ export const store = {
   addConversation(c: Conversation): void {
     const s = load();
     s.conversations = [c, ...s.conversations.filter((x) => x.id !== c.id)];
-    if (c.pinned) prependPinnedRef(s, { kind: 'conversation', id: c.id });
+    if (c.pinned) insertPinnedRefAfterFirstDivider(s, { kind: 'conversation', id: c.id });
     save();
   },
   updateConversation(id: string, patch: Partial<Conversation>): Conversation | null {

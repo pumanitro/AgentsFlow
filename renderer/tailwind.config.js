@@ -7,7 +7,7 @@ module.exports = {
     path.join(__dirname, 'components/**/*.{ts,tsx}'),
   ],
   safelist: [
-    'bg-accent', 'bg-accent2', 'bg-ok', 'bg-warn', 'bg-err', 'bg-muted',
+    'bg-accent', 'bg-accent2', 'bg-ok', 'bg-warn', 'bg-err', 'bg-muted', 'bg-info',
     'animate-pulse',
   ],
   theme: {
@@ -25,6 +25,7 @@ module.exports = {
         ok: '#4ade80',
         warn: '#fbbf24',
         err: '#ef4444',
+        info: '#3b82f6',
       },
       fontFamily: {
         mono: ['ui-monospace', 'SFMono-Regular', 'Menlo', 'Consolas', 'monospace'],
