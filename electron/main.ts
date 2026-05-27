@@ -34,6 +34,7 @@ import {
 } from './claude-cli';
 import { refreshNow, startPoller, stopPoller, syncWatchers, unwatchConversation, watchConversation } from './poller';
 import * as pty from './pty-manager';
+import * as fileWatcher from './file-watcher';
 import { gitStatus, listFiles } from './git';
 import { deleteAttachmentFiles, sweepOrphanAttachments } from './attachments';
 import { Conversation, PinnedDivider, PinnedItemRef, SpawnRequest, TrackedDirectory } from '../shared/types';
@@ -100,6 +101,7 @@ app.whenReady().then(() => {
 app.on('window-all-closed', () => {
   stopPoller();
   pty.detachAll();
+  fileWatcher.unwatchAll().catch(() => undefined);
   if (process.platform !== 'darwin') app.quit();
 });
 
@@ -351,6 +353,18 @@ ipcMain.handle('term:detach', (_e, channelId: string) => {
 
 ipcMain.handle('git:status', async (_e, dirPath: string) => gitStatus(dirPath));
 ipcMain.handle('files:list', async (_e, dirPath: string) => listFiles(dirPath));
+
+ipcMain.handle('files:watch', async (e, dirPath: string) => {
+  const win = BrowserWindow.fromWebContents(e.sender) ?? mainWindow;
+  if (!win) return;
+  await fileWatcher.watch(dirPath, win);
+});
+
+ipcMain.handle('files:unwatch', async (e, dirPath: string) => {
+  const win = BrowserWindow.fromWebContents(e.sender) ?? mainWindow;
+  if (!win) return;
+  await fileWatcher.unwatch(dirPath, win);
+});
 
 ipcMain.handle('files:readText', async (_e, filePath: string) => {
   const fsMod = require('fs') as typeof import('fs');

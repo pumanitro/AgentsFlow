@@ -33,6 +33,13 @@ export interface JobState {
     queued?: number;
     kinds?: string[];
   };
+  // Daemon writes these when a turn ends on AskUserQuestion. `state`/`detail`
+  // are sometimes left stale ("working" / "starting…") in that case, so the
+  // presence of `block.questions` or `needs` is the authoritative signal.
+  needs?: string;
+  block?: {
+    questions?: { question?: string; options?: { label?: string; description?: string }[] }[];
+  };
 }
 
 // Strip ANSI escape sequences. Claude emits colorized output when FORCE_COLOR is set

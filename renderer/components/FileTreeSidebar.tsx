@@ -176,6 +176,32 @@ function isImageFile(name: string): boolean {
   return IMAGE_EXTS.has(fileExt(name));
 }
 
+// Order-sensitive equality on the fields we render — lets refresh skip
+// setState (and the downstream tree rebuild + render) when the watcher
+// fires but nothing visible actually changed.
+function statusEquals(a: GitStatusResult | null, b: GitStatusResult | null): boolean {
+  if (a === b) return true;
+  if (!a || !b) return false;
+  if (a.isRepo !== b.isRepo || a.branch !== b.branch) return false;
+  if (a.entries.length !== b.entries.length) return false;
+  for (let i = 0; i < a.entries.length; i++) {
+    const x = a.entries[i];
+    const y = b.entries[i];
+    if (x.path !== y.path || x.status !== y.status) return false;
+  }
+  return true;
+}
+
+function filesEquals(a: FileEntry[] | null, b: FileEntry[] | null): boolean {
+  if (a === b) return true;
+  if (!a || !b) return false;
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    if (a[i].path !== b[i].path || a[i].isIgnored !== b[i].isIgnored) return false;
+  }
+  return true;
+}
+
 function FileIcon({ name }: { name: string }) {
   const ext = fileExt(name);
   const color = EXT_COLOR[ext] ?? '#64748b';
@@ -314,17 +340,17 @@ export default function FileTreeSidebar({ dirPath, conversationId, onFileOpen, o
         // Always fetch git status so Files mode can color files too.
         if (typeof a.gitStatus === 'function') {
           const s = await a.gitStatus(dirPath);
-          setStatus(s);
+          setStatus((prev) => (statusEquals(prev, s) ? prev : s));
         } else {
-          setStatus({ isRepo: false, entries: [] });
+          setStatus((prev) => (prev && !prev.isRepo && prev.entries.length === 0 ? prev : { isRepo: false, entries: [] }));
         }
         if (mode === 'files') {
           if (typeof a.listFiles !== 'function') {
-            setFiles([]);
+            setFiles((prev) => (prev && prev.length === 0 ? prev : []));
             return;
           }
           const f = await a.listFiles(dirPath);
-          setFiles(f);
+          setFiles((prev) => (filesEquals(prev, f) ? prev : f));
         }
       } catch (err) {
         // eslint-disable-next-line no-console
@@ -337,8 +363,34 @@ export default function FileTreeSidebar({ dirPath, conversationId, onFileOpen, o
   );
 
   useEffect(() => { refresh(); }, [refresh]);
+
+  // Push-based refresh: subscribe to filesystem events for this directory.
+  // Replaces the old 4 s polling interval — updates fire ~150 ms after the
+  // last write, regardless of who made it (user, Claude agent, build tool).
   useEffect(() => {
-    const t = setInterval(() => { refresh(); }, 4000);
+    const a = api();
+    if (typeof a.watchFiles !== 'function' || typeof a.onFilesUpdated !== 'function') return;
+    let cancelled = false;
+    a.watchFiles(dirPath).catch((err) => {
+      // eslint-disable-next-line no-console
+      console.error('[agentsflow] watchFiles failed', dirPath, err);
+    });
+    const off = a.onFilesUpdated((p) => {
+      if (cancelled) return;
+      if (p === dirPath) refresh();
+    });
+    return () => {
+      cancelled = true;
+      off();
+      a.unwatchFiles?.(dirPath).catch(() => undefined);
+    };
+  }, [dirPath, refresh]);
+
+  // Slow heartbeat backstop: filesystem events can be dropped on network
+  // volumes (SMB, NFS, some sync clients). A 30 s tick guarantees we
+  // reconcile even when the watcher misses something.
+  useEffect(() => {
+    const t = setInterval(() => { refresh(); }, 30_000);
     return () => clearInterval(t);
   }, [refresh]);
 

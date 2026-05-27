@@ -59,6 +59,14 @@ const api: AgentsFlowApi = {
 
   gitStatus: (dirPath) => ipcRenderer.invoke('git:status', dirPath),
   listFiles: (dirPath) => ipcRenderer.invoke('files:list', dirPath),
+
+  watchFiles: (dirPath) => ipcRenderer.invoke('files:watch', dirPath),
+  unwatchFiles: (dirPath) => ipcRenderer.invoke('files:unwatch', dirPath),
+  onFilesUpdated: (cb) => {
+    const listener = (_e: IpcRendererEvent, dirPath: string) => cb(dirPath);
+    ipcRenderer.on('files:updated', listener);
+    return () => ipcRenderer.removeListener('files:updated', listener);
+  },
   saveImageFromPaste: (dirPath, dataBase64, mimeType) =>
     ipcRenderer.invoke('images:saveFromPaste', dirPath, dataBase64, mimeType),
   readTextFile: (filePath) => ipcRenderer.invoke('files:readText', filePath),

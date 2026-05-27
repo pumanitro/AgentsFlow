@@ -5,6 +5,7 @@ import * as path from 'path';
 import { listAgents, readJobState } from './claude-cli';
 import { store } from './store';
 import { Conversation } from '../shared/types';
+import { effectiveState, deriveDescription } from './derive-state';
 
 let fallbackTimer: NodeJS.Timeout | null = null;
 const watchers = new Map<string, fs.FSWatcher>();
@@ -33,39 +34,6 @@ function schedulePush(): void {
       win.webContents.send('conversations:updated', store.getConversations());
     }
   });
-}
-
-function deriveDescription(job: NonNullable<ReturnType<typeof readJobState>>): string {
-  const detail = (job.detail || job.output?.result || '').trim();
-  if (detail) return detail;
-  const state = (job.state || '').toLowerCase();
-  const tempo = (job.tempo || '').toLowerCase();
-  const kinds = job.inFlight?.kinds ?? [];
-  const tasks = job.inFlight?.tasks ?? 0;
-  if (state === 'blocked' || state === 'needs-input') return 'waiting for your input';
-  if (state === 'failed' || state === 'error') return 'failed';
-  if (state === 'done' || state === 'completed') return 'completed';
-  if (state === 'starting') return 'starting…';
-  // Anything else we treat as in-flight work
-  const active = state === 'working' || state === 'active' || tempo === 'active' || tasks > 0;
-  if (active) {
-    if (kinds.length > 0) {
-      const uniq = Array.from(new Set(kinds)).slice(0, 3).join(', ').toLowerCase();
-      return `working — ${uniq}…`;
-    }
-    return 'working…';
-  }
-  return state || 'idle';
-}
-
-function effectiveState(job: NonNullable<ReturnType<typeof readJobState>>): string | undefined {
-  const tempo = (job.tempo || '').toLowerCase();
-  const tasks = job.inFlight?.tasks ?? 0;
-  // If Claude is actually doing work right now, treat the conversation as "working"
-  // even if state.json/state still says "done" from the previous turn. This makes the
-  // status dot react to follow-up prompts instead of getting stuck green.
-  if (tempo === 'active' || tasks > 0) return 'working';
-  return job.state;
 }
 
 function applyJobToConversation(c: Conversation): { next: Conversation; changed: boolean } {

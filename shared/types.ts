@@ -82,6 +82,15 @@ export interface AgentsFlowApi {
 
   gitStatus: (dirPath: string) => Promise<GitStatusResult>;
   listFiles: (dirPath: string) => Promise<FileEntry[]>;
+
+  // Subscribe to filesystem changes for `dirPath`. The callback is invoked
+  // (after a small debounce) when files in the workspace change. Call the
+  // returned function to unsubscribe — the underlying watcher is reference-
+  // counted, so the OS-level subscription is torn down only when no
+  // listeners remain for that path.
+  watchFiles: (dirPath: string) => Promise<void>;
+  unwatchFiles: (dirPath: string) => Promise<void>;
+  onFilesUpdated: (cb: (dirPath: string) => void) => () => void;
   saveImageFromPaste: (dirPath: string | null, dataBase64: string, mimeType: string) => Promise<{ savedPath: string }>;
 
   readTextFile: (filePath: string) => Promise<ReadFileResult>;

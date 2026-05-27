@@ -323,5 +323,12 @@ export function createMockApi(): AgentsFlowApi {
       { path: 'node_modules/react/package.json', isIgnored: true },
       { path: '.next/cache/data.bin', isIgnored: true },
     ],
+
+    // File-watcher push API: no-op in mock mode (no real filesystem to watch
+    // when running outside Electron). The slow heartbeat in FileTreeSidebar
+    // still triggers refreshes so the demo data appears.
+    watchFiles: async () => undefined,
+    unwatchFiles: async () => undefined,
+    onFilesUpdated: () => () => undefined,
   };
 }
