@@ -25,6 +25,16 @@ export interface Conversation {
   lastPrompt: string;
 }
 
+export interface PinnedDivider {
+  id: string;
+  title: string;
+  createdAt: string;
+}
+
+export type PinnedItemRef =
+  | { kind: 'conversation'; id: string }
+  | { kind: 'divider'; id: string };
+
 export interface SpawnRequest {
   directoryId: string;
   prompt: string;
@@ -60,6 +70,15 @@ export interface AgentsFlowApi {
   onTerminalExit: (cb: (channelId: string) => void) => () => void;
 
   onConversationsUpdated: (cb: (conversations: Conversation[]) => void) => () => void;
+
+  listDividers: () => Promise<PinnedDivider[]>;
+  addDivider: (afterRef: PinnedItemRef | null) => Promise<PinnedDivider>;
+  renameDivider: (id: string, title: string) => Promise<void>;
+  removeDivider: (id: string) => Promise<void>;
+  listPinnedOrder: () => Promise<PinnedItemRef[]>;
+  reorderPinned: (orderedRefs: PinnedItemRef[]) => Promise<void>;
+  onDividersUpdated: (cb: (dividers: PinnedDivider[]) => void) => () => void;
+  onPinnedOrderUpdated: (cb: (order: PinnedItemRef[]) => void) => () => void;
 
   gitStatus: (dirPath: string) => Promise<GitStatusResult>;
   listFiles: (dirPath: string) => Promise<FileEntry[]>;

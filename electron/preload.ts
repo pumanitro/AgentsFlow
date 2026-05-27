@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer, IpcRendererEvent } from 'electron';
-import type { AgentsFlowApi, Conversation, SpawnRequest } from '../shared/types';
+import type { AgentsFlowApi, Conversation, PinnedDivider, PinnedItemRef, SpawnRequest } from '../shared/types';
 
 const api: AgentsFlowApi = {
   listDirectories: () => ipcRenderer.invoke('dirs:list'),
@@ -38,6 +38,23 @@ const api: AgentsFlowApi = {
     const listener = (_e: IpcRendererEvent, conversations: Conversation[]) => cb(conversations);
     ipcRenderer.on('conversations:updated', listener);
     return () => ipcRenderer.removeListener('conversations:updated', listener);
+  },
+
+  listDividers: () => ipcRenderer.invoke('dividers:list'),
+  addDivider: (afterRef) => ipcRenderer.invoke('dividers:add', afterRef),
+  renameDivider: (id, title) => ipcRenderer.invoke('dividers:rename', id, title),
+  removeDivider: (id) => ipcRenderer.invoke('dividers:remove', id),
+  listPinnedOrder: () => ipcRenderer.invoke('pinned:list'),
+  reorderPinned: (orderedRefs) => ipcRenderer.invoke('pinned:reorder', orderedRefs),
+  onDividersUpdated: (cb) => {
+    const listener = (_e: IpcRendererEvent, dividers: PinnedDivider[]) => cb(dividers);
+    ipcRenderer.on('dividers:updated', listener);
+    return () => ipcRenderer.removeListener('dividers:updated', listener);
+  },
+  onPinnedOrderUpdated: (cb) => {
+    const listener = (_e: IpcRendererEvent, order: PinnedItemRef[]) => cb(order);
+    ipcRenderer.on('pinnedOrder:updated', listener);
+    return () => ipcRenderer.removeListener('pinnedOrder:updated', listener);
   },
 
   gitStatus: (dirPath) => ipcRenderer.invoke('git:status', dirPath),

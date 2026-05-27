@@ -118,6 +118,20 @@ function buildTree(items: { path: string; status?: GitEntryStatus; isIgnored?: b
   return root;
 }
 
+function collectDirPaths(root: TreeDir): string[] {
+  const out: string[] = [];
+  const walk = (n: TreeDir) => {
+    for (const c of n.children) {
+      if (c.kind === 'dir') {
+        out.push(c.path);
+        walk(c);
+      }
+    }
+  };
+  walk(root);
+  return out;
+}
+
 function flattenSingleChildDirs(root: TreeDir): TreeDir {
   // Collapse a/b/c into "a/b/c" if each level only has a single dir child.
   const rec = (n: TreeDir): TreeDir => {
@@ -365,6 +379,15 @@ export default function FileTreeSidebar({ dirPath, conversationId, onFileOpen, o
   const expanded = mode === 'changes' ? expandedChanges : expandedFiles;
   const setExpanded = mode === 'changes' ? setExpandedChanges : setExpandedFiles;
 
+  const toggleExpandAll = () => {
+    if (!tree) return;
+    if (expanded.size > 0) {
+      setExpanded(new Set());
+    } else {
+      setExpanded(new Set(collectDirPaths(tree)));
+    }
+  };
+
   const [menu, setMenu] = useState<{ x: number; y: number; node: TreeNode } | null>(null);
   useEffect(() => {
     if (!menu) return;
@@ -486,8 +509,51 @@ export default function FileTreeSidebar({ dirPath, conversationId, onFileOpen, o
           >Files</button>
         </div>
         <button
+          onClick={toggleExpandAll}
+          disabled={!tree || tree.children.length === 0}
+          className="ml-auto text-muted hover:text-text px-1.5 py-1 rounded hover:bg-panel2 disabled:opacity-40 disabled:cursor-not-allowed"
+          title={expanded.size > 0 ? 'Collapse all' : 'Expand all'}
+          aria-label={expanded.size > 0 ? 'Collapse all' : 'Expand all'}
+        >
+          {expanded.size > 0 ? (
+            // anything open → next click collapses (chevrons fold toward center line)
+            <svg
+              width="14"
+              height="14"
+              viewBox="0 0 16 16"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.6"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              aria-hidden
+            >
+              <path d="M4 2 L8 6 L12 2" />
+              <path d="M2 8 L14 8" />
+              <path d="M4 14 L8 10 L12 14" />
+            </svg>
+          ) : (
+            // nothing open → next click expands (chevrons unfold away from center line)
+            <svg
+              width="14"
+              height="14"
+              viewBox="0 0 16 16"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.6"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              aria-hidden
+            >
+              <path d="M4 6 L8 2 L12 6" />
+              <path d="M2 8 L14 8" />
+              <path d="M4 10 L8 14 L12 10" />
+            </svg>
+          )}
+        </button>
+        <button
           onClick={refresh}
-          className="ml-auto text-muted hover:text-text px-1.5 py-1 rounded hover:bg-panel2"
+          className="text-muted hover:text-text px-1.5 py-1 rounded hover:bg-panel2"
           title="Refresh"
         >{loading ? '…' : '↻'}</button>
       </div>

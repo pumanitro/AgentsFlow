@@ -14,8 +14,10 @@ const SHORTCUTS: { section: string; items: Shortcut[] }[] = [
   {
     section: 'Home view',
     items: [
-      { keys: ['⌘', '↑/↓'], desc: 'Move focus between pinned conversations (works while typing in the prompt)' },
+      { keys: ['⌘', '↑/↓'], desc: 'Move focus between pinned rows (works while typing in the prompt)' },
       { keys: ['⌘', '→'], desc: 'Open the focused conversation (attach terminal)' },
+      { keys: ['Shift', '↑/↓'], desc: 'Reorder the focused pinned row — works for both conversations and separators' },
+      { keys: ['+ Add separator'], desc: 'Inserts a labeled separator above the focused row (button next to "Pinned conversations")' },
       { keys: ['Enter'], desc: 'Send prompt (when input is focused)' },
       { keys: ['Shift', 'Enter'], desc: 'Newline in the spawn prompt' },
     ],

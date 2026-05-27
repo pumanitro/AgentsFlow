@@ -1,35 +1,58 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useRouter } from 'next/router';
 import PinnedRow from '../components/PinnedRow';
+import DividerRow from '../components/DividerRow';
 import DirectoryCard from '../components/DirectoryCard';
 import SpawnBar from '../components/SpawnBar';
 import HistoryModal from '../components/HistoryModal';
 import HelpModal from '../components/HelpModal';
 import { api } from '../lib/ipc';
 import { useUIState } from '../lib/ui-state';
-import { Conversation, TrackedDirectory } from '../../shared/types';
+import { Conversation, PinnedDivider, PinnedItemRef, TrackedDirectory } from '../../shared/types';
+
+type PinnedItem =
+  | { kind: 'conversation'; id: string; ref: PinnedItemRef; conv: Conversation }
+  | { kind: 'divider'; id: string; ref: PinnedItemRef; divider: PinnedDivider };
+
+function refKey(r: PinnedItemRef): string {
+  return `${r.kind}:${r.id}`;
+}
 
 export default function Home() {
   const router = useRouter();
   const [dirs, setDirs] = useState<TrackedDirectory[]>([]);
   const [convs, setConvs] = useState<Conversation[]>([]);
+  const [dividers, setDividers] = useState<PinnedDivider[]>([]);
+  const [pinnedOrder, setPinnedOrder] = useState<PinnedItemRef[]>([]);
   const [selectedDirId, setSelectedDirId] = useUIState('selectedDirId');
-  const [focusedConvIdx, setFocusedConvIdx] = useState<number>(-1);
+  const [focusedIdx, setFocusedIdx] = useState<number>(-1);
   const [keyboardNavActive, setKeyboardNavActive] = useState<boolean>(false);
   const [historyDirId, setHistoryDirId] = useState<string | null>(null);
   const [helpOpen, setHelpOpen] = useState(false);
+  const [pendingRenameDividerId, setPendingRenameDividerId] = useState<string | null>(null);
+  const [dragKey, setDragKey] = useState<string | null>(null);
+  const [dropTargetIdx, setDropTargetIdx] = useState<number | null>(null);
 
   const refreshAll = async () => {
-    const [d, c] = await Promise.all([api().listDirectories(), api().listConversations()]);
+    const [d, c, dv, po] = await Promise.all([
+      api().listDirectories(),
+      api().listConversations(),
+      api().listDividers(),
+      api().listPinnedOrder(),
+    ]);
     setDirs(d);
     setConvs(c);
+    setDividers(dv);
+    setPinnedOrder(po);
   };
 
   useEffect(() => { refreshAll(); }, []);
 
   useEffect(() => {
-    const off = api().onConversationsUpdated((next) => setConvs(next));
-    return off;
+    const offC = api().onConversationsUpdated((next) => setConvs(next));
+    const offD = api().onDividersUpdated((next) => setDividers(next));
+    const offO = api().onPinnedOrderUpdated((next) => setPinnedOrder(next));
+    return () => { offC(); offD(); offO(); };
   }, []);
 
   const selectedDir = useMemo(() => dirs.find((d) => d.id === selectedDirId) ?? null, [dirs, selectedDirId]);
@@ -45,59 +68,116 @@ export default function Home() {
     return map;
   }, [convs]);
 
-  const pinnedConvs = useMemo(
-    () => convs.filter((c) => c.pinned).sort((a, b) => b.createdAt.localeCompare(a.createdAt)),
-    [convs],
-  );
+  const pinnedItems = useMemo<PinnedItem[]>(() => {
+    const convById = new Map(convs.filter((c) => c.pinned).map((c) => [c.id, c]));
+    const divById = new Map(dividers.map((d) => [d.id, d]));
+    const out: PinnedItem[] = [];
+    const used = new Set<string>();
+    for (const ref of pinnedOrder) {
+      const key = refKey(ref);
+      if (used.has(key)) continue;
+      if (ref.kind === 'conversation') {
+        const c = convById.get(ref.id);
+        if (c) { out.push({ kind: 'conversation', id: c.id, ref, conv: c }); used.add(key); }
+      } else {
+        const d = divById.get(ref.id);
+        if (d) { out.push({ kind: 'divider', id: d.id, ref, divider: d }); used.add(key); }
+      }
+    }
+    // Append any pinned conv not in order (defensive — store usually backfills already).
+    for (const c of convById.values()) {
+      if (!used.has(`conversation:${c.id}`)) {
+        out.push({ kind: 'conversation', id: c.id, ref: { kind: 'conversation', id: c.id }, conv: c });
+      }
+    }
+    return out;
+  }, [convs, dividers, pinnedOrder]);
+
   const historyConvs = useMemo(
     () => (historyDirId ? convs.filter((c) => c.directoryId === historyDirId) : []),
     [convs, historyDirId],
   );
 
   useEffect(() => {
-    if (pinnedConvs.length === 0) {
-      if (focusedConvIdx !== -1) setFocusedConvIdx(-1);
+    if (pinnedItems.length === 0) {
+      if (focusedIdx !== -1) setFocusedIdx(-1);
       return;
     }
-    if (focusedConvIdx < 0 || focusedConvIdx >= pinnedConvs.length) {
-      setFocusedConvIdx(0);
+    if (focusedIdx < 0 || focusedIdx >= pinnedItems.length) {
+      setFocusedIdx(0);
     }
-  }, [pinnedConvs.length, focusedConvIdx]);
+  }, [pinnedItems.length, focusedIdx]);
 
   useEffect(() => {
     const raw = router.query.focus;
     const focusId = Array.isArray(raw) ? raw[0] : raw;
     if (!focusId) return;
-    const idx = pinnedConvs.findIndex((c) => c.id === focusId);
-    if (idx >= 0) setFocusedConvIdx(idx);
+    const idx = pinnedItems.findIndex((it) => it.kind === 'conversation' && it.id === focusId);
+    if (idx >= 0) setFocusedIdx(idx);
     router.replace({ pathname: '/' }, undefined, { shallow: true });
-  }, [router.query.focus, pinnedConvs, router]);
+  }, [router.query.focus, pinnedItems, router]);
+
+  const commitReorder = useCallback(async (nextOrder: PinnedItemRef[]) => {
+    setPinnedOrder(nextOrder); // optimistic
+    try { await api().reorderPinned(nextOrder); } catch (err) {
+      // eslint-disable-next-line no-console
+      console.error('[agentsflow] reorderPinned failed', err);
+    }
+  }, []);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (historyDirId) return;
-      if (pinnedConvs.length === 0) return;
-      if (!e.metaKey || e.altKey || e.ctrlKey) return;
+      if (pinnedItems.length === 0) return;
 
-      if (e.key === 'ArrowDown') {
-        e.preventDefault();
-        setKeyboardNavActive(true);
-        setFocusedConvIdx((i) => Math.min(pinnedConvs.length - 1, Math.max(0, i + 1)));
-      } else if (e.key === 'ArrowUp') {
-        e.preventDefault();
-        setKeyboardNavActive(true);
-        setFocusedConvIdx((i) => Math.max(0, i - 1));
-      } else if (e.key === 'ArrowRight') {
-        if (focusedConvIdx >= 0 && focusedConvIdx < pinnedConvs.length) {
+      const target = e.target as HTMLElement | null;
+      const inEditable = !!target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable);
+
+      // ⌘+↑/↓/→ — navigation / open. Works even inside the spawn prompt.
+      if (e.metaKey && !e.altKey && !e.ctrlKey && !e.shiftKey) {
+        if (e.key === 'ArrowDown') {
           e.preventDefault();
-          const c = pinnedConvs[focusedConvIdx];
-          if (c.sessionId) router.push({ pathname: '/session', query: { id: c.id } });
+          setKeyboardNavActive(true);
+          setFocusedIdx((i) => Math.min(pinnedItems.length - 1, Math.max(0, i + 1)));
+          return;
+        }
+        if (e.key === 'ArrowUp') {
+          e.preventDefault();
+          setKeyboardNavActive(true);
+          setFocusedIdx((i) => Math.max(0, i - 1));
+          return;
+        }
+        if (e.key === 'ArrowRight') {
+          if (focusedIdx >= 0 && focusedIdx < pinnedItems.length) {
+            const item = pinnedItems[focusedIdx];
+            if (item.kind === 'conversation') {
+              e.preventDefault();
+              if (item.conv.sessionId) router.push({ pathname: '/session', query: { id: item.id } });
+            }
+          }
+          return;
+        }
+      }
+
+      // Shift+↑/↓ — reorder focused row. Don't fight text-selection inside inputs.
+      if (e.shiftKey && !e.metaKey && !e.altKey && !e.ctrlKey && !inEditable) {
+        if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
+          if (focusedIdx < 0 || focusedIdx >= pinnedItems.length) return;
+          const delta = e.key === 'ArrowUp' ? -1 : 1;
+          const nextIdx = focusedIdx + delta;
+          if (nextIdx < 0 || nextIdx >= pinnedItems.length) return;
+          e.preventDefault();
+          setKeyboardNavActive(true);
+          const next = pinnedItems.map((it) => it.ref);
+          [next[focusedIdx], next[nextIdx]] = [next[nextIdx], next[focusedIdx]];
+          setFocusedIdx(nextIdx);
+          commitReorder(next);
         }
       }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [pinnedConvs, focusedConvIdx, router, historyDirId]);
+  }, [pinnedItems, focusedIdx, router, historyDirId, commitReorder]);
 
   useEffect(() => {
     if (!keyboardNavActive) return;
@@ -131,6 +211,76 @@ export default function Home() {
       return;
     }
     router.push({ pathname: '/session', query: { id: c.id } });
+  };
+
+  const handleAddDivider = async () => {
+    const afterRef = focusedIdx >= 0 && focusedIdx < pinnedItems.length
+      ? pinnedItems[focusedIdx].ref
+      : null;
+    const divider = await api().addDivider(afterRef);
+    setPendingRenameDividerId(divider.id);
+    // Focus the newly added divider once it lands in pinnedOrder.
+  };
+
+  // Focus newly created divider after it appears in pinnedItems.
+  useEffect(() => {
+    if (!pendingRenameDividerId) return;
+    const idx = pinnedItems.findIndex((it) => it.kind === 'divider' && it.id === pendingRenameDividerId);
+    if (idx >= 0) setFocusedIdx(idx);
+  }, [pendingRenameDividerId, pinnedItems]);
+
+  const handleDragStart = (key: string) => (e: React.DragEvent) => {
+    setDragKey(key);
+    e.dataTransfer.effectAllowed = 'move';
+    try { e.dataTransfer.setData('text/plain', key); } catch { /* some browsers throw on synthetic events */ }
+  };
+
+  const handleDragEnd = () => {
+    setDragKey(null);
+    setDropTargetIdx(null);
+  };
+
+  const handleRowDragOver = (idx: number) => (e: React.DragEvent) => {
+    if (!dragKey) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    const before = e.clientY < rect.top + rect.height / 2;
+    setDropTargetIdx(before ? idx : idx + 1);
+  };
+
+  const handleListDragLeave = (e: React.DragEvent) => {
+    // Only clear when leaving the list container itself.
+    if (e.currentTarget === e.target) setDropTargetIdx(null);
+  };
+
+  const handleDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    if (!dragKey || dropTargetIdx === null) {
+      setDragKey(null);
+      setDropTargetIdx(null);
+      return;
+    }
+    const fromIdx = pinnedItems.findIndex((it) => refKey(it.ref) === dragKey);
+    if (fromIdx < 0) {
+      setDragKey(null);
+      setDropTargetIdx(null);
+      return;
+    }
+    let toIdx = dropTargetIdx;
+    if (toIdx > fromIdx) toIdx -= 1; // splice math: removing item shifts later indices left
+    if (toIdx === fromIdx) {
+      setDragKey(null);
+      setDropTargetIdx(null);
+      return;
+    }
+    const next = pinnedItems.map((it) => it.ref);
+    const [moved] = next.splice(fromIdx, 1);
+    next.splice(toIdx, 0, moved);
+    setFocusedIdx(toIdx);
+    setDragKey(null);
+    setDropTargetIdx(null);
+    commitReorder(next);
   };
 
   const handleRemoveDirectory = async (dir: TrackedDirectory) => {
@@ -171,31 +321,71 @@ export default function Home() {
 
       <main className="flex-1 overflow-y-auto">
         <section className="px-4 pt-4">
-          <h2 className="text-xs uppercase tracking-wider text-muted mb-2">Pinned conversations</h2>
-          <div className="rounded-lg border border-border bg-panel/50 overflow-hidden">
-            <div className="grid grid-cols-[200px_minmax(0,1fr)_minmax(0,1fr)_auto] gap-3 px-4 py-2 text-[10px] uppercase tracking-wider text-muted border-b border-border">
+          <div className="flex items-center justify-between mb-2">
+            <h2 className="text-xs uppercase tracking-wider text-muted">Pinned conversations</h2>
+            <button
+              onClick={handleAddDivider}
+              className="text-[11px] text-muted hover:text-accent hover:border-accent border border-border bg-panel hover:bg-panel2 rounded px-2 py-0.5"
+              title="Insert a labeled separator above the focused row"
+            >+ Add separator</button>
+          </div>
+          <div
+            className="rounded-lg border border-border bg-panel/50 overflow-hidden"
+            onDragOver={(e) => { if (dragKey) e.preventDefault(); }}
+            onDragLeave={handleListDragLeave}
+            onDrop={handleDrop}
+          >
+            <div className="grid grid-cols-[16px_200px_minmax(0,1fr)_minmax(0,1fr)_auto] gap-3 px-4 py-2 text-[10px] uppercase tracking-wider text-muted border-b border-border">
+              <div></div>
               <div>Agent</div>
               <div>Title</div>
               <div>Description</div>
               <div></div>
             </div>
-            {pinnedConvs.length === 0 ? (
+            {pinnedItems.length === 0 ? (
               <div className="px-4 py-6 text-sm text-muted text-center">
                 No pinned conversations. Spawn one below — every new conversation is pinned by default; unpin keeps it in the directory's history.
               </div>
             ) : (
-              pinnedConvs.map((c, i) => (
-                <PinnedRow
-                  key={c.id}
-                  conv={c}
-                  focused={i === focusedConvIdx}
-                  suppressHover={keyboardNavActive}
-                  onFocus={() => setFocusedConvIdx(i)}
-                  onAttach={() => attach(c)}
-                  onSaveTitle={(t) => api().updateConversationTitle(c.id, t).then(refreshAll)}
-                  onMarkDone={() => api().setConversationPinned(c.id, false).then(refreshAll)}
-                />
-              ))
+              pinnedItems.map((item, i) => {
+                const key = refKey(item.ref);
+                const showInsertBefore = dropTargetIdx === i && dragKey !== null && dragKey !== key;
+                const showInsertAfter = dropTargetIdx === i + 1 && i === pinnedItems.length - 1 && dragKey !== null && dragKey !== key;
+                return (
+                  <div key={key} onDragOver={handleRowDragOver(i)}>
+                    {showInsertBefore && <div className="h-0.5 bg-accent" />}
+                    {item.kind === 'conversation' ? (
+                      <PinnedRow
+                        conv={item.conv}
+                        focused={i === focusedIdx}
+                        suppressHover={keyboardNavActive}
+                        onFocus={() => setFocusedIdx(i)}
+                        onAttach={() => attach(item.conv)}
+                        onSaveTitle={(t) => api().updateConversationTitle(item.id, t).then(refreshAll)}
+                        onMarkDone={() => api().setConversationPinned(item.id, false).then(refreshAll)}
+                        draggable
+                        onDragStart={handleDragStart(key)}
+                        onDragEnd={handleDragEnd}
+                      />
+                    ) : (
+                      <DividerRow
+                        divider={item.divider}
+                        focused={i === focusedIdx}
+                        suppressHover={keyboardNavActive}
+                        startInRename={pendingRenameDividerId === item.id}
+                        onRenameHandled={() => setPendingRenameDividerId(null)}
+                        onFocus={() => setFocusedIdx(i)}
+                        onSaveTitle={(t) => api().renameDivider(item.id, t)}
+                        onRemove={() => api().removeDivider(item.id)}
+                        draggable
+                        onDragStart={handleDragStart(key)}
+                        onDragEnd={handleDragEnd}
+                      />
+                    )}
+                    {showInsertAfter && <div className="h-0.5 bg-accent" />}
+                  </div>
+                );
+              })
             )}
           </div>
         </section>

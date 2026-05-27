@@ -36,7 +36,7 @@ import { refreshNow, startPoller, stopPoller, syncWatchers, unwatchConversation,
 import * as pty from './pty-manager';
 import { gitStatus, listFiles } from './git';
 import { deleteAttachmentFiles, sweepOrphanAttachments } from './attachments';
-import { Conversation, SpawnRequest, TrackedDirectory } from '../shared/types';
+import { Conversation, PinnedDivider, PinnedItemRef, SpawnRequest, TrackedDirectory } from '../shared/types';
 
 const isDev = process.env.NODE_ENV === 'development';
 const loadURL = isDev ? null : serve({ directory: path.join(__dirname, '..', '..', '..', 'renderer', 'out') });
@@ -105,6 +105,22 @@ app.on('window-all-closed', () => {
 
 // ----- IPC -----
 
+function broadcastConversations(): void {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('conversations:updated', store.getConversations());
+  }
+}
+function broadcastDividers(): void {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('dividers:updated', store.getDividers());
+  }
+}
+function broadcastPinnedOrder(): void {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('pinnedOrder:updated', store.getPinnedOrder());
+  }
+}
+
 ipcMain.handle('dirs:list', () => store.getDirectories());
 
 ipcMain.handle('dirs:add', async (): Promise<TrackedDirectory | null> => {
@@ -166,9 +182,8 @@ ipcMain.handle('convs:spawn', async (_e, req: SpawnRequest): Promise<{ conversat
     lastPrompt: prompt,
   };
   store.addConversation(optimistic);
-  if (mainWindow && !mainWindow.isDestroyed()) {
-    mainWindow.webContents.send('conversations:updated', store.getConversations());
-  }
+  broadcastConversations();
+  broadcastPinnedOrder();
 
   const startedBefore = Date.now();
   const claimedSessionIds = new Set(store.getConversations().map((c) => c.sessionId).filter(Boolean));
@@ -202,24 +217,19 @@ ipcMain.handle('convs:spawn', async (_e, req: SpawnRequest): Promise<{ conversat
   }
 
   await refreshNow();
-  if (mainWindow && !mainWindow.isDestroyed()) {
-    mainWindow.webContents.send('conversations:updated', store.getConversations());
-  }
+  broadcastConversations();
   return { conversationId, sessionId, daemonShort };
 });
 
 ipcMain.handle('convs:updateTitle', (_e, id: string, title: string) => {
   store.updateConversation(id, { title });
-  if (mainWindow && !mainWindow.isDestroyed()) {
-    mainWindow.webContents.send('conversations:updated', store.getConversations());
-  }
+  broadcastConversations();
 });
 
 ipcMain.handle('convs:setPinned', (_e, id: string, pinned: boolean) => {
   store.updateConversation(id, { pinned });
-  if (mainWindow && !mainWindow.isDestroyed()) {
-    mainWindow.webContents.send('conversations:updated', store.getConversations());
-  }
+  broadcastConversations();
+  broadcastPinnedOrder();
 });
 
 ipcMain.handle('convs:stop', async (_e, id: string) => {
@@ -236,9 +246,8 @@ ipcMain.handle('convs:remove', async (_e, id: string) => {
   unwatchConversation(id);
   deleteAttachmentFiles(conv.attachments);
   store.removeConversation(id);
-  if (mainWindow && !mainWindow.isDestroyed()) {
-    mainWindow.webContents.send('conversations:updated', store.getConversations());
-  }
+  broadcastConversations();
+  broadcastPinnedOrder();
 });
 
 ipcMain.handle('dirs:removeWithHistory', async (_e, id: string): Promise<{ removedConversations: number }> => {
@@ -254,10 +263,41 @@ ipcMain.handle('dirs:removeWithHistory', async (_e, id: string): Promise<{ remov
   }
   const dirs = store.getDirectories().filter((d) => d.id !== id);
   store.setDirectories(recomputeAllDisplayNames(dirs));
-  if (mainWindow && !mainWindow.isDestroyed()) {
-    mainWindow.webContents.send('conversations:updated', store.getConversations());
-  }
+  broadcastConversations();
+  broadcastPinnedOrder();
   return { removedConversations: targets.length };
+});
+
+ipcMain.handle('dividers:list', () => store.getDividers());
+
+ipcMain.handle('dividers:add', (_e, afterRef: PinnedItemRef | null): PinnedDivider => {
+  const divider: PinnedDivider = {
+    id: uuid(),
+    title: '',
+    createdAt: new Date().toISOString(),
+  };
+  store.addDivider(divider, afterRef ?? null);
+  broadcastDividers();
+  broadcastPinnedOrder();
+  return divider;
+});
+
+ipcMain.handle('dividers:rename', (_e, id: string, title: string) => {
+  store.updateDivider(id, { title });
+  broadcastDividers();
+});
+
+ipcMain.handle('dividers:remove', (_e, id: string) => {
+  store.removeDivider(id);
+  broadcastDividers();
+  broadcastPinnedOrder();
+});
+
+ipcMain.handle('pinned:list', () => store.getPinnedOrder());
+
+ipcMain.handle('pinned:reorder', (_e, orderedRefs: PinnedItemRef[]) => {
+  store.setPinnedOrder(Array.isArray(orderedRefs) ? orderedRefs : []);
+  broadcastPinnedOrder();
 });
 
 ipcMain.handle('term:attach', (_e, conversationId: string, cols: number, rows: number) => {

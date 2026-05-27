@@ -1,10 +1,12 @@
-import type { AgentsFlowApi, Conversation, TrackedDirectory, SpawnRequest, GitStatusResult, FileEntry } from '../../shared/types';
+import type { AgentsFlowApi, Conversation, PinnedDivider, PinnedItemRef, TrackedDirectory, SpawnRequest, GitStatusResult, FileEntry } from '../../shared/types';
 
-const STORE_KEY = 'agentsflow:mock:v2';
+const STORE_KEY = 'agentsflow:mock:v3';
 
 interface MockShape {
   directories: TrackedDirectory[];
   conversations: Conversation[];
+  dividers: PinnedDivider[];
+  pinnedOrder: PinnedItemRef[];
 }
 
 function uuid() {
@@ -14,7 +16,15 @@ function uuid() {
 function load(): MockShape {
   try {
     const raw = localStorage.getItem(STORE_KEY);
-    if (raw) return JSON.parse(raw);
+    if (raw) {
+      const parsed = JSON.parse(raw) as Partial<MockShape>;
+      return {
+        directories: parsed.directories ?? [],
+        conversations: parsed.conversations ?? [],
+        dividers: parsed.dividers ?? [],
+        pinnedOrder: parsed.pinnedOrder ?? [],
+      };
+    }
   } catch {}
   return {
     directories: [
@@ -23,6 +33,8 @@ function load(): MockShape {
       { id: uuid(), path: '/Users/demo/IdeaProjects/nutrable', displayName: 'nutrable', addedAt: new Date().toISOString() },
     ],
     conversations: [],
+    dividers: [],
+    pinnedOrder: [],
   };
 }
 
@@ -32,12 +44,28 @@ function save(state: MockShape) {
 
 const listeners = {
   convs: new Set<(c: Conversation[]) => void>(),
+  dividers: new Set<(d: PinnedDivider[]) => void>(),
+  pinnedOrder: new Set<(o: PinnedItemRef[]) => void>(),
   termData: new Set<(id: string, data: string) => void>(),
   termExit: new Set<(id: string) => void>(),
 };
 
 function fire(state: MockShape) {
   listeners.convs.forEach((cb) => cb(state.conversations));
+}
+function fireDividers(state: MockShape) {
+  listeners.dividers.forEach((cb) => cb(state.dividers));
+}
+function fireOrder(state: MockShape) {
+  listeners.pinnedOrder.forEach((cb) => cb(state.pinnedOrder));
+}
+
+function dropRef(state: MockShape, ref: PinnedItemRef) {
+  state.pinnedOrder = state.pinnedOrder.filter((r) => !(r.kind === ref.kind && r.id === ref.id));
+}
+function prependRef(state: MockShape, ref: PinnedItemRef) {
+  dropRef(state, ref);
+  state.pinnedOrder = [ref, ...state.pinnedOrder];
 }
 
 export function createMockApi(): AgentsFlowApi {
@@ -85,8 +113,10 @@ export function createMockApi(): AgentsFlowApi {
         lastPrompt: req.prompt,
       };
       state.conversations = [conv, ...state.conversations];
+      prependRef(state, { kind: 'conversation', id: conv.id });
       save(state);
       fire(state);
+      fireOrder(state);
 
       setTimeout(() => {
         state.conversations = state.conversations.map((c) =>
@@ -116,16 +146,24 @@ export function createMockApi(): AgentsFlowApi {
       fire(state);
     },
     setConversationPinned: async (id, pinned) => {
+      const prev = state.conversations.find((c) => c.id === id);
       state.conversations = state.conversations.map((c) => (c.id === id ? { ...c, pinned } : c));
+      if (prev && prev.pinned !== pinned) {
+        if (pinned) prependRef(state, { kind: 'conversation', id });
+        else dropRef(state, { kind: 'conversation', id });
+      }
       save(state);
       fire(state);
+      fireOrder(state);
     },
     removeDirectoryWithHistory: async (id) => {
       const targets = state.conversations.filter((c) => c.directoryId === id);
       state.conversations = state.conversations.filter((c) => c.directoryId !== id);
       state.directories = state.directories.filter((d) => d.id !== id);
+      for (const t of targets) dropRef(state, { kind: 'conversation', id: t.id });
       save(state);
       fire(state);
+      fireOrder(state);
       return { removedConversations: targets.length };
     },
     stopAgent: async (id) => {
@@ -135,9 +173,72 @@ export function createMockApi(): AgentsFlowApi {
     },
     removeAgent: async (id) => {
       state.conversations = state.conversations.filter((c) => c.id !== id);
+      dropRef(state, { kind: 'conversation', id });
       save(state);
       fire(state);
+      fireOrder(state);
     },
+
+    listDividers: async () => state.dividers,
+    addDivider: async (afterRef) => {
+      const divider: PinnedDivider = {
+        id: uuid(),
+        title: '',
+        createdAt: new Date().toISOString(),
+      };
+      state.dividers = [divider, ...state.dividers];
+      const ref: PinnedItemRef = { kind: 'divider', id: divider.id };
+      dropRef(state, ref);
+      if (!afterRef) {
+        state.pinnedOrder = [ref, ...state.pinnedOrder];
+      } else {
+        const idx = state.pinnedOrder.findIndex((r) => r.kind === afterRef.kind && r.id === afterRef.id);
+        if (idx < 0) {
+          state.pinnedOrder = [ref, ...state.pinnedOrder];
+        } else {
+          state.pinnedOrder = [
+            ...state.pinnedOrder.slice(0, idx),
+            ref,
+            ...state.pinnedOrder.slice(idx),
+          ];
+        }
+      }
+      save(state);
+      fireDividers(state);
+      fireOrder(state);
+      return divider;
+    },
+    renameDivider: async (id, title) => {
+      state.dividers = state.dividers.map((d) => (d.id === id ? { ...d, title } : d));
+      save(state);
+      fireDividers(state);
+    },
+    removeDivider: async (id) => {
+      state.dividers = state.dividers.filter((d) => d.id !== id);
+      dropRef(state, { kind: 'divider', id });
+      save(state);
+      fireDividers(state);
+      fireOrder(state);
+    },
+    listPinnedOrder: async () => state.pinnedOrder,
+    reorderPinned: async (orderedRefs) => {
+      const convIds = new Set(state.conversations.filter((c) => c.pinned).map((c) => c.id));
+      const divIds = new Set(state.dividers.map((d) => d.id));
+      const seen = new Set<string>();
+      const next: PinnedItemRef[] = [];
+      for (const r of orderedRefs) {
+        if (!r || typeof r.id !== 'string') continue;
+        const key = `${r.kind}:${r.id}`;
+        if (seen.has(key)) continue;
+        if (r.kind === 'conversation' && convIds.has(r.id)) { next.push(r); seen.add(key); }
+        else if (r.kind === 'divider' && divIds.has(r.id)) { next.push(r); seen.add(key); }
+      }
+      state.pinnedOrder = next;
+      save(state);
+      fireOrder(state);
+    },
+    onDividersUpdated: (cb) => { listeners.dividers.add(cb); return () => listeners.dividers.delete(cb); },
+    onPinnedOrderUpdated: (cb) => { listeners.pinnedOrder.add(cb); return () => listeners.pinnedOrder.delete(cb); },
 
     attachTerminal: async (conversationId) => {
       const channelId = uuid();
