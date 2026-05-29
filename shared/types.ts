@@ -22,6 +22,10 @@ export interface Conversation {
   status: string;
   intent: string;
   createdAt: string;
+  // ISO timestamp of the most recent pin→unpin transition. In AgentsFlow an
+  // unpinned conversation means the task is considered "done", so this doubles
+  // as the completion time. Undefined while still pinned / never unpinned.
+  unpinnedAt?: string;
   lastPrompt: string;
 }
 
@@ -91,7 +95,7 @@ export interface AgentsFlowApi {
   watchFiles: (dirPath: string) => Promise<void>;
   unwatchFiles: (dirPath: string) => Promise<void>;
   onFilesUpdated: (cb: (dirPath: string) => void) => () => void;
-  saveImageFromPaste: (dirPath: string | null, dataBase64: string, mimeType: string) => Promise<{ savedPath: string }>;
+  saveImageFromPaste: (dataBase64: string, mimeType: string) => Promise<{ savedPath: string }>;
 
   readTextFile: (filePath: string) => Promise<ReadFileResult>;
   writeTextFile: (filePath: string, content: string) => Promise<{ ok: true }>;
@@ -101,6 +105,10 @@ export interface AgentsFlowApi {
   removePath: (targetPath: string) => Promise<{ ok: true }>;
 
   copyImageToClipboard: (filePath: string) => Promise<{ ok: true } | { ok: false; error: string }>;
+
+  // Hands the file path to Electron's native drag-and-drop session so the
+  // user can drop the file on any external app (Finder, Chrome, etc.).
+  startFileDrag: (filePath: string) => Promise<void>;
 }
 
 export interface ReadBinaryResult {

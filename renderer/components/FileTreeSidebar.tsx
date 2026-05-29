@@ -237,12 +237,27 @@ const STATUS_STYLE: Record<GitEntryStatus, { fg: string; label: string }> = {
   unknown: { fg: 'text-muted', label: '' },
 };
 
-function FileRow({ node, depth, onOpen, isOpen, onContextMenu }: { node: TreeFile; depth: number; onOpen?: () => void; isOpen?: boolean; onContextMenu?: (e: React.MouseEvent) => void }) {
+function FileRow({ node, depth, absPath, onOpen, isOpen, onContextMenu }: { node: TreeFile; depth: number; absPath: string; onOpen?: () => void; isOpen?: boolean; onContextMenu?: (e: React.MouseEvent) => void }) {
   const style = node.status ? STATUS_STYLE[node.status] : null;
   const muted = node.isIgnored ? 'opacity-50' : '';
   const active = isOpen ? 'bg-panel2 border-l-2 border-l-accent' : 'border-l-2 border-l-transparent';
+  const handleDragStart = (e: React.DragEvent) => {
+    // Hand off to Electron's native drag-and-drop so external apps
+    // (Chrome, Finder, editors) receive the real file path. The web drag
+    // would only carry text and most targets ignore it.
+    e.preventDefault();
+    const a = api();
+    if (typeof a.startFileDrag === 'function') {
+      a.startFileDrag(absPath).catch((err) => {
+        // eslint-disable-next-line no-console
+        console.error('[agentsflow] startFileDrag failed', absPath, err);
+      });
+    }
+  };
   return (
     <div
+      draggable
+      onDragStart={handleDragStart}
       onClick={onOpen}
       onContextMenu={onContextMenu}
       className={`group flex items-center gap-2 pr-2 py-0.5 hover:bg-panel2 ${onOpen ? 'cursor-pointer' : 'cursor-default'} ${muted} ${active}`}
@@ -307,6 +322,7 @@ function TreeView({ root, expanded, setExpanded, onFileOpen, dirPath, openedFile
           key={c.path}
           node={c}
           depth={depth}
+          absPath={absPath}
           onOpen={onFileOpen ? () => onFileOpen(absPath) : undefined}
           isOpen={openedFilePath === absPath}
           onContextMenu={onContextMenu ? (e) => onContextMenu(e, c) : undefined}

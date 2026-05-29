@@ -5,7 +5,7 @@ import * as path from 'path';
 
 const CLAUDE_BIN = process.env.CLAUDE_BIN || 'claude';
 
-interface ClaudeAgentJsonRow {
+export interface ClaudeAgentJsonRow {
   pid: number;
   cwd: string;
   kind: string;
@@ -77,32 +77,53 @@ function runCmd(args: string[], opts: { cwd?: string; timeoutMs?: number } = {})
   });
 }
 
+export type ListAgentsResult =
+  | { ok: true; rows: ClaudeAgentJsonRow[] }
+  | { ok: false; reason: 'timeout' | 'exit' | 'read' | 'parse' };
+
 let _listAgentsDebugCount = 0;
+let _tmpCounter = 0;
+let _inFlightListAgents: Promise<ListAgentsResult> | null = null;
+
 /**
  * Some Electron environments truncate the streamed stdout from `claude agents --json`
  * around the OS pipe buffer (~8 KB), producing parse failures. Writing claude's
  * stdout to a temp file via shell redirection and reading the file back avoids
  * the parent-side stream entirely.
+ *
+ * Concurrent callers (the poller's fallback tick + a user-initiated `term:attach`)
+ * share a single in-flight invocation via singleflight; both get the same result
+ * instead of racing the temp file. Failed calls return ok:false so callers can
+ * distinguish "no agents running" from "the CLI choked" — the poller uses this
+ * to avoid mutating state on transient failures.
  */
-export async function listAgents(): Promise<ClaudeAgentJsonRow[]> {
-  const tmpFile = path.join(os.tmpdir(), `agentsflow-list-${process.pid}.json`);
+export function listAgentsResult(): Promise<ListAgentsResult> {
+  if (_inFlightListAgents) return _inFlightListAgents;
+  _inFlightListAgents = runListAgentsOnce().finally(() => { _inFlightListAgents = null; });
+  return _inFlightListAgents;
+}
+
+async function runListAgentsOnce(): Promise<ListAgentsResult> {
+  const tmpFile = path.join(os.tmpdir(), `agentsflow-list-${process.pid}-${++_tmpCounter}.json`);
   const result = await runCmdToFile(['agents', '--json'], tmpFile, { timeoutMs: 30000 });
   if (result.timedOut) {
     if (_listAgentsDebugCount++ < 3) {
       console.error('[agentsflow][listAgents] TIMED OUT');
     }
-    return [];
+    try { fs.unlinkSync(tmpFile); } catch {}
+    return { ok: false, reason: 'timeout' };
   }
   if (result.code !== 0) {
     if (_listAgentsDebugCount++ < 3) {
       console.error('[agentsflow][listAgents] non-zero exit', { code: result.code, stderr: result.stderr.slice(0, 200) });
     }
-    return [];
+    try { fs.unlinkSync(tmpFile); } catch {}
+    return { ok: false, reason: 'exit' };
   }
   let raw = '';
   try { raw = fs.readFileSync(tmpFile, 'utf8'); } catch (e) {
     console.error('[agentsflow][listAgents] failed to read tmp file', tmpFile, (e as Error).message);
-    return [];
+    return { ok: false, reason: 'read' };
   } finally {
     try { fs.unlinkSync(tmpFile); } catch {}
   }
@@ -112,7 +133,7 @@ export async function listAgents(): Promise<ClaudeAgentJsonRow[]> {
     if (_listAgentsDebugCount++ < 3) {
       console.log('[agentsflow][listAgents] ok', { agents: parsed.length, bytesRead: raw.length });
     }
-    return parsed;
+    return { ok: true, rows: parsed };
   } catch (e) {
     if (_listAgentsDebugCount++ < 3) {
       console.error('[agentsflow][listAgents] parse failed', {
@@ -121,8 +142,19 @@ export async function listAgents(): Promise<ClaudeAgentJsonRow[]> {
         lastChars: JSON.stringify(raw.slice(-200)),
       });
     }
-    return [];
+    return { ok: false, reason: 'parse' };
   }
+}
+
+/**
+ * Convenience wrapper that flattens the discriminated result back to a bare
+ * rows array — callers that don't care about ok/failed (the polling resolve
+ * loops below) can use this. New callers that need to react to transient CLI
+ * failures should call `listAgentsResult()` directly.
+ */
+export async function listAgents(): Promise<ClaudeAgentJsonRow[]> {
+  const r = await listAgentsResult();
+  return r.ok ? r.rows : [];
 }
 
 function runCmdToFile(args: string[], outPath: string, opts: { cwd?: string; timeoutMs?: number } = {}): Promise<{ code: number; stderr: string; timedOut: boolean }> {
@@ -219,6 +251,25 @@ export async function resolveLatestSessionInCwd(opts: {
     await new Promise((r) => setTimeout(r, 250));
   }
   return null;
+}
+
+/**
+ * Returns true if there's a running background/interactive daemon whose
+ * sessionId either equals or starts with `sessionIdOrShort`. Used by
+ * `term:attach` to decide between `claude attach` (live daemon) and
+ * `claude --resume` (cold transcript on disk).
+ *
+ * Fail-open: when `listAgents` itself fails (timeout, parse error, etc.) we
+ * return `true` so the attach path defaults to `claude attach`. Routing a
+ * live session through `--resume` can fork the transcript, while attaching
+ * to a dead session merely fails fast with a visible CLI error — so when in
+ * doubt, prefer attach.
+ */
+export async function hasLiveDaemon(sessionIdOrShort: string): Promise<boolean> {
+  if (!sessionIdOrShort) return false;
+  const r = await listAgentsResult();
+  if (!r.ok) return true;
+  return r.rows.some((row) => row.sessionId === sessionIdOrShort || row.sessionId.startsWith(sessionIdOrShort));
 }
 
 export async function stopAgent(daemonShort: string): Promise<void> {

@@ -70,7 +70,7 @@ export default function SpawnBar({ targetDir, onSend }: Props) {
       if (!file) continue;
       try {
         const { base64, dataUrl, mime } = await blobToBase64(file);
-        const res = await a.saveImageFromPaste(targetDir?.path ?? null, base64, mime);
+        const res = await a.saveImageFromPaste(base64, mime);
         if (!res?.savedPath) {
           setPasteError('The app saved the image but no path came back. Restart and try again.');
           continue;

@@ -4,7 +4,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { api } from '../lib/ipc';
 import { Conversation } from '../../shared/types';
 import { statusDotClass } from '../lib/status';
-import { saveUIState, useUIState } from '../lib/ui-state';
+import { saveUIState, useDirectoryNumber, useUIState } from '../lib/ui-state';
 
 import ShellArea, { appendShell, ShellNode } from '../components/ShellArea';
 
@@ -14,6 +14,8 @@ const FileEditor = dynamic(() => import('../components/FileEditor'), { ssr: fals
 
 const MIN_SHELL_HEIGHT = 120;
 const MAX_SHELL_HEIGHT_RATIO = 0.8;
+const MIN_SIDEBAR_WIDTH = 180;
+const MAX_SIDEBAR_WIDTH_RATIO = 0.6;
 
 export default function SessionPage() {
   const router = useRouter();
@@ -22,10 +24,12 @@ export default function SessionPage() {
   const [conv, setConv] = useState<Conversation | null>(null);
   const [rightPane, setRightPane] = useUIState('rightPane');
   const [openFile, setOpenFile] = useState<string | null>(null);
-  const [shellHeight, setShellHeight] = useUIState('shellHeight');
+  const [shellHeight, setShellHeight] = useDirectoryNumber(conv?.directoryId, 'shellHeight', 260);
+  const [sidebarWidth, setSidebarWidth] = useDirectoryNumber(conv?.directoryId, 'sidebarWidth', 288);
   const [shellRoot, setShellRoot] = useState<ShellNode | null>(null);
   const [shellsHydrated, setShellsHydrated] = useState(false);
   const splitContainerRef = useRef<HTMLDivElement | null>(null);
+  const horizontalSplitRef = useRef<HTMLDivElement | null>(null);
 
   const addShell = useCallback(() => {
     const cwd = conv?.directoryPath;
@@ -80,6 +84,28 @@ export default function SessionPage() {
     window.addEventListener('mousemove', onMove);
     window.addEventListener('mouseup', onUp);
   }, [setShellHeight]);
+
+  const startSidebarResize = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    const container = horizontalSplitRef.current;
+    if (!container) return;
+    const rect = container.getBoundingClientRect();
+    const onMove = (ev: MouseEvent) => {
+      const nextWidth = ev.clientX - rect.left;
+      const maxW = Math.max(MIN_SIDEBAR_WIDTH, rect.width * MAX_SIDEBAR_WIDTH_RATIO);
+      setSidebarWidth(Math.round(Math.max(MIN_SIDEBAR_WIDTH, Math.min(maxW, nextWidth))));
+    };
+    const onUp = () => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+    };
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+  }, [setSidebarWidth]);
 
   // FILE pane is meaningless without an open file. If the persisted state lands
   // us there with nothing loaded (re-entering the session after navigating away,
@@ -174,16 +200,26 @@ export default function SessionPage() {
       </header>
 
       <div ref={splitContainerRef} className="flex-1 flex flex-col min-h-0">
-        <div className="flex-1 flex min-h-0">
+        <div ref={horizontalSplitRef} className="flex-1 flex min-h-0">
         {conv?.directoryPath && (
-          <aside className="w-72 shrink-0 border-r border-border min-h-0 overflow-hidden">
-            <FileTreeSidebar
-              dirPath={conv.directoryPath}
-              conversationId={conv.id}
-              openedFilePath={openFile}
-              onFileOpen={(abs) => { setOpenFile(abs); setRightPane('file'); }}
+          <>
+            <aside
+              className="shrink-0 border-r border-border min-h-0 overflow-hidden"
+              style={{ width: sidebarWidth }}
+            >
+              <FileTreeSidebar
+                dirPath={conv.directoryPath}
+                conversationId={conv.id}
+                openedFilePath={openFile}
+                onFileOpen={(abs) => { setOpenFile(abs); setRightPane('file'); }}
+              />
+            </aside>
+            <div
+              onMouseDown={startSidebarResize}
+              className="shrink-0 w-1 bg-subtle/70 hover:bg-accent cursor-col-resize"
+              title="Drag to resize the file pane"
             />
-          </aside>
+          </>
         )}
         <div className="relative flex-1 bg-bg min-w-0">
           {/* Both panes stay mounted; toggling uses visibility so xterm size doesn't reset */}
@@ -213,7 +249,7 @@ export default function SessionPage() {
           <>
             <div
               onMouseDown={startResize}
-              className="shrink-0 h-1 bg-border hover:bg-accent cursor-row-resize"
+              className="shrink-0 h-1 bg-subtle/70 hover:bg-accent cursor-row-resize"
               title="Drag to resize shell area"
             />
             <div

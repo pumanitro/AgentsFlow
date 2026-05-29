@@ -6,6 +6,7 @@ import DirectoryCard from '../components/DirectoryCard';
 import SpawnBar from '../components/SpawnBar';
 import HistoryModal from '../components/HistoryModal';
 import HelpModal from '../components/HelpModal';
+import StatsView from '../components/StatsView';
 import { api } from '../lib/ipc';
 import { useUIState } from '../lib/ui-state';
 import { Conversation, PinnedDivider, PinnedItemRef, TrackedDirectory } from '../../shared/types';
@@ -29,6 +30,8 @@ export default function Home() {
   const [keyboardNavActive, setKeyboardNavActive] = useState<boolean>(false);
   const [historyDirId, setHistoryDirId] = useState<string | null>(null);
   const [helpOpen, setHelpOpen] = useState(false);
+  const [view, setView] = useUIState('view');
+  const [menuOpen, setMenuOpen] = useState(false);
   const [pendingRenameDividerId, setPendingRenameDividerId] = useState<string | null>(null);
   const awaitingNewConvRef = useRef<Set<string> | null>(null);
   const [pendingFocusConvId, setPendingFocusConvId] = useState<string | null>(null);
@@ -114,8 +117,14 @@ export default function Home() {
     const raw = router.query.focus;
     const focusId = Array.isArray(raw) ? raw[0] : raw;
     if (!focusId) return;
+    // On return from /session, pinnedItems is briefly empty until refreshAll
+    // resolves. Wait for it to populate before we try to resolve the focus —
+    // and only clear the URL hint after we've actually applied focus, so an
+    // early miss doesn't wipe the hint before the data lands.
+    if (pinnedItems.length === 0) return;
     const idx = pinnedItems.findIndex((it) => it.kind === 'conversation' && it.id === focusId);
-    if (idx >= 0) setFocusedIdx(idx);
+    if (idx < 0) return;
+    setFocusedIdx(idx);
     router.replace({ pathname: '/' }, undefined, { shallow: true });
   }, [router.query.focus, pinnedItems, router]);
 
@@ -130,6 +139,7 @@ export default function Home() {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (historyDirId) return;
+      if (view === 'stats') return;
       if (pinnedItems.length === 0) return;
 
       const target = e.target as HTMLElement | null;
@@ -179,7 +189,7 @@ export default function Home() {
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [pinnedItems, focusedIdx, router, historyDirId, commitReorder]);
+  }, [pinnedItems, focusedIdx, router, historyDirId, commitReorder, view]);
 
   useEffect(() => {
     if (!keyboardNavActive) return;
@@ -325,11 +335,11 @@ export default function Home() {
 
   const handleRemoveDirectory = async (dir: TrackedDirectory) => {
     const count = convsByDir.get(dir.id)?.length ?? 0;
-    const msg = count > 0
-      ? `Remove "${dir.displayName}"? This will stop and discard ${count} conversation${count === 1 ? '' : 's'} from this directory.`
-      : `Remove "${dir.displayName}" from tracking?`;
-    if (!window.confirm(msg)) return;
-    await api().removeDirectoryWithHistory(dir.id);
+    const tail = count > 0
+      ? ` Its ${count} conversation${count === 1 ? '' : 's'} will be kept and restored if you track this path again.`
+      : '';
+    if (!window.confirm(`Remove "${dir.displayName}" from tracking?${tail}`)) return;
+    await api().removeDirectory(dir.id);
     if (historyDirId === dir.id) setHistoryDirId(null);
     if (selectedDirId === dir.id) setSelectedDirId(null);
     await refreshAll();
@@ -338,6 +348,16 @@ export default function Home() {
   return (
     <div className="h-screen flex flex-col">
       <header className="shrink-0 px-4 py-2.5 border-b border-border flex items-center justify-between" style={{ WebkitAppRegion: 'drag' } as React.CSSProperties}>
+        {view === 'stats' ? (
+          <button
+            onClick={() => setView('home')}
+            style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
+            className="ml-24 px-2 py-1 rounded hover:bg-panel2 text-sm text-muted hover:text-text flex items-center gap-1"
+            title="Back to home"
+          >
+            ← Back
+          </button>
+        ) : (
         <div className="flex items-center gap-2.5 pl-24">
           <svg viewBox="0 0 1024 1024" width="20" height="20" aria-hidden="true" className="shrink-0">
             <rect x="0" y="0" width="1024" height="1024" rx="232" ry="232" fill="#181b25" />
@@ -350,16 +370,63 @@ export default function Home() {
           </svg>
           <span className="font-semibold text-sm tracking-tight">Agents Flow</span>
         </div>
-        <button
-          onClick={() => setHelpOpen(true)}
-          style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
-          className="shrink-0 w-6 h-6 rounded-full border border-border bg-panel hover:bg-panel2 hover:border-accent text-muted hover:text-accent text-[12px] font-semibold flex items-center justify-center"
-          title="Shortcuts & info"
-          aria-label="Open help"
-        >ⓘ</button>
+        )}
+        <div className="flex items-center gap-2" style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}>
+          <div className="relative">
+            <button
+              onClick={() => setMenuOpen((o) => !o)}
+              className="shrink-0 w-6 h-6 rounded-md border border-border bg-panel hover:bg-panel2 hover:border-accent text-muted hover:text-accent flex flex-col items-center justify-center gap-[3px]"
+              title="Menu"
+              aria-label="Open menu"
+              aria-haspopup="menu"
+              aria-expanded={menuOpen}
+            >
+              <span className="block w-3 h-px bg-current" />
+              <span className="block w-3 h-px bg-current" />
+              <span className="block w-3 h-px bg-current" />
+            </button>
+            {menuOpen && (
+              <>
+                <div className="fixed inset-0 z-40" onClick={() => setMenuOpen(false)} />
+                <div
+                  role="menu"
+                  className="absolute right-0 mt-1.5 z-50 w-40 rounded-lg border border-border bg-panel shadow-2xl py-1"
+                >
+                  {([
+                    { key: 'home', label: 'Home view' },
+                    { key: 'stats', label: 'Stats view' },
+                  ] as const).map((opt) => (
+                    <button
+                      key={opt.key}
+                      role="menuitemradio"
+                      aria-checked={view === opt.key}
+                      onClick={() => { setView(opt.key); setMenuOpen(false); }}
+                      className={`w-full text-left px-3 py-1.5 text-sm flex items-center justify-between hover:bg-panel2 ${
+                        view === opt.key ? 'text-accent' : 'text-text'
+                      }`}
+                    >
+                      {opt.label}
+                      {view === opt.key && <span className="text-accent">✓</span>}
+                    </button>
+                  ))}
+                </div>
+              </>
+            )}
+          </div>
+          <button
+            onClick={() => setHelpOpen(true)}
+            className="shrink-0 w-6 h-6 rounded-full border border-border bg-panel hover:bg-panel2 hover:border-accent text-muted hover:text-accent text-[12px] font-semibold flex items-center justify-center"
+            title="Shortcuts & info"
+            aria-label="Open help"
+          >ⓘ</button>
+        </div>
       </header>
 
       <main className="flex-1 overflow-y-auto">
+        {view === 'stats' ? (
+          <StatsView dirs={dirs} convs={convs} />
+        ) : (
+        <>
         <section className="px-4 pt-4">
           <div className="flex items-center justify-between mb-2">
             <h2 className="text-xs uppercase tracking-wider text-muted">Pinned conversations</h2>
@@ -453,9 +520,11 @@ export default function Home() {
             </button>
           </div>
         </section>
+        </>
+        )}
       </main>
 
-      <SpawnBar targetDir={selectedDir} onSend={handleSpawn} />
+      {view !== 'stats' && <SpawnBar targetDir={selectedDir} onSend={handleSpawn} />}
 
       {helpOpen && <HelpModal onClose={() => setHelpOpen(false)} />}
 

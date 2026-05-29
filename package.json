@@ -1,6 +1,6 @@
 {
   "name": "agentsflow",
-  "version": "2.0.0",
+  "version": "3.0.0",
   "private": true,
   "description": "Electron + Next.js desktop UI for Claude Code background agents",
   "main": "dist/electron/electron/main.js",

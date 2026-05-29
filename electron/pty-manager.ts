@@ -25,6 +25,12 @@ export function attach(opts: {
   cols: number;
   rows: number;
   win: BrowserWindow;
+  // 'attach' — connect to a live background daemon (default, original behavior)
+  // 'resume' — load a saved transcript from disk and continue interactively
+  mode?: 'attach' | 'resume';
+  // Required when mode==='resume'; ignored otherwise. The directory the
+  // session was originally run in, so Claude finds the right .claude project.
+  cwd?: string;
 }): void {
   const env = {
     ...process.env,
@@ -32,14 +38,20 @@ export function attach(opts: {
     TERM: 'xterm-256color',
   } as Record<string, string>;
 
-  console.log('[agentsflow][pty] spawning', { bin: CLAUDE_BIN, args: ['attach', opts.sessionId], cols: opts.cols, rows: opts.rows });
+  const mode = opts.mode ?? 'attach';
+  const args = mode === 'resume'
+    ? ['--resume', opts.sessionId]
+    : ['attach', opts.sessionId];
+  const cwd = mode === 'resume' ? (opts.cwd || os.homedir()) : os.homedir();
+
+  console.log('[agentsflow][pty] spawning', { bin: CLAUDE_BIN, args, cols: opts.cols, rows: opts.rows, cwd, mode });
   let pty: IPty;
   try {
-    pty = getPty().spawn(CLAUDE_BIN, ['attach', opts.sessionId], {
+    pty = getPty().spawn(CLAUDE_BIN, args, {
       name: 'xterm-256color',
       cols: Math.max(opts.cols, 20),
       rows: Math.max(opts.rows, 5),
-      cwd: os.homedir(),
+      cwd,
       env,
     });
   } catch (err) {

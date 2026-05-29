@@ -67,8 +67,8 @@ const api: AgentsFlowApi = {
     ipcRenderer.on('files:updated', listener);
     return () => ipcRenderer.removeListener('files:updated', listener);
   },
-  saveImageFromPaste: (dirPath, dataBase64, mimeType) =>
-    ipcRenderer.invoke('images:saveFromPaste', dirPath, dataBase64, mimeType),
+  saveImageFromPaste: (dataBase64, mimeType) =>
+    ipcRenderer.invoke('images:saveFromPaste', dataBase64, mimeType),
   readTextFile: (filePath) => ipcRenderer.invoke('files:readText', filePath),
   writeTextFile: (filePath, content) => ipcRenderer.invoke('files:writeText', filePath, content),
   readBinaryFile: (filePath) => ipcRenderer.invoke('files:readBinary', filePath),
@@ -76,6 +76,7 @@ const api: AgentsFlowApi = {
   removePath: (targetPath) => ipcRenderer.invoke('files:remove', targetPath),
 
   copyImageToClipboard: (filePath) => ipcRenderer.invoke('clipboard:copyImage', filePath),
+  startFileDrag: (filePath) => ipcRenderer.invoke('files:startDrag', filePath),
 };
 
 contextBridge.exposeInMainWorld('agentsflow', api);

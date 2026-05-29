@@ -80,7 +80,13 @@ export function createMockApi(): AgentsFlowApi {
       const displayName = parts[parts.length - 1] || path;
       const d: TrackedDirectory = { id: uuid(), path, displayName, addedAt: new Date().toISOString() };
       state.directories = [...state.directories, d];
+      // Re-link any conversations recorded for this path so re-adding restores
+      // them under the new directoryId (matches the real Electron handler).
+      state.conversations = state.conversations.map((c) =>
+        c.directoryPath === path ? { ...c, directoryId: d.id, displayName } : c,
+      );
       save(state);
+      fire(state);
       return d;
     },
     removeDirectory: async (id) => {
@@ -286,9 +292,11 @@ export function createMockApi(): AgentsFlowApi {
         { path: 'scratch/draft.md', status: 'untracked', staged: false, unstaged: true },
       ],
     }),
-    saveImageFromPaste: async (_dir: string | null, _data: string, mime: string) => {
+    saveImageFromPaste: async (_data: string, mime: string) => {
       const ext = (mime.split('/')[1] || 'png').replace(/[^a-z0-9]/gi, '') || 'png';
-      return { savedPath: `/mock/agentsflow/images/${Date.now()}.${ext}` };
+      const now = new Date();
+      const slug = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+      return { savedPath: `/mock/pasted-images/${slug}/${Date.now()}.${ext}` };
     },
 
     readTextFile: async (filePath: string) => {
@@ -303,6 +311,7 @@ export function createMockApi(): AgentsFlowApi {
     renamePath: async (_oldPath: string, _newPath: string) => ({ ok: true as const }),
     removePath: async (_target: string) => ({ ok: true as const }),
     copyImageToClipboard: async (_filePath: string) => ({ ok: true as const }),
+    startFileDrag: async (_filePath: string) => undefined,
     readBinaryFile: async (filePath: string) => {
       // A 1x1 transparent PNG to prove the wiring in browser mode.
       const blank = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Vx5y3wAAAAASUVORK5CYII=';

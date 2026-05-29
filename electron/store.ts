@@ -72,6 +72,7 @@ function migrateConversation(c: any): Conversation {
     status: c.status ?? '',
     intent: c.intent ?? '',
     createdAt: c.createdAt ?? new Date().toISOString(),
+    unpinnedAt: typeof c.unpinnedAt === 'string' ? c.unpinnedAt : undefined,
     lastPrompt: c.lastPrompt ?? '',
   };
 }
@@ -204,8 +205,14 @@ export const store = {
     const next = { ...prev, ...patch };
     s.conversations[idx] = next;
     if (patch.pinned !== undefined && patch.pinned !== prev.pinned) {
-      if (patch.pinned) prependPinnedRef(s, { kind: 'conversation', id });
-      else dropPinnedRef(s, { kind: 'conversation', id });
+      if (patch.pinned) {
+        prependPinnedRef(s, { kind: 'conversation', id });
+      } else {
+        // Pin→unpin means the task is considered done; record the moment.
+        // `next` is the same object already stored at conversations[idx].
+        next.unpinnedAt = new Date().toISOString();
+        dropPinnedRef(s, { kind: 'conversation', id });
+      }
     }
     save();
     return next;
@@ -216,7 +223,23 @@ export const store = {
     dropPinnedRef(s, { kind: 'conversation', id });
     save();
   },
-
+  /**
+   * After a directory is added with a new id, update any conversations whose
+   * recorded `directoryPath` matches so they show up under the new dir again.
+   * Also refreshes the cached `displayName` field on those conversations.
+   */
+  relinkConversationsByPath(absPath: string, newDirectoryId: string, displayName: string): number {
+    const s = load();
+    let count = 0;
+    s.conversations = s.conversations.map((c) => {
+      if (c.directoryPath !== absPath) return c;
+      if (c.directoryId === newDirectoryId && c.displayName === displayName) return c;
+      count += 1;
+      return { ...c, directoryId: newDirectoryId, displayName };
+    });
+    if (count > 0) save();
+    return count;
+  },
   getDividers(): PinnedDivider[] {
     return load().dividers;
   },

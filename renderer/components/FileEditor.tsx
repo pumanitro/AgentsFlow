@@ -19,6 +19,7 @@ interface Props {
 
 const IMAGE_EXTS = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'ico', 'avif']);
 const SVG_EXT = 'svg';
+const PDF_EXT = 'pdf';
 const MARKDOWN_EXTS = new Set(['md', 'mdx', 'markdown']);
 
 function fileExt(name: string): string {
@@ -105,6 +106,65 @@ function ImageView({ filePath, baseDir }: Props) {
             alt={display}
             className="max-w-full max-h-full object-contain rounded shadow-2xl"
             style={{ imageRendering: 'pixelated' }}
+          />
+        )}
+      </div>
+    </div>
+  );
+}
+
+function PdfView({ filePath, baseDir }: Props) {
+  const [state, setState] = useState<{ url?: string; size?: number; error?: string } | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    let revokeUrl: string | null = null;
+    setState(null);
+    api().readBinaryFile(filePath).then((r) => {
+      if (cancelled) return;
+      if (r.error) { setState({ error: r.error }); return; }
+      if (r.truncated) { setState({ error: `PDF too large to preview (${formatBytes(r.size)}). The viewer caps at 64 MB.` }); return; }
+      // Build a blob URL from the base64 data URL. iframes load blob: URLs
+      // reliably regardless of how big the PDF is, whereas long data: URLs
+      // are flaky in Chromium.
+      try {
+        const base64 = r.dataUrl.split(',')[1] ?? '';
+        const bin = atob(base64);
+        const bytes = new Uint8Array(bin.length);
+        for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+        const blob = new Blob([bytes], { type: r.mime || 'application/pdf' });
+        const url = URL.createObjectURL(blob);
+        revokeUrl = url;
+        setState({ url, size: r.size });
+      } catch (err) {
+        setState({ error: (err as Error).message });
+      }
+    });
+    return () => {
+      cancelled = true;
+      if (revokeUrl) URL.revokeObjectURL(revokeUrl);
+    };
+  }, [filePath]);
+
+  const display = relPath(filePath, baseDir);
+
+  return (
+    <div className="h-full flex flex-col bg-bg">
+      <header className="shrink-0 px-3 py-1.5 border-b border-border flex items-center gap-3 bg-panel/60">
+        <span className="text-xs font-mono text-text/90 truncate flex-1" title={filePath}>{display}</span>
+        <span className="text-[10px] text-muted shrink-0 uppercase">PDF</span>
+        {state?.size != null && <span className="text-[10px] text-muted shrink-0">{formatBytes(state.size)}</span>}
+      </header>
+      <div className="flex-1 min-h-0 bg-[#1e1e1e]">
+        {!state ? (
+          <div className="h-full flex items-center justify-center text-muted text-sm">Loading…</div>
+        ) : state.error ? (
+          <div className="h-full flex items-center justify-center text-muted text-sm text-center px-6">{state.error}</div>
+        ) : (
+          <iframe
+            src={state.url}
+            title={display}
+            className="w-full h-full border-0"
           />
         )}
       </div>
@@ -235,6 +295,9 @@ export default function FileEditor({ filePath, baseDir, autoFocus }: Props) {
   // SVG is also text, but we preview it visually rather than as XML markup.
   if (IMAGE_EXTS.has(ext) || ext === SVG_EXT) {
     return <ImageView filePath={filePath} baseDir={baseDir} />;
+  }
+  if (ext === PDF_EXT) {
+    return <PdfView filePath={filePath} baseDir={baseDir} />;
   }
   if (MARKDOWN_EXTS.has(ext)) {
     return <BlockNoteMarkdownEditor filePath={filePath} baseDir={baseDir} autoFocus={autoFocus} />;

@@ -1,4 +1,4 @@
-import { app, BrowserWindow, clipboard, dialog, ipcMain, nativeImage } from 'electron';
+import { app, BrowserWindow, clipboard, dialog, ipcMain, nativeImage, shell } from 'electron';
 import * as path from 'path';
 import * as fs from 'fs';
 import { v4 as uuid } from 'uuid';
@@ -31,12 +31,13 @@ import {
   stopAgent as cliStop,
   removeAgent as cliRemove,
   readJobState,
+  hasLiveDaemon,
 } from './claude-cli';
 import { refreshNow, startPoller, stopPoller, syncWatchers, unwatchConversation, watchConversation } from './poller';
 import * as pty from './pty-manager';
 import * as fileWatcher from './file-watcher';
 import { gitStatus, listFiles } from './git';
-import { deleteAttachmentFiles, sweepOrphanAttachments } from './attachments';
+import { deleteAttachmentFiles, pastedImagesRoot, prunePastedImages, sweepOrphanAttachments, todayDateSlug } from './attachments';
 import { Conversation, PinnedDivider, PinnedItemRef, SpawnRequest, TrackedDirectory } from '../shared/types';
 
 const isDev = process.env.NODE_ENV === 'development';
@@ -59,7 +60,36 @@ function createWindow() {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: false,
+      // Chromium's built-in PDF viewer is gated behind the plugins flag in
+      // Electron — without it, iframes pointing at application/pdf blob
+      // URLs just download instead of rendering inline.
+      plugins: true,
     },
+  });
+
+  // Route every link/`window.open` call to the system's default browser
+  // instead of letting Electron spawn a bare child BrowserWindow. xterm's
+  // WebLinksAddon calls window.open(url, '_blank') under the hood, which
+  // otherwise produced an extra minimal popup window alongside the user's
+  // real browser.
+  win.webContents.setWindowOpenHandler(({ url }) => {
+    if (/^(https?:|mailto:)/i.test(url)) {
+      shell.openExternal(url).catch((err) => {
+        console.warn('[agentsflow] shell.openExternal failed', url, err);
+      });
+    }
+    return { action: 'deny' };
+  });
+  // Belt-and-braces: refuse in-app navigations to anything that isn't the
+  // dev server or the packaged app:// scheme — those should also go to the
+  // system browser.
+  win.webContents.on('will-navigate', (event, url) => {
+    if (/^(https?:|mailto:)/i.test(url) && !url.startsWith('http://localhost:3030')) {
+      event.preventDefault();
+      shell.openExternal(url).catch((err) => {
+        console.warn('[agentsflow] shell.openExternal failed', url, err);
+      });
+    }
   });
 
   if (isDev) {
@@ -91,6 +121,13 @@ app.whenReady().then(() => {
     if (result.deleted > 0) console.log('[agentsflow] swept orphan attachments', result);
   } catch (err) {
     console.error('[agentsflow] sweep failed', err);
+  }
+
+  try {
+    const result = prunePastedImages(pastedImagesRoot(app.getPath('userData')));
+    if (result.deletedFolders > 0) console.log('[agentsflow] pruned stale pasted-image folders', result);
+  } catch (err) {
+    console.error('[agentsflow] prune failed', err);
   }
 
   app.on('activate', () => {
@@ -146,7 +183,19 @@ ipcMain.handle('dirs:add', async (): Promise<TrackedDirectory | null> => {
   };
   const next = recomputeAllDisplayNames([...existing, newDir]);
   store.setDirectories(next);
-  return next.find((d) => d.id === newDir.id) ?? newDir;
+  const persisted = next.find((d) => d.id === newDir.id) ?? newDir;
+
+  // Re-link any pre-existing conversations recorded for this path back onto
+  // the freshly-minted directoryId — this is what makes "remove + re-add"
+  // restore the history list instead of orphaning it. We deliberately do NOT
+  // scan ~/.claude/projects for additional transcripts here: history should
+  // only contain conversations the user actually spawned via AgentsFlow.
+  const relinked = store.relinkConversationsByPath(persisted.path, persisted.id, persisted.displayName);
+  if (relinked > 0) {
+    console.log('[agentsflow] re-linked', relinked, 'conversations to', persisted.path);
+    broadcastConversations();
+  }
+  return persisted;
 });
 
 ipcMain.handle('dirs:remove', (_e, id: string) => {
@@ -302,7 +351,7 @@ ipcMain.handle('pinned:reorder', (_e, orderedRefs: PinnedItemRef[]) => {
   broadcastPinnedOrder();
 });
 
-ipcMain.handle('term:attach', (_e, conversationId: string, cols: number, rows: number) => {
+ipcMain.handle('term:attach', async (_e, conversationId: string, cols: number, rows: number) => {
   console.log('[agentsflow] term:attach received', { conversationId, cols, rows });
   const conv = store.getConversations().find((c) => c.id === conversationId);
   if (!conv) {
@@ -317,8 +366,19 @@ ipcMain.handle('term:attach', (_e, conversationId: string, cols: number, rows: n
   if (!win) throw new Error('no window');
   const channelId = uuid();
   const attachId = conv.daemonShort || conv.sessionId.slice(0, 8);
-  console.log('[agentsflow] spawning pty for claude attach', { attachId, sessionId: conv.sessionId, channelId });
-  pty.attach({ channelId, sessionId: attachId, cols, rows, win });
+
+  // If a live daemon exists for this session, attach to it. Otherwise this is
+  // a "cold" session (e.g. one restored from a saved transcript that no longer
+  // has a running daemon) — fall back to `claude --resume <sid>` in the
+  // session's original cwd, which loads the transcript and continues it.
+  const live = await hasLiveDaemon(attachId);
+  if (live) {
+    console.log('[agentsflow] spawning pty for claude attach', { attachId, sessionId: conv.sessionId, channelId });
+    pty.attach({ channelId, sessionId: attachId, cols, rows, win, mode: 'attach' });
+  } else {
+    console.log('[agentsflow] no live daemon — using --resume', { sessionId: conv.sessionId, cwd: conv.directoryPath, channelId });
+    pty.attach({ channelId, sessionId: conv.sessionId, cols, rows, win, mode: 'resume', cwd: conv.directoryPath });
+  }
   return { channelId };
 });
 
@@ -405,10 +465,14 @@ ipcMain.handle('files:readBinary', async (_e, filePath: string) => {
     bmp: 'image/bmp',
     ico: 'image/x-icon',
     avif: 'image/avif',
+    pdf: 'application/pdf',
   };
   try {
     const stat = fsMod.statSync(filePath);
-    const MAX = 8 * 1024 * 1024;
+    const ext0 = pathMod.extname(filePath).slice(1).toLowerCase();
+    // Bump the cap for PDFs — scans and multi-page documents routinely
+    // exceed the 8 MB image budget but Chromium handles them fine.
+    const MAX = ext0 === 'pdf' ? 64 * 1024 * 1024 : 8 * 1024 * 1024;
     if (stat.size > MAX) return { dataUrl: '', mime: '', size: stat.size, truncated: true };
     const ext = pathMod.extname(filePath).slice(1).toLowerCase();
     const mime = MIME[ext] || 'application/octet-stream';
@@ -447,6 +511,20 @@ ipcMain.handle('files:remove', async (_e, targetPath: string) => {
   return { ok: true as const };
 });
 
+ipcMain.handle('files:startDrag', async (e, filePath: string): Promise<void> => {
+  if (!path.isAbsolute(filePath)) return;
+  if (!fs.existsSync(filePath)) return;
+  // Prefer the OS-rendered file icon (Finder-style). Fall back to a 1x1
+  // PNG because Electron rejects an empty NativeImage.
+  let icon = await app.getFileIcon(filePath, { size: 'small' }).catch(() => null);
+  if (!icon || icon.isEmpty()) {
+    icon = nativeImage.createFromBuffer(
+      Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Vx5y3wAAAAASUVORK5CYII=', 'base64'),
+    );
+  }
+  e.sender.startDrag({ file: filePath, icon });
+});
+
 ipcMain.handle('clipboard:copyImage', async (_e, filePath: string): Promise<{ ok: true } | { ok: false; error: string }> => {
   const pathMod = require('path') as typeof import('path');
   const IMAGE_EXTS = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'svg', 'ico', 'avif', 'tif', 'tiff']);
@@ -463,17 +541,17 @@ ipcMain.handle('clipboard:copyImage', async (_e, filePath: string): Promise<{ ok
   }
 });
 
-ipcMain.handle('images:saveFromPaste', async (_e, dirPath: string | null, dataBase64: string, mimeType: string): Promise<{ savedPath: string }> => {
+ipcMain.handle('images:saveFromPaste', async (_e, dataBase64: string, mimeType: string): Promise<{ savedPath: string }> => {
   const fsMod = require('fs') as typeof import('fs');
   const pathMod = require('path') as typeof import('path');
   const ext = (mimeType.split('/')[1] || 'png').replace(/[^a-z0-9]/gi, '') || 'png';
-  const targetDir = dirPath
-    ? pathMod.join(dirPath, '.agentsflow', 'images')
-    : pathMod.join(app.getPath('userData'), 'pasted-images');
+  const root = pastedImagesRoot(app.getPath('userData'));
+  const targetDir = pathMod.join(root, todayDateSlug());
   fsMod.mkdirSync(targetDir, { recursive: true });
   const filename = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${ext}`;
   const fullPath = pathMod.join(targetDir, filename);
   const buf = Buffer.from(dataBase64, 'base64');
   fsMod.writeFileSync(fullPath, buf);
+  try { prunePastedImages(root); } catch {}
   return { savedPath: fullPath };
 });
