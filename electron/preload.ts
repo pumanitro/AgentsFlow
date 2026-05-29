@@ -76,6 +76,7 @@ const api: AgentsFlowApi = {
   removePath: (targetPath) => ipcRenderer.invoke('files:remove', targetPath),
 
   copyImageToClipboard: (filePath) => ipcRenderer.invoke('clipboard:copyImage', filePath),
+  revealInFinder: (targetPath) => ipcRenderer.invoke('files:revealInFinder', targetPath),
   startFileDrag: (filePath) => ipcRenderer.invoke('files:startDrag', filePath),
 };
 

@@ -518,6 +518,22 @@ export default function FileTreeSidebar({ dirPath, conversationId, onFileOpen, o
     }
   };
 
+  const revealInFinder = async (node: TreeNode) => {
+    setMenu(null);
+    const fullPath = `${dirPath}/${node.path}`;
+    const a = api();
+    if (typeof a.revealInFinder !== 'function') {
+      setToast({ kind: 'err', text: 'Restart the app to enable this (preload needs to refresh).' });
+      return;
+    }
+    try {
+      const res = await a.revealInFinder(fullPath);
+      if (!res.ok) setToast({ kind: 'err', text: `Reveal failed: ${res.error}` });
+    } catch (err) {
+      setToast({ kind: 'err', text: `Reveal failed: ${(err as Error)?.message ?? String(err)}` });
+    }
+  };
+
   const submitRename = async () => {
     if (!renaming) return;
     const { node, value } = renaming;
@@ -657,6 +673,10 @@ export default function FileTreeSidebar({ dirPath, conversationId, onFileOpen, o
           onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); }}
         >
           <div className="px-3 py-1 text-[11px] text-muted truncate border-b border-border">{menu.node.path}</div>
+          <button
+            className="w-full text-left px-3 py-1.5 text-sm hover:bg-panel"
+            onClick={() => revealInFinder(menu.node)}
+          >Reveal in Finder</button>
           {menu.node.kind === 'file' && isImageFile(menu.node.name) && (
             <button
               className="w-full text-left px-3 py-1.5 text-sm hover:bg-panel"

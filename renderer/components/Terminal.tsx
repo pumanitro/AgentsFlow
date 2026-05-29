@@ -78,6 +78,25 @@ export default function Terminal({ conversationId, shellId, shellCwd, onExit, au
       term.open(containerRef.current);
       fit.fit();
 
+      // The first fit() can run before the monospace web font has finished
+      // loading. xterm then measures the character cell with a fallback font and
+      // locks in the wrong cols/rows; once the real font loads, glyphs render
+      // against a mismatched grid (text looks clipped/"missing") and mouse
+      // selection maps to the wrong cells. Refit after the layout settles and
+      // again once fonts are ready so the grid matches the rendered glyphs.
+      // This is what a manual window resize / reattach was implicitly fixing.
+      const refit = () => {
+        if (disposed) return;
+        try {
+          fit.fit();
+          if (channelId) api().resizeTerminal(channelId, term.cols, term.rows);
+          sync();
+        } catch {}
+      };
+      requestAnimationFrame(refit);
+      const fontsApi = (document as Document & { fonts?: { ready?: Promise<unknown> } }).fonts;
+      fontsApi?.ready?.then(refit).catch(() => undefined);
+
       const sync = () => {
         if (disposed) return;
         setScroll({
@@ -108,6 +127,7 @@ export default function Terminal({ conversationId, shellId, shellCwd, onExit, au
         } else {
           const res = await api().attachTerminal(conversationId!, term.cols, term.rows);
           cid = res.channelId;
+          replay = res.replay || '';
         }
       } catch (err) {
         // eslint-disable-next-line no-console

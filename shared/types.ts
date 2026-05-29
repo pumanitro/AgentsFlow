@@ -64,7 +64,7 @@ export interface AgentsFlowApi {
   removeAgent: (id: string) => Promise<void>;
   removeDirectoryWithHistory: (id: string) => Promise<{ removedConversations: number }>;
 
-  attachTerminal: (conversationId: string, cols: number, rows: number) => Promise<{ channelId: string }>;
+  attachTerminal: (conversationId: string, cols: number, rows: number) => Promise<{ channelId: string; replay?: string }>;
   attachShellTerminal: (shellId: string, cwd: string, cols: number, rows: number) => Promise<{ channelId: string; replay: string }>;
   killShell: (shellId: string) => Promise<void>;
   writeTerminal: (channelId: string, data: string) => Promise<void>;
@@ -105,6 +105,10 @@ export interface AgentsFlowApi {
   removePath: (targetPath: string) => Promise<{ ok: true }>;
 
   copyImageToClipboard: (filePath: string) => Promise<{ ok: true } | { ok: false; error: string }>;
+
+  // Reveals the file/dir in the OS file browser (Finder on macOS, Explorer
+  // on Windows, default file manager on Linux).
+  revealInFinder: (targetPath: string) => Promise<{ ok: true } | { ok: false; error: string }>;
 
   // Hands the file path to Electron's native drag-and-drop session so the
   // user can drop the file on any external app (Finder, Chrome, etc.).

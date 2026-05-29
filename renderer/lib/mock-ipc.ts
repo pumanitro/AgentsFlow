@@ -257,7 +257,7 @@ export function createMockApi(): AgentsFlowApi {
           ),
         );
       }, 100);
-      return { channelId };
+      return { channelId, replay: '' };
     },
     attachShellTerminal: async (shellId, cwd) => {
       const channelId = uuid();
@@ -311,6 +311,7 @@ export function createMockApi(): AgentsFlowApi {
     renamePath: async (_oldPath: string, _newPath: string) => ({ ok: true as const }),
     removePath: async (_target: string) => ({ ok: true as const }),
     copyImageToClipboard: async (_filePath: string) => ({ ok: true as const }),
+    revealInFinder: async (_target: string) => ({ ok: true as const }),
     startFileDrag: async (_filePath: string) => undefined,
     readBinaryFile: async (filePath: string) => {
       // A 1x1 transparent PNG to prove the wiring in browser mode.

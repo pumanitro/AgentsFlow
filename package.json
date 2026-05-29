@@ -1,6 +1,6 @@
 {
   "name": "agentsflow",
-  "version": "3.0.0",
+  "version": "3.0.1",
   "private": true,
   "description": "Electron + Next.js desktop UI for Claude Code background agents",
   "main": "dist/electron/electron/main.js",
@@ -69,6 +69,10 @@
   "build": {
     "appId": "com.agentsflow.app",
     "productName": "Agents Flow",
+    "asar": true,
+    "asarUnpack": [
+      "**/node_modules/**"
+    ],
     "files": [
       "dist/**/*",
       "renderer/out/**/*",

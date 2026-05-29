@@ -372,14 +372,15 @@ ipcMain.handle('term:attach', async (_e, conversationId: string, cols: number, r
   // has a running daemon) — fall back to `claude --resume <sid>` in the
   // session's original cwd, which loads the transcript and continues it.
   const live = await hasLiveDaemon(attachId);
+  let replay = '';
   if (live) {
     console.log('[agentsflow] spawning pty for claude attach', { attachId, sessionId: conv.sessionId, channelId });
-    pty.attach({ channelId, sessionId: attachId, cols, rows, win, mode: 'attach' });
+    replay = pty.attach({ channelId, sessionId: attachId, cols, rows, win, mode: 'attach' });
   } else {
     console.log('[agentsflow] no live daemon — using --resume', { sessionId: conv.sessionId, cwd: conv.directoryPath, channelId });
-    pty.attach({ channelId, sessionId: conv.sessionId, cols, rows, win, mode: 'resume', cwd: conv.directoryPath });
+    replay = pty.attach({ channelId, sessionId: conv.sessionId, cols, rows, win, mode: 'resume', cwd: conv.directoryPath });
   }
-  return { channelId };
+  return { channelId, replay };
 });
 
 ipcMain.handle('term:attachShell', (_e, shellId: string, cwd: string, cols: number, rows: number) => {
@@ -509,6 +510,17 @@ ipcMain.handle('files:remove', async (_e, targetPath: string) => {
   }
   fsMod.rmSync(targetPath, { recursive: true, force: false });
   return { ok: true as const };
+});
+
+ipcMain.handle('files:revealInFinder', async (_e, targetPath: string): Promise<{ ok: true } | { ok: false; error: string }> => {
+  const fsMod = require('fs') as typeof import('fs');
+  const pathMod = require('path') as typeof import('path');
+  if (!pathMod.isAbsolute(targetPath)) return { ok: false, error: 'path must be absolute' };
+  if (!fsMod.existsSync(targetPath)) return { ok: false, error: `path does not exist: ${targetPath}` };
+  // Selects the file/dir in the OS file browser (Finder on macOS, Explorer
+  // on Windows, the default file manager on Linux).
+  shell.showItemInFolder(targetPath);
+  return { ok: true };
 });
 
 ipcMain.handle('files:startDrag', async (e, filePath: string): Promise<void> => {
