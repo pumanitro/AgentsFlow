@@ -156,13 +156,37 @@ export default function Terminal({ conversationId, shellId, shellCwd, onExit, au
       // In alternate-screen mode (TUI apps like Claude Code), xterm has no scrollback,
       // so wheel events have no effect. Translate them into Page Up/Down bytes the app can read.
       // Capture phase ensures we run before xterm's own .xterm-viewport wheel handler.
+      //
+      // Each page key forces the app to repaint its whole screen, which streams
+      // back over IPC for xterm to re-render — an expensive round-trip per key.
+      // Trackpads make this worse: they emit a long momentum tail of small-delta
+      // wheel events after the finger lifts. If we turn every event into page keys
+      // we queue a backlog the app can't repaint fast enough, so scrolling lurches
+      // on to "catch up" after the gesture ended — that reads as lag.
+      //
+      // So we (1) accumulate deltaY and only page once a pixel threshold is crossed
+      // (de-sensitises the burst), (2) throttle to a fixed max rate, and (3) DROP
+      // surplus accumulation on each emit rather than banking it — momentum can't
+      // build a backlog, so scrolling stops when your finger stops.
+      const WHEEL_PX_PER_PAGE = 120;   // accumulated pixels per page key
+      const WHEEL_MIN_INTERVAL = 90;   // ms between page keys — caps speed, kills backlog
+      let wheelAccum = 0;
+      let lastWheelTs = 0;
       const onWheel = (e: WheelEvent) => {
         if (term.buffer.active.type !== 'alternate') return;
         e.preventDefault();
         e.stopPropagation();
-        const steps = Math.max(1, Math.min(3, Math.round(Math.abs(e.deltaY) / 80)));
-        const key = e.deltaY > 0 ? '\x1b[6~' : '\x1b[5~'; // Page Down / Page Up
-        api().writeTerminal(cid, key.repeat(steps));
+        // Reset on direction change so a reversal responds immediately instead of
+        // first having to burn off leftover accumulation in the old direction.
+        if (wheelAccum !== 0 && Math.sign(e.deltaY) !== Math.sign(wheelAccum)) wheelAccum = 0;
+        wheelAccum += e.deltaY;
+        if (Math.abs(wheelAccum) < WHEEL_PX_PER_PAGE) return;
+        const now = performance.now();
+        if (now - lastWheelTs < WHEEL_MIN_INTERVAL) return; // throttle: drop, don't queue
+        lastWheelTs = now;
+        const key = wheelAccum > 0 ? '\x1b[6~' : '\x1b[5~'; // Page Down / Page Up
+        wheelAccum = 0; // consume everything so momentum can't bank a backlog
+        api().writeTerminal(cid, key);
       };
       containerRef.current!.addEventListener('wheel', onWheel, { passive: false, capture: true });
 

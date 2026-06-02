@@ -7,10 +7,15 @@ import { statusDotClass } from '../lib/status';
 import { saveUIState, useDirectoryNumber, useUIState } from '../lib/ui-state';
 
 import ShellArea, { appendShell, ShellNode } from '../components/ShellArea';
+import PaneErrorBoundary from '../components/PaneErrorBoundary';
 
-const Terminal = dynamic(() => import('../components/Terminal'), { ssr: false });
-const FileTreeSidebar = dynamic(() => import('../components/FileTreeSidebar'), { ssr: false });
-const FileEditor = dynamic(() => import('../components/FileEditor'), { ssr: false });
+const paneLoading = (label: string) => () => (
+  <div className="absolute inset-0 flex items-center justify-center text-muted text-sm">{label}…</div>
+);
+
+const Terminal = dynamic(() => import('../components/Terminal'), { ssr: false, loading: paneLoading('Loading terminal') });
+const FileTreeSidebar = dynamic(() => import('../components/FileTreeSidebar'), { ssr: false, loading: paneLoading('Loading files') });
+const FileEditor = dynamic(() => import('../components/FileEditor'), { ssr: false, loading: paneLoading('Loading editor') });
 
 const MIN_SHELL_HEIGHT = 120;
 const MAX_SHELL_HEIGHT_RATIO = 0.8;
@@ -225,7 +230,9 @@ export default function SessionPage() {
           {/* Both panes stay mounted; toggling uses visibility so xterm size doesn't reset */}
           <div className={`absolute inset-0 ${rightPane === 'chat' ? 'visible' : 'invisible'}`}>
             {conv?.sessionId ? (
-              <Terminal conversationId={String(id)} onExit={goBack} autoFocus={rightPane === 'chat'} />
+              <PaneErrorBoundary label="Terminal">
+                <Terminal conversationId={String(id)} onExit={goBack} autoFocus={rightPane === 'chat'} />
+              </PaneErrorBoundary>
             ) : (
               <div className="absolute inset-0 flex items-center justify-center text-muted text-sm">
                 {conv ? 'Session not ready yet…' : 'Loading…'}
@@ -235,7 +242,9 @@ export default function SessionPage() {
 
           <div className={`absolute inset-0 ${rightPane === 'file' ? 'visible' : 'invisible'}`}>
             {openFile ? (
-              <FileEditor filePath={openFile} baseDir={conv?.directoryPath} autoFocus={rightPane === 'file'} />
+              <PaneErrorBoundary key={openFile} label="Editor">
+                <FileEditor filePath={openFile} baseDir={conv?.directoryPath} autoFocus={rightPane === 'file'} />
+              </PaneErrorBoundary>
             ) : (
               <div className="absolute inset-0 flex items-center justify-center text-muted text-sm">
                 Click a file in the sidebar to open it
