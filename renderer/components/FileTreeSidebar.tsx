@@ -2,11 +2,12 @@ import { useEffect, useMemo, useState } from 'react';
 import { api } from '../lib/ipc';
 import { useUIState } from '../lib/ui-state';
 import { FileEntry, GitEntryStatus, GitStatusResult } from '../../shared/types';
+import SearchModal from './SearchModal';
 
 interface Props {
   dirPath: string;
   conversationId: string;
-  onFileOpen?: (absolutePath: string) => void;
+  onFileOpen?: (absolutePath: string, line?: number) => void;
   openedFilePath?: string | null;
 }
 
@@ -347,6 +348,33 @@ export default function FileTreeSidebar({ dirPath, conversationId, onFileOpen, o
   const setExpandedChanges = changesStore.setState;
   const setExpandedFiles = filesStore.setState;
   const [loading, setLoading] = useState(false);
+  const [searchOpen, setSearchOpen] = useState(false);
+
+  // Shift+F opens Find-in-Files. We suppress the plain combo while the user is
+  // typing into a text field (inputs, the file editor, or the terminal's hidden
+  // textarea) so it never eats a real keystroke; ⌘/Ctrl+Shift+F always works,
+  // even from those contexts, matching the usual IDE binding.
+  useEffect(() => {
+    const isEditable = (el: EventTarget | null): boolean => {
+      const node = el as HTMLElement | null;
+      if (!node || !node.tagName) return false;
+      const tag = node.tagName;
+      return tag === 'INPUT' || tag === 'TEXTAREA' || node.isContentEditable;
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.code !== 'KeyF' || e.altKey) return;
+      const withMeta = e.metaKey || e.ctrlKey;
+      if (withMeta && e.shiftKey) {
+        e.preventDefault();
+        setSearchOpen(true);
+      } else if (!withMeta && e.shiftKey && !isEditable(e.target)) {
+        e.preventDefault();
+        setSearchOpen(true);
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
 
   const refresh = useMemo(
     () => async () => {
@@ -593,9 +621,20 @@ export default function FileTreeSidebar({ dirPath, conversationId, onFileOpen, o
           >Files</button>
         </div>
         <button
+          onClick={() => setSearchOpen(true)}
+          className="ml-auto text-muted hover:text-text px-1.5 py-1 rounded hover:bg-panel2"
+          title="Find in files (Shift+F)"
+          aria-label="Find in files"
+        >
+          <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" aria-hidden>
+            <circle cx="7" cy="7" r="4.5" />
+            <path d="M10.5 10.5 L14 14" strokeLinecap="round" />
+          </svg>
+        </button>
+        <button
           onClick={toggleExpandAll}
           disabled={!tree || tree.children.length === 0}
-          className="ml-auto text-muted hover:text-text px-1.5 py-1 rounded hover:bg-panel2 disabled:opacity-40 disabled:cursor-not-allowed"
+          className="text-muted hover:text-text px-1.5 py-1 rounded hover:bg-panel2 disabled:opacity-40 disabled:cursor-not-allowed"
           title={expanded.size > 0 ? 'Collapse all' : 'Expand all'}
           aria-label={expanded.size > 0 ? 'Collapse all' : 'Expand all'}
         >
@@ -766,6 +805,13 @@ export default function FileTreeSidebar({ dirPath, conversationId, onFileOpen, o
             </div>
           </div>
         </div>
+      )}
+      {searchOpen && (
+        <SearchModal
+          dirPath={dirPath}
+          onOpen={(abs, line) => onFileOpen?.(abs, line)}
+          onClose={() => setSearchOpen(false)}
+        />
       )}
     </div>
   );

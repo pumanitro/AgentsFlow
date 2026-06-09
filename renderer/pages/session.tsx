@@ -29,6 +29,9 @@ export default function SessionPage() {
   const [conv, setConv] = useState<Conversation | null>(null);
   const [rightPane, setRightPane] = useUIState('rightPane');
   const [openFile, setOpenFile] = useState<string | null>(null);
+  // 1-based line to jump to when a file is opened from search. The nonce makes
+  // re-opening the *same* file at the same line still trigger the jump.
+  const [gotoLine, setGotoLine] = useState<{ line: number; nonce: number } | null>(null);
   const [shellHeight, setShellHeight] = useDirectoryNumber(conv?.directoryId, 'shellHeight', 260);
   const [sidebarWidth, setSidebarWidth] = useDirectoryNumber(conv?.directoryId, 'sidebarWidth', 288);
   const [shellRoot, setShellRoot] = useState<ShellNode | null>(null);
@@ -216,7 +219,11 @@ export default function SessionPage() {
                 dirPath={conv.directoryPath}
                 conversationId={conv.id}
                 openedFilePath={openFile}
-                onFileOpen={(abs) => { setOpenFile(abs); setRightPane('file'); }}
+                onFileOpen={(abs, line) => {
+                  setOpenFile(abs);
+                  setGotoLine(typeof line === 'number' ? { line, nonce: Date.now() } : null);
+                  setRightPane('file');
+                }}
               />
             </aside>
             <div
@@ -243,7 +250,7 @@ export default function SessionPage() {
           <div className={`absolute inset-0 ${rightPane === 'file' ? 'visible' : 'invisible'}`}>
             {openFile ? (
               <PaneErrorBoundary key={openFile} label="Editor">
-                <FileEditor filePath={openFile} baseDir={conv?.directoryPath} autoFocus={rightPane === 'file'} />
+                <FileEditor filePath={openFile} baseDir={conv?.directoryPath} autoFocus={rightPane === 'file'} gotoLine={gotoLine?.line} gotoNonce={gotoLine?.nonce} />
               </PaneErrorBoundary>
             ) : (
               <div className="absolute inset-0 flex items-center justify-center text-muted text-sm">

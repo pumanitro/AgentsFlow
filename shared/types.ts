@@ -87,6 +87,10 @@ export interface AgentsFlowApi {
   gitStatus: (dirPath: string) => Promise<GitStatusResult>;
   listFiles: (dirPath: string) => Promise<FileEntry[]>;
 
+  // Full-text search across the non-ignored files in `dirPath` (the same set
+  // the Files tree shows). Returns matching lines grouped by file.
+  searchFiles: (dirPath: string, query: string, opts?: SearchOptions) => Promise<SearchResult>;
+
   // Subscribe to filesystem changes for `dirPath`. The callback is invoked
   // (after a small debounce) when files in the workspace change. Call the
   // returned function to unsubscribe — the underlying watcher is reference-
@@ -150,6 +154,34 @@ export interface GitStatusResult {
 export interface FileEntry {
   path: string;
   isIgnored: boolean;
+}
+
+export interface SearchOptions {
+  caseSensitive?: boolean;
+  isRegex?: boolean;
+}
+
+// One matching line within a file. `ranges` are [start, end) offsets into
+// `text` marking where the query matched, so the UI can highlight them.
+export interface SearchMatchLine {
+  line: number; // 1-based
+  text: string;
+  ranges: [number, number][];
+}
+
+export interface SearchFileResult {
+  path: string; // relative to the searched directory
+  matches: SearchMatchLine[];
+}
+
+export interface SearchResult {
+  files: SearchFileResult[];
+  totalMatches: number;
+  filesScanned: number;
+  // True when a cap (max files / matches) was hit and results are incomplete.
+  truncated: boolean;
+  // Set when the query itself was invalid (e.g. a malformed regex).
+  error?: string;
 }
 
 declare global {

@@ -118,6 +118,11 @@ export default function SpawnBar({ targetDir, onSend }: Props) {
       await onSend(finalPrompt, attachments);
       setPrompt('');
       setImages([]);
+      // Release keyboard focus from the textarea so the global Shift+↑/↓ reorder
+      // handler (which ignores keys while an input/textarea is focused) works
+      // immediately on the just-spawned chat — otherwise the cursor stays trapped
+      // here and moving items silently does nothing until the user clicks away.
+      textareaRef.current?.blur();
     } finally {
       setBusy(false);
     }

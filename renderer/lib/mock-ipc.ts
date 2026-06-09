@@ -1,4 +1,4 @@
-import type { AgentsFlowApi, Conversation, PinnedDivider, PinnedItemRef, TrackedDirectory, SpawnRequest, GitStatusResult, FileEntry } from '../../shared/types';
+import type { AgentsFlowApi, Conversation, PinnedDivider, PinnedItemRef, TrackedDirectory, SpawnRequest, GitStatusResult, FileEntry, SearchOptions, SearchResult, SearchMatchLine } from '../../shared/types';
 
 const STORE_KEY = 'agentsflow:mock:v3';
 
@@ -333,6 +333,46 @@ export function createMockApi(): AgentsFlowApi {
       { path: 'node_modules/react/package.json', isIgnored: true },
       { path: '.next/cache/data.bin', isIgnored: true },
     ],
+
+    searchFiles: async (_dir: string, query: string, opts?: SearchOptions): Promise<SearchResult> => {
+      const empty: SearchResult = { files: [], totalMatches: 0, filesScanned: 0, truncated: false };
+      if (!query) return empty;
+      let re: RegExp;
+      try {
+        const flags = opts?.caseSensitive ? 'g' : 'gi';
+        const pattern = opts?.isRegex ? query : query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        re = new RegExp(pattern, flags);
+      } catch (err) {
+        return { ...empty, error: `Invalid pattern: ${(err as Error).message}` };
+      }
+      // Reuse the mock file list + mock file content so the demo is interactive.
+      const entries: FileEntry[] = [
+        { path: 'package.json', isIgnored: false },
+        { path: 'README.md', isIgnored: false },
+        { path: 'src/index.tsx', isIgnored: false },
+        { path: 'src/components/Button.tsx', isIgnored: false },
+        { path: 'src/lib/api.ts', isIgnored: false },
+      ];
+      const out: SearchResult = { files: [], totalMatches: 0, filesScanned: 0, truncated: false };
+      for (const e of entries) {
+        const content = `// ${e.path}\n// (mock content)\nexport function hello() {\n  return 'hello from ${e.path}';\n}\n`;
+        const lines = content.split('\n');
+        const matches: SearchMatchLine[] = [];
+        for (let i = 0; i < lines.length; i++) {
+          re.lastIndex = 0;
+          const ranges: [number, number][] = [];
+          let m: RegExpExecArray | null;
+          while ((m = re.exec(lines[i])) !== null) {
+            ranges.push([m.index, m.index + m[0].length]);
+            if (m[0].length === 0) re.lastIndex++;
+          }
+          if (ranges.length) { matches.push({ line: i + 1, text: lines[i], ranges }); out.totalMatches++; }
+        }
+        out.filesScanned++;
+        if (matches.length) out.files.push({ path: e.path, matches });
+      }
+      return out;
+    },
 
     // File-watcher push API: no-op in mock mode (no real filesystem to watch
     // when running outside Electron). The slow heartbeat in FileTreeSidebar

@@ -1,6 +1,7 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { api } from '../lib/ipc';
-import CodeMirror, { Extension } from '@uiw/react-codemirror';
+import CodeMirror, { Extension, ReactCodeMirrorRef } from '@uiw/react-codemirror';
+import { EditorView } from '@codemirror/view';
 import BlockNoteMarkdownEditor from './BlockNoteMarkdownEditor';
 import { javascript } from '@codemirror/lang-javascript';
 import { python } from '@codemirror/lang-python';
@@ -15,6 +16,10 @@ interface Props {
   filePath: string;
   baseDir?: string;
   autoFocus?: boolean;
+  // 1-based line to scroll to and select (e.g. when opened from search).
+  gotoLine?: number;
+  // Bump this to re-trigger the jump for the same file+line.
+  gotoNonce?: number;
 }
 
 const IMAGE_EXTS = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'ico', 'avif']);
@@ -172,10 +177,11 @@ function PdfView({ filePath, baseDir }: Props) {
   );
 }
 
-function TextEditor({ filePath, baseDir, autoFocus }: Props) {
+function TextEditor({ filePath, baseDir, autoFocus, gotoLine, gotoNonce }: Props) {
   const [content, setContent] = useState<string>('');
   const [draft, setDraft] = useState<string>('');
   const [loading, setLoading] = useState(true);
+  const cmRef = useRef<ReactCodeMirrorRef | null>(null);
   const [saving, setSaving] = useState(false);
   const [savedAt, setSavedAt] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -232,6 +238,32 @@ function TextEditor({ filePath, baseDir, autoFocus }: Props) {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [dirty, draft, content, saving]);
 
+  // Jump to (and select) a target line — e.g. when opened from Find-in-Files.
+  // The CodeMirror view is mounted only once `loading` clears, so retry across
+  // a few frames until the view exists.
+  useEffect(() => {
+    if (!gotoLine || loading || error) return;
+    let frames = 0;
+    let raf = 0;
+    const tryJump = () => {
+      const view = cmRef.current?.view;
+      if (!view) {
+        if (frames++ < 30) raf = requestAnimationFrame(tryJump);
+        return;
+      }
+      const lineNo = Math.max(1, Math.min(gotoLine, view.state.doc.lines));
+      const lineInfo = view.state.doc.line(lineNo);
+      view.dispatch({
+        selection: { anchor: lineInfo.from, head: lineInfo.to },
+        effects: EditorView.scrollIntoView(lineInfo.from, { y: 'center' }),
+      });
+      view.focus();
+    };
+    tryJump();
+    return () => { if (raf) cancelAnimationFrame(raf); };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [gotoLine, gotoNonce, loading, error]);
+
   const display = relPath(filePath, baseDir);
   const lines = draft ? draft.split('\n').length : 0;
 
@@ -267,6 +299,7 @@ function TextEditor({ filePath, baseDir, autoFocus }: Props) {
           <div className="absolute inset-0 flex items-center justify-center text-muted text-sm text-center px-6">{error}</div>
         ) : (
           <CodeMirror
+            ref={cmRef}
             value={draft}
             onChange={(v) => setDraft(v)}
             theme={oneDark}
@@ -290,7 +323,7 @@ function TextEditor({ filePath, baseDir, autoFocus }: Props) {
   );
 }
 
-export default function FileEditor({ filePath, baseDir, autoFocus }: Props) {
+export default function FileEditor({ filePath, baseDir, autoFocus, gotoLine, gotoNonce }: Props) {
   const ext = fileExt(filePath);
   // SVG is also text, but we preview it visually rather than as XML markup.
   if (IMAGE_EXTS.has(ext) || ext === SVG_EXT) {
@@ -302,5 +335,5 @@ export default function FileEditor({ filePath, baseDir, autoFocus }: Props) {
   if (MARKDOWN_EXTS.has(ext)) {
     return <BlockNoteMarkdownEditor filePath={filePath} baseDir={baseDir} autoFocus={autoFocus} />;
   }
-  return <TextEditor filePath={filePath} baseDir={baseDir} autoFocus={autoFocus} />;
+  return <TextEditor filePath={filePath} baseDir={baseDir} autoFocus={autoFocus} gotoLine={gotoLine} gotoNonce={gotoNonce} />;
 }

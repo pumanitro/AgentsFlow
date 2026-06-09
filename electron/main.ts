@@ -37,6 +37,7 @@ import { refreshNow, startPoller, stopPoller, syncWatchers, unwatchConversation,
 import * as pty from './pty-manager';
 import * as fileWatcher from './file-watcher';
 import { gitStatus, listFiles } from './git';
+import { searchInFiles } from './search';
 import { deleteAttachmentFiles, pastedImagesRoot, prunePastedImages, sweepOrphanAttachments, todayDateSlug } from './attachments';
 import { Conversation, PinnedDivider, PinnedItemRef, SpawnRequest, TrackedDirectory } from '../shared/types';
 
@@ -414,6 +415,13 @@ ipcMain.handle('term:detach', (_e, channelId: string) => {
 
 ipcMain.handle('git:status', async (_e, dirPath: string) => gitStatus(dirPath));
 ipcMain.handle('files:list', async (_e, dirPath: string) => listFiles(dirPath));
+ipcMain.handle('files:search', async (_e, dirPath: string, query: string, opts) => {
+  try {
+    return await searchInFiles(dirPath, query, opts);
+  } catch (err) {
+    return { files: [], totalMatches: 0, filesScanned: 0, truncated: false, error: (err as Error)?.message ?? String(err) };
+  }
+});
 
 ipcMain.handle('files:watch', async (e, dirPath: string) => {
   const win = BrowserWindow.fromWebContents(e.sender) ?? mainWindow;
