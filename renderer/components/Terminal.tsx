@@ -55,6 +55,12 @@ export default function Terminal({ conversationId, shellId, shellCwd, onExit, au
         cursorBlink: true,
         scrollback: 10000,
         scrollOnUserInput: true,
+        // Treat the macOS Option key as Meta so ⌥+Backspace / ⌥+← send the
+        // word-delete / word-move escape sequences (ESC-prefixed) that zsh
+        // expects. Without this, xterm uses Option as a dead/compose key and
+        // injects stray characters instead, leaving the line in a state where
+        // normal Backspace can't cleanly remove them.
+        macOptionIsMeta: true,
         theme: {
           background: '#0f1115',
           foreground: '#e6e8ee',
@@ -137,6 +143,14 @@ export default function Terminal({ conversationId, shellId, shellCwd, onExit, au
       }
       channelId = cid;
 
+      // Push the current (possibly font-corrected) size to the freshly-attached
+      // PTY. The font-ready refit above can run while channelId is still null —
+      // it fixes xterm's grid but skips its resizeTerminal() call, leaving the
+      // shell with a stale COLUMNS. That desync makes zsh's line redraw land in
+      // the wrong cells, so backspace can't erase the leftmost characters.
+      // Re-asserting the size here closes that race.
+      api().resizeTerminal(cid, term.cols, term.rows);
+
       const offData = api().onTerminalData((id, data) => {
         if (id !== cid) return;
         term.write(data, sync);
@@ -148,6 +162,25 @@ export default function Terminal({ conversationId, shellId, shellCwd, onExit, au
       off.push(offData, offExit);
 
       term.onData((data) => api().writeTerminal(cid, data));
+
+      // ⌥+Backspace should delete the previous word; ⌘+Backspace clears the
+      // whole input (cursor → start of line). We send the byte sequences zsh
+      // binds explicitly so the behavior doesn't depend on macOptionIsMeta /
+      // keymap quirks: ⌥ → Ctrl-W (\x17 backward-kill-word), ⌘ → Ctrl-U
+      // (\x15 backward-kill-line). Returning false stops xterm's default.
+      term.attachCustomKeyEventHandler((e) => {
+        if (e.type !== 'keydown') return true;
+        const isBackspace = e.key === 'Backspace' || e.code === 'Backspace';
+        if (isBackspace && e.metaKey) {
+          api().writeTerminal(cid, '\x15'); // ⌘+Backspace → kill whole line
+          return false;
+        }
+        if (isBackspace && e.altKey) {
+          api().writeTerminal(cid, '\x17'); // ⌥+Backspace → kill previous word
+          return false;
+        }
+        return true;
+      });
 
       // Replay buffered history now that the data listener is registered. Doing
       // this earlier would race with listener wiring and the replay would be lost.
