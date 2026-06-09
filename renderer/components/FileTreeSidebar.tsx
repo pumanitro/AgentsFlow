@@ -9,6 +9,10 @@ interface Props {
   conversationId: string;
   onFileOpen?: (absolutePath: string, line?: number) => void;
   openedFilePath?: string | null;
+  // When set, the Changes/Files toggle uses local state seeded to this mode
+  // instead of the shared global preference — lets the preview default to
+  // Files without changing what the session view shows.
+  initialMode?: 'changes' | 'files';
 }
 
 function loadExpanded(key: string): Set<string> {
@@ -337,8 +341,10 @@ function TreeView({ root, expanded, setExpanded, onFileOpen, dirPath, openedFile
   return <div className="select-none">{renderNodes(root.children, 0)}</div>;
 }
 
-export default function FileTreeSidebar({ dirPath, conversationId, onFileOpen, openedFilePath }: Props) {
-  const [mode, setMode] = useUIState('sidebarMode');
+export default function FileTreeSidebar({ dirPath, conversationId, onFileOpen, openedFilePath, initialMode }: Props) {
+  const globalMode = useUIState('sidebarMode');
+  const localMode = useState<'changes' | 'files'>(initialMode ?? 'changes');
+  const [mode, setMode] = initialMode ? localMode : globalMode;
   const [status, setStatus] = useState<GitStatusResult | null>(null);
   const [files, setFiles] = useState<FileEntry[] | null>(null);
   const changesStore = useExpanded(`agentsflow:tree:${conversationId}:changes`);

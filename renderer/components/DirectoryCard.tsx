@@ -7,10 +7,11 @@ interface Props {
   historyCount: number;
   onSelect: () => void;
   onViewHistory: () => void;
+  onPreview: () => void;
   onRemove: () => void;
 }
 
-export default function DirectoryCard({ dir, selected, historyCount, onSelect, onViewHistory, onRemove }: Props) {
+export default function DirectoryCard({ dir, selected, historyCount, onSelect, onViewHistory, onPreview, onRemove }: Props) {
   const [menuOpen, setMenuOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement | null>(null);
 
@@ -63,6 +64,13 @@ export default function DirectoryCard({ dir, selected, historyCount, onSelect, o
                   onClick={() => { setMenuOpen(false); onViewHistory(); }}
                 >
                   View history{historyCount > 0 ? ` (${historyCount})` : ''}
+                </button>
+                <button
+                  role="menuitem"
+                  className="w-full text-left px-3 py-1.5 text-sm text-text hover:bg-panel"
+                  onClick={() => { setMenuOpen(false); onPreview(); }}
+                >
+                  Files preview
                 </button>
                 <button
                   role="menuitem"

@@ -508,6 +508,7 @@ export default function Home() {
                 historyCount={convsByDir.get(d.id)?.length ?? 0}
                 onSelect={() => setSelectedDirId(d.id)}
                 onViewHistory={() => setHistoryDirId(d.id)}
+                onPreview={() => router.push({ pathname: '/preview', query: { dir: d.id } })}
                 onRemove={() => handleRemoveDirectory(d)}
               />
             ))}
