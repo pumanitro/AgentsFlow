@@ -5,6 +5,7 @@ import DividerRow from '../components/DividerRow';
 import DirectoryCard from '../components/DirectoryCard';
 import SpawnBar from '../components/SpawnBar';
 import HistoryModal from '../components/HistoryModal';
+import HistoryTimeline from '../components/HistoryTimeline';
 import HelpModal from '../components/HelpModal';
 import StatsView from '../components/StatsView';
 import { api } from '../lib/ipc';
@@ -496,6 +497,17 @@ export default function Home() {
             )}
           </div>
         </section>
+
+        <HistoryTimeline
+          conversations={convs}
+          dirs={dirs}
+          onAttach={(c) => attach(c)}
+          onTogglePin={(c) => api().setConversationPinned(c.id, !c.pinned).then(refreshAll)}
+          onRemove={(c) => {
+            if (!window.confirm(`Stop and remove "${c.title || 'this conversation'}" permanently?`)) return;
+            api().removeAgent(c.id).then(refreshAll);
+          }}
+        />
 
         <section className="px-4 pt-6 pb-4">
           <h2 className="text-xs uppercase tracking-wider text-muted mb-2">Tracked directories</h2>
