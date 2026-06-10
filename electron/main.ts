@@ -39,7 +39,7 @@ import * as fileWatcher from './file-watcher';
 import { gitStatus, listFiles } from './git';
 import { searchInFiles } from './search';
 import { deleteAttachmentFiles, pastedImagesRoot, prunePastedImages, sweepOrphanAttachments, todayDateSlug } from './attachments';
-import { Conversation, PinnedDivider, PinnedItemRef, SpawnRequest, TrackedDirectory } from '../shared/types';
+import { Conversation, PinnedDivider, PinnedItemRef, SlashCommand, SpawnRequest, TrackedDirectory } from '../shared/types';
 
 const isDev = process.env.NODE_ENV === 'development';
 const loadURL = isDev ? null : serve({ directory: path.join(__dirname, '..', '..', '..', 'renderer', 'out') });
@@ -413,6 +413,110 @@ ipcMain.handle('term:detach', (_e, channelId: string) => {
   pty.detach(channelId);
 });
 
+// --- Slash command / skill discovery -------------------------------------
+// Parses a one-line description from a command/skill markdown file: prefers a
+// YAML frontmatter `description:` field, otherwise falls back to the first
+// non-empty, non-heading line.
+function describeMarkdown(filePath: string): string {
+  let raw = '';
+  try {
+    raw = fs.readFileSync(filePath, 'utf8');
+  } catch {
+    return '';
+  }
+  const lines = raw.split(/\r?\n/);
+  // YAML frontmatter block delimited by ---
+  if (lines[0]?.trim() === '---') {
+    for (let i = 1; i < lines.length; i++) {
+      const t = lines[i].trim();
+      if (t === '---') break;
+      const m = /^description\s*:\s*(.+)$/i.exec(t);
+      if (m) return m[1].trim().replace(/^["']|["']$/g, '');
+    }
+    // No description in frontmatter — use first body line after it.
+    const end = lines.indexOf('---', 1);
+    for (let i = end + 1; i < lines.length; i++) {
+      const t = lines[i].trim();
+      if (t && !t.startsWith('#')) return t;
+    }
+    return '';
+  }
+  for (const line of lines) {
+    const t = line.trim();
+    if (t && !t.startsWith('#')) return t;
+  }
+  return '';
+}
+
+// Reads all slash commands and skills under a single `.claude` directory.
+// `commands/*.md` (recursively, ":"-namespaced) become commands; each
+// `skills/<name>/SKILL.md` becomes a skill.
+function readClaudeScope(claudeDir: string, scope: 'project' | 'user'): SlashCommand[] {
+  const out: SlashCommand[] = [];
+
+  const commandsDir = path.join(claudeDir, 'commands');
+  const walkCommands = (dir: string, prefix: string) => {
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const ent of entries) {
+      const full = path.join(dir, ent.name);
+      if (ent.isDirectory()) {
+        walkCommands(full, `${prefix}${ent.name}:`);
+      } else if (ent.isFile() && ent.name.endsWith('.md')) {
+        const name = `${prefix}${ent.name.replace(/\.md$/, '')}`;
+        out.push({
+          name,
+          invocation: `/${name}`,
+          description: describeMarkdown(full),
+          scope,
+          kind: 'command',
+          source: full,
+        });
+      }
+    }
+  };
+  walkCommands(commandsDir, '');
+
+  const skillsDir = path.join(claudeDir, 'skills');
+  let skillEntries: fs.Dirent[] = [];
+  try {
+    skillEntries = fs.readdirSync(skillsDir, { withFileTypes: true });
+  } catch {
+    /* no skills dir */
+  }
+  for (const ent of skillEntries) {
+    if (!ent.isDirectory()) continue;
+    const skillFile = path.join(skillsDir, ent.name, 'SKILL.md');
+    if (!fs.existsSync(skillFile)) continue;
+    out.push({
+      name: ent.name,
+      invocation: `/${ent.name}`,
+      description: describeMarkdown(skillFile),
+      scope,
+      kind: 'skill',
+      source: skillFile,
+    });
+  }
+
+  return out;
+}
+
+ipcMain.handle('skills:list', async (_e, dirPath: string | null): Promise<SlashCommand[]> => {
+  const byName = new Map<string, SlashCommand>();
+  // User scope first so project entries overwrite (shadow) same-named ones.
+  const userClaude = path.join(app.getPath('home'), '.claude');
+  for (const cmd of readClaudeScope(userClaude, 'user')) byName.set(cmd.name, cmd);
+  if (dirPath) {
+    const projectClaude = path.join(dirPath, '.claude');
+    for (const cmd of readClaudeScope(projectClaude, 'project')) byName.set(cmd.name, cmd);
+  }
+  return Array.from(byName.values()).sort((a, b) => a.name.localeCompare(b.name));
+});
+
 ipcMain.handle('git:status', async (_e, dirPath: string) => gitStatus(dirPath));
 ipcMain.handle('files:list', async (_e, dirPath: string) => listFiles(dirPath));
 ipcMain.handle('files:search', async (_e, dirPath: string, query: string, opts) => {
@@ -490,6 +594,18 @@ ipcMain.handle('files:readBinary', async (_e, filePath: string) => {
   } catch (err) {
     return { dataUrl: '', mime: '', size: 0, truncated: false, error: (err as Error).message };
   }
+});
+
+ipcMain.handle('files:create', async (_e, filePath: string) => {
+  const fsMod = require('fs') as typeof import('fs');
+  const pathMod = require('path') as typeof import('path');
+  if (!pathMod.isAbsolute(filePath)) {
+    throw new Error('create: path must be absolute');
+  }
+  fsMod.mkdirSync(pathMod.dirname(filePath), { recursive: true });
+  // 'wx' fails if the file already exists — creating must never clobber.
+  fsMod.writeFileSync(filePath, '', { encoding: 'utf8', flag: 'wx' });
+  return { ok: true as const };
 });
 
 ipcMain.handle('files:rename', async (_e, oldPath: string, newPath: string) => {
@@ -573,5 +689,20 @@ ipcMain.handle('images:saveFromPaste', async (_e, dataBase64: string, mimeType: 
   const buf = Buffer.from(dataBase64, 'base64');
   fsMod.writeFileSync(fullPath, buf);
   try { prunePastedImages(root); } catch {}
+  return { savedPath: fullPath };
+});
+
+ipcMain.handle('images:saveToDir', async (_e, targetDir: string, dataBase64: string, mimeType: string): Promise<{ savedPath: string }> => {
+  const fsMod = require('fs') as typeof import('fs');
+  const pathMod = require('path') as typeof import('path');
+  if (!pathMod.isAbsolute(targetDir)) {
+    throw new Error('saveToDir: targetDir must be absolute');
+  }
+  const ext = (mimeType.split('/')[1] || 'png').replace(/[^a-z0-9]/gi, '') || 'png';
+  fsMod.mkdirSync(targetDir, { recursive: true });
+  const filename = `pasted-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${ext}`;
+  const fullPath = pathMod.join(targetDir, filename);
+  // 'wx' — never clobber an existing file, however unlikely the name collision.
+  fsMod.writeFileSync(fullPath, Buffer.from(dataBase64, 'base64'), { flag: 'wx' });
   return { savedPath: fullPath };
 });

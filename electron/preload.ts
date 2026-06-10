@@ -6,6 +6,8 @@ const api: AgentsFlowApi = {
   addDirectory: () => ipcRenderer.invoke('dirs:add'),
   removeDirectory: (id) => ipcRenderer.invoke('dirs:remove', id),
 
+  listSlashCommands: (dirPath) => ipcRenderer.invoke('skills:list', dirPath),
+
   listConversations: () => ipcRenderer.invoke('convs:list'),
   spawnAgent: (req: SpawnRequest) => ipcRenderer.invoke('convs:spawn', req),
   updateConversationTitle: (id, title) =>
@@ -70,9 +72,12 @@ const api: AgentsFlowApi = {
   },
   saveImageFromPaste: (dataBase64, mimeType) =>
     ipcRenderer.invoke('images:saveFromPaste', dataBase64, mimeType),
+  saveImageToDir: (targetDir, dataBase64, mimeType) =>
+    ipcRenderer.invoke('images:saveToDir', targetDir, dataBase64, mimeType),
   readTextFile: (filePath) => ipcRenderer.invoke('files:readText', filePath),
   writeTextFile: (filePath, content) => ipcRenderer.invoke('files:writeText', filePath, content),
   readBinaryFile: (filePath) => ipcRenderer.invoke('files:readBinary', filePath),
+  createFile: (filePath) => ipcRenderer.invoke('files:create', filePath),
   renamePath: (oldPath, newPath) => ipcRenderer.invoke('files:rename', oldPath, newPath),
   removePath: (targetPath) => ipcRenderer.invoke('files:remove', targetPath),
 

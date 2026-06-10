@@ -39,6 +39,25 @@ export type PinnedItemRef =
   | { kind: 'conversation'; id: string }
   | { kind: 'divider'; id: string };
 
+// A slash command / skill discoverable under a `.claude` directory. Surfaced
+// in the Spawn bar's autocomplete when the prompt starts with "/".
+export interface SlashCommand {
+  // The base name without extension, e.g. "smart-commit". For nested command
+  // folders this is namespaced with ":" (e.g. "git:commit").
+  name: string;
+  // What gets inserted into the prompt, e.g. "/smart-commit".
+  invocation: string;
+  // One-line summary pulled from YAML frontmatter `description:` if present,
+  // otherwise the first non-empty line of the file.
+  description: string;
+  // Where it was found. Project (the spawn target's .claude) shadows user (~/.claude).
+  scope: 'project' | 'user';
+  // A plain command (.claude/commands/*.md) or a skill (.claude/skills/*/SKILL.md).
+  kind: 'command' | 'skill';
+  // Absolute path to the backing file.
+  source: string;
+}
+
 export interface SpawnRequest {
   directoryId: string;
   prompt: string;
@@ -55,6 +74,11 @@ export interface AgentsFlowApi {
   listDirectories: () => Promise<TrackedDirectory[]>;
   addDirectory: () => Promise<TrackedDirectory | null>;
   removeDirectory: (id: string) => Promise<void>;
+
+  // Lists the slash commands/skills available under `<dirPath>/.claude`
+  // (project scope) merged with `~/.claude` (user scope). Pass null for the
+  // user scope only. Project entries shadow user entries with the same name.
+  listSlashCommands: (dirPath: string | null) => Promise<SlashCommand[]>;
 
   listConversations: () => Promise<Conversation[]>;
   spawnAgent: (req: SpawnRequest) => Promise<SpawnResult>;
@@ -100,11 +124,17 @@ export interface AgentsFlowApi {
   unwatchFiles: (dirPath: string) => Promise<void>;
   onFilesUpdated: (cb: (dirPath: string) => void) => () => void;
   saveImageFromPaste: (dataBase64: string, mimeType: string) => Promise<{ savedPath: string }>;
+  // Saves image bytes into `targetDir` (the MD editor uses this to keep pasted
+  // images next to the opened file) and returns the absolute saved path.
+  saveImageToDir: (targetDir: string, dataBase64: string, mimeType: string) => Promise<{ savedPath: string }>;
 
   readTextFile: (filePath: string) => Promise<ReadFileResult>;
   writeTextFile: (filePath: string, content: string) => Promise<{ ok: true }>;
   readBinaryFile: (filePath: string) => Promise<ReadBinaryResult>;
 
+  // Creates a new empty file. Fails if a file already exists at that path;
+  // missing parent directories are created.
+  createFile: (filePath: string) => Promise<{ ok: true }>;
   renamePath: (oldPath: string, newPath: string) => Promise<{ ok: true }>;
   removePath: (targetPath: string) => Promise<{ ok: true }>;
 

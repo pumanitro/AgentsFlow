@@ -73,6 +73,12 @@ export function createMockApi(): AgentsFlowApi {
 
   return {
     listDirectories: async () => state.directories,
+    listSlashCommands: async () => [
+      { name: 'smart-commit', invocation: '/smart-commit', description: 'Generate a meaningful git commit message from recent history and changes.', scope: 'user' as const, kind: 'command' as const, source: '~/.claude/commands/smart-commit.md' },
+      { name: 'diagnose', invocation: '/diagnose', description: 'Reproduce a reported bug live in Chrome and trace the data end-to-end.', scope: 'user' as const, kind: 'command' as const, source: '~/.claude/commands/diagnose.md' },
+      { name: 'fig', invocation: '/fig', description: 'Use the Figma MCP server to match designs exactly.', scope: 'user' as const, kind: 'command' as const, source: '~/.claude/commands/fig.md' },
+      { name: 'review', invocation: '/review', description: 'Review a pull request.', scope: 'project' as const, kind: 'skill' as const, source: '.claude/skills/review/SKILL.md' },
+    ],
     addDirectory: async () => {
       const path = window.prompt('[mock] Enter directory absolute path:', '/Users/demo/Projects/new-project');
       if (!path) return null;
@@ -292,6 +298,10 @@ export function createMockApi(): AgentsFlowApi {
         { path: 'scratch/draft.md', status: 'untracked', staged: false, unstaged: true },
       ],
     }),
+    saveImageToDir: async (targetDir: string, _data: string, mime: string) => {
+      const ext = (mime.split('/')[1] || 'png').replace(/[^a-z0-9]/gi, '') || 'png';
+      return { savedPath: `${targetDir}/pasted-${Date.now()}.${ext}` };
+    },
     saveImageFromPaste: async (_data: string, mime: string) => {
       const ext = (mime.split('/')[1] || 'png').replace(/[^a-z0-9]/gi, '') || 'png';
       const now = new Date();
@@ -308,6 +318,7 @@ export function createMockApi(): AgentsFlowApi {
       return { content, size: content.length, truncated: false, binary: false };
     },
     writeTextFile: async (_fp: string, _content: string) => ({ ok: true as const }),
+    createFile: async (_filePath: string) => ({ ok: true as const }),
     renamePath: async (_oldPath: string, _newPath: string) => ({ ok: true as const }),
     removePath: async (_target: string) => ({ ok: true as const }),
     copyImageToClipboard: async (_filePath: string) => ({ ok: true as const }),

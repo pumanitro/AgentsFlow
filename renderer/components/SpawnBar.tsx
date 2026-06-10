@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState } from 'react';
-import { TrackedDirectory } from '../../shared/types';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { SlashCommand, TrackedDirectory } from '../../shared/types';
 import { api } from '../lib/ipc';
 import ImagePreviewModal from './ImagePreviewModal';
 
@@ -37,6 +37,67 @@ export default function SpawnBar({ targetDir, onSend }: Props) {
   const [images, setImages] = useState<PastedImage[]>(draft.images);
   const [previewing, setPreviewing] = useState<PastedImage | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+
+  // --- Slash command / skill autocomplete --------------------------------
+  const [slashCommands, setSlashCommands] = useState<SlashCommand[]>([]);
+  const [menuIndex, setMenuIndex] = useState(0);
+  // The exact prompt value the user dismissed the menu on (via Esc). The menu
+  // stays hidden until the prompt changes again, so Esc actually closes it.
+  const [dismissedAt, setDismissedAt] = useState<string | null>(null);
+
+  // (Re)load the available commands whenever the spawn target changes. Project
+  // (.claude in the target dir) shadows user-level (~/.claude) entries.
+  useEffect(() => {
+    let alive = true;
+    api()
+      .listSlashCommands(targetDir?.path ?? null)
+      .then((cmds) => { if (alive) setSlashCommands(cmds); })
+      .catch(() => { if (alive) setSlashCommands([]); });
+    return () => { alive = false; };
+  }, [targetDir?.path]);
+
+  // The menu triggers only while the whole input is a bare "/token" with no
+  // space yet — i.e. you're still picking a command, not typing its arguments.
+  const slashQuery = useMemo(() => {
+    const m = /^\/([^\s]*)$/.exec(prompt);
+    return m ? m[1] : null;
+  }, [prompt]);
+
+  const filtered = useMemo(() => {
+    if (slashQuery === null) return [] as SlashCommand[];
+    const q = slashQuery.toLowerCase();
+    return slashCommands
+      .filter((c) => c.name.toLowerCase().includes(q))
+      .sort((a, b) => {
+        const aStarts = a.name.toLowerCase().startsWith(q) ? 0 : 1;
+        const bStarts = b.name.toLowerCase().startsWith(q) ? 0 : 1;
+        if (aStarts !== bStarts) return aStarts - bStarts;
+        return a.name.localeCompare(b.name);
+      });
+  }, [slashCommands, slashQuery]);
+
+  const menuOpen = slashQuery !== null && prompt !== dismissedAt && filtered.length > 0;
+
+  // Keep the highlighted row valid as the filtered set shrinks/grows.
+  useEffect(() => { setMenuIndex(0); }, [slashQuery]);
+  useEffect(() => {
+    if (menuIndex > filtered.length - 1) setMenuIndex(Math.max(0, filtered.length - 1));
+  }, [filtered.length, menuIndex]);
+
+  // Once a command has been chosen (text is "/name …"), surface it as a chip so
+  // the user can see which skill their prompt will run.
+  const activeCommand = useMemo(() => {
+    const m = /^\/([^\s]+)(?:\s|$)/.exec(prompt);
+    if (!m) return null;
+    return slashCommands.find((c) => c.name === m[1]) ?? null;
+  }, [prompt, slashCommands]);
+
+  const chooseCommand = (cmd: SlashCommand) => {
+    // Insert the invocation followed by a space so the user keeps typing args.
+    setPrompt(`${cmd.invocation} `);
+    setDismissedAt(null);
+    requestAnimationFrame(() => textareaRef.current?.focus());
+  };
 
   useEffect(() => { draft.prompt = prompt; }, [prompt]);
   useEffect(() => { draft.images = images; }, [images]);
@@ -130,7 +191,59 @@ export default function SpawnBar({ targetDir, onSend }: Props) {
 
   return (
     <>
-      <div className="border-t border-border bg-panel/80 backdrop-blur px-4 py-3 flex flex-col gap-2">
+      <div className="relative border-t border-border bg-panel/80 backdrop-blur px-4 py-3 flex flex-col gap-2">
+        {menuOpen && (
+          <div className="absolute bottom-full left-4 right-4 mb-2 z-30 rounded-lg border border-accent/60 bg-bg shadow-xl shadow-black/40 overflow-hidden">
+            <div className="px-3 py-1.5 text-[10px] uppercase tracking-wide text-muted border-b border-border bg-panel2/60">
+              Slash commands{slashQuery ? ` · /${slashQuery}` : ''}
+            </div>
+            <ul className="max-h-64 overflow-y-auto py-1">
+              {filtered.map((cmd, i) => {
+                const selected = i === menuIndex;
+                return (
+                  <li key={`${cmd.scope}:${cmd.name}`}>
+                    <button
+                      type="button"
+                      onMouseEnter={() => setMenuIndex(i)}
+                      onMouseDown={(e) => { e.preventDefault(); chooseCommand(cmd); }}
+                      className={`w-full text-left px-3 py-1.5 flex items-baseline gap-2 ${
+                        selected ? 'bg-accent text-bg' : 'text-text hover:bg-panel2'
+                      }`}
+                    >
+                      <span className="font-medium shrink-0">{cmd.invocation}</span>
+                      <span
+                        className={`text-[10px] px-1.5 py-px rounded-full shrink-0 ${
+                          selected
+                            ? 'bg-bg/20 text-bg'
+                            : cmd.scope === 'project'
+                              ? 'bg-accent/20 text-accent'
+                              : 'bg-panel2 text-muted'
+                        }`}
+                      >
+                        {cmd.kind === 'skill' ? 'skill' : cmd.scope}
+                      </span>
+                      <span className={`text-xs truncate ${selected ? 'text-bg/80' : 'text-muted'}`}>
+                        {cmd.description}
+                      </span>
+                    </button>
+                  </li>
+                );
+              })}
+            </ul>
+            <div className="px-3 py-1 text-[10px] text-muted border-t border-border bg-panel2/60">
+              ↑↓ to navigate · ↵ / Tab to select · Esc to dismiss
+            </div>
+          </div>
+        )}
+        {activeCommand && !menuOpen && (
+          <div className="flex items-center gap-2 text-xs">
+            <span className="inline-flex items-center gap-1.5 px-2 py-1 rounded-md bg-accent/15 border border-accent/50 text-accent font-medium">
+              <span>⚡</span>
+              <span>{activeCommand.invocation}</span>
+            </span>
+            <span className="text-muted truncate">{activeCommand.description}</span>
+          </div>
+        )}
         {pasteError && (
           <div className="flex items-center gap-2 px-3 py-2 rounded-md border border-err/60 bg-err/10 text-err text-xs">
             <span>⚠️</span>
@@ -171,6 +284,29 @@ export default function SpawnBar({ targetDir, onSend }: Props) {
             onChange={(e) => setPrompt(e.target.value)}
             onPaste={handlePaste}
             onKeyDown={(e) => {
+              if (menuOpen) {
+                if (e.key === 'ArrowDown') {
+                  e.preventDefault();
+                  setMenuIndex((i) => (i + 1) % filtered.length);
+                  return;
+                }
+                if (e.key === 'ArrowUp') {
+                  e.preventDefault();
+                  setMenuIndex((i) => (i - 1 + filtered.length) % filtered.length);
+                  return;
+                }
+                if (e.key === 'Enter' || e.key === 'Tab') {
+                  e.preventDefault();
+                  const pick = filtered[menuIndex];
+                  if (pick) chooseCommand(pick);
+                  return;
+                }
+                if (e.key === 'Escape') {
+                  e.preventDefault();
+                  setDismissedAt(prompt);
+                  return;
+                }
+              }
               if (e.key === 'Enter' && !e.shiftKey) {
                 e.preventDefault();
                 submit();

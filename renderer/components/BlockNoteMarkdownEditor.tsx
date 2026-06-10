@@ -101,15 +101,95 @@ async function inlineLocalImages(
   return { markdown: out, restoreMap };
 }
 
+// Files we're willing to garbage-collect when their last reference is removed:
+// anything image-shaped, plus our own pasted-attachment naming pattern.
+const IMAGE_NAME = /\.(png|jpe?g|gif|webp|svg|bmp|ico|avif)$/i;
+const PASTED_NAME = /^pasted-\d+-[a-z0-9]+\.[a-z0-9]+$/i;
+
+/** All local files referenced by images/links in `markdown`, as absolute paths. */
+function extractLocalRefs(markdown: string, mdPath: string, baseDir?: string): Set<string> {
+  const re = /!?\[[^\]]*\]\(([^)]+)\)/g;
+  const out = new Set<string>();
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(markdown)) !== null) {
+    const abs = resolveImageRef(m[1], mdPath, baseDir);
+    if (abs) out.add(abs);
+  }
+  return out;
+}
+
+/**
+ * Best-effort GC of a single local file whose reference was removed from the
+ * markdown. Deletes only when ALL of these hold:
+ *   - it lives inside the workspace (or the md file's directory)
+ *   - it looks like an image / one of our pasted attachments
+ *   - a workspace-wide text search finds no other file mentioning its name
+ * Successful deletions are recorded in `done` so other code paths don't retry.
+ */
+async function gcLocalFile(
+  abs: string,
+  mdPath: string,
+  baseDir: string | undefined,
+  done: Set<string>,
+): Promise<void> {
+  if (done.has(abs)) return;
+  const a = api();
+  if (typeof a.removePath !== 'function' || typeof a.searchFiles !== 'function') return;
+  const root = baseDir || dirname(mdPath);
+  if (!abs.startsWith(root + '/')) return;
+  const name = abs.slice(abs.lastIndexOf('/') + 1);
+  if (!IMAGE_NAME.test(name) && !PASTED_NAME.test(name)) return;
+  try {
+    // Our own pasted attachments embed a timestamp+random slug, so their
+    // names are unique to this document — delete straight away. Generic
+    // image names get a workspace-wide reference search first, which can
+    // take a while on big repos.
+    if (!PASTED_NAME.test(name)) {
+      const res = await a.searchFiles(root, name, { caseSensitive: true });
+      // Incomplete evidence (capped or failed search) — keep the file.
+      if (res.error || res.truncated) return;
+      const mdRel = mdPath.startsWith(root + '/') ? mdPath.slice(root.length + 1) : null;
+      if (res.files.some((f) => f.path !== mdRel)) return;
+    }
+    await a.removePath(abs);
+    done.add(abs);
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.error('[agentsflow] orphaned image cleanup failed', abs, err);
+  }
+}
+
+/**
+ * Save-time backstop: GC every image referenced by the previous on-disk
+ * markdown but not by the newly saved one. (The primary cleanup happens live
+ * as blocks are removed in the editor — see the onChange handler.)
+ */
+async function cleanupOrphanedImages(
+  prevMd: string,
+  newMd: string,
+  mdPath: string,
+  baseDir: string | undefined,
+  done: Set<string>,
+): Promise<void> {
+  const before = extractLocalRefs(prevMd, mdPath, baseDir);
+  if (before.size === 0) return;
+  const after = extractLocalRefs(newMd, mdPath, baseDir);
+  for (const abs of before) {
+    if (after.has(abs)) continue;
+    await gcLocalFile(abs, mdPath, baseDir, done);
+  }
+}
+
 /**
  * Reverse of inlineLocalImages — replaces inlined data URLs in serialized
  * markdown with the original on-disk refs so saves don't bloat the file.
  */
 function restoreImageRefs(markdown: string, restoreMap: Map<string, string>): string {
   if (restoreMap.size === 0) return markdown;
-  return markdown.replace(/!\[([^\]]*)\]\((data:[^)]+)\)/g, (full, alt: string, url: string) => {
+  // Also matches plain links — non-image pastes serialize as [name](data:…).
+  return markdown.replace(/(!?)\[([^\]]*)\]\((data:[^)]+)\)/g, (full, bang: string, alt: string, url: string) => {
     const original = restoreMap.get(url);
-    return original ? `![${alt}](${original})` : full;
+    return original ? `${bang}[${alt}](${original})` : full;
   });
 }
 
@@ -134,7 +214,45 @@ function Inner({
   restoreMap: Map<string, string>;
   autoFocus?: boolean;
 }) {
-  const editor = useCreateBlockNote({ initialContent: initialBlocks });
+  const restoreRef = useRef(restoreMap);
+  restoreRef.current = restoreMap;
+  const [error, setError] = useState<string | null>(null);
+
+  // Pasted/dropped images: write the bytes next to the opened .md file and
+  // show the editor a data URL (the sandbox can't load local files directly).
+  // Registering the on-disk name in the restore map makes the save path
+  // serialize the block as ![alt](pasted-….png) instead of the data URL.
+  const uploadFile = useCallback(async (file: File): Promise<string> => {
+    let dataUrl = '';
+    try {
+      dataUrl = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result));
+        reader.onerror = () => reject(reader.error ?? new Error('Could not read pasted file'));
+        reader.readAsDataURL(file);
+      });
+      const a = api();
+      if (typeof a.saveImageToDir !== 'function') {
+        throw new Error('saveImageToDir unavailable — preload needs a refresh');
+      }
+      const base64 = dataUrl.slice(dataUrl.indexOf(',') + 1);
+      const { savedPath } = await a.saveImageToDir(dirname(filePath), base64, file.type || 'image/png');
+      const name = savedPath.slice(savedPath.lastIndexOf('/') + 1);
+      restoreRef.current.set(dataUrl, name);
+      setError(null);
+    } catch (err) {
+      // Never throw out of uploadFile — BlockNote doesn't catch rejections,
+      // so a throw here crashes the whole view. Keep the image inline instead.
+      // eslint-disable-next-line no-console
+      console.error('[agentsflow] image paste failed', err);
+      setError(dataUrl
+        ? 'Image kept inline — restart the app to save pasted images next to the file.'
+        : `Paste failed: ${(err as Error)?.message ?? String(err)}`);
+    }
+    return dataUrl;
+  }, [filePath]);
+
+  const editor = useCreateBlockNote({ initialContent: initialBlocks, uploadFile });
 
   useEffect(() => {
     if (!autoFocus) return;
@@ -143,10 +261,18 @@ function Inner({
   const [dirty, setDirty] = useState(false);
   const [saving, setSaving] = useState(false);
   const [savedAt, setSavedAt] = useState<number | null>(null);
-  const [error, setError] = useState<string | null>(null);
   const lastSavedMd = useRef<string>(initialMarkdown);
-  const restoreRef = useRef(restoreMap);
-  restoreRef.current = restoreMap;
+
+  // Live image GC bookkeeping: the set of local files the document currently
+  // references, pending deletion timers, and files already deleted.
+  const docRefs = useRef<Set<string> | null>(null);
+  if (docRefs.current === null) docRefs.current = extractLocalRefs(initialMarkdown, filePath, baseDir);
+  const gcTimers = useRef(new Map<string, ReturnType<typeof setTimeout>>());
+  const gcDone = useRef(new Set<string>());
+  useEffect(() => {
+    const timers = gcTimers.current;
+    return () => { for (const t of timers.values()) clearTimeout(t); timers.clear(); };
+  }, []);
 
   // Track dirtiness by serializing on every change and comparing to the last-saved markdown.
   useEffect(() => {
@@ -157,12 +283,40 @@ function Inner({
           restoreRef.current,
         );
         setDirty(md !== lastSavedMd.current);
+
+        // Live GC: delete a referenced workspace image immediately when its
+        // last reference is removed from the document. The next-tick timer
+        // only coalesces multi-transaction edits (e.g. drag-reorder) so a
+        // single operation that momentarily drops the ref doesn't trigger.
+        const current = extractLocalRefs(md, filePath, baseDir);
+        const prev = docRefs.current ?? current;
+        docRefs.current = current;
+        for (const [abs, t] of gcTimers.current) {
+          if (current.has(abs)) { clearTimeout(t); gcTimers.current.delete(abs); }
+        }
+        for (const abs of prev) {
+          if (current.has(abs) || gcDone.current.has(abs) || gcTimers.current.has(abs)) continue;
+          const timer = setTimeout(async () => {
+            gcTimers.current.delete(abs);
+            try {
+              const latest = restoreImageRefs(
+                await editor.blocksToMarkdownLossy(editor.document),
+                restoreRef.current,
+              );
+              if (extractLocalRefs(latest, filePath, baseDir).has(abs)) return; // came back
+              await gcLocalFile(abs, filePath, baseDir, gcDone.current);
+            } catch {
+              // best-effort — never disturb editing
+            }
+          }, 0);
+          gcTimers.current.set(abs, timer);
+        }
       } catch {
         // ignore — keep last known state
       }
     });
     return () => { off?.(); };
-  }, [editor]);
+  }, [editor, filePath, baseDir]);
 
   const save = useCallback(async () => {
     if (saving) return;
@@ -174,15 +328,19 @@ function Inner({
         restoreRef.current,
       );
       await api().writeTextFile(filePath, md);
+      const prevMd = lastSavedMd.current;
       lastSavedMd.current = md;
       setDirty(false);
       setSavedAt(Date.now());
+      // Fire-and-forget backstop: delete pasted/linked images whose last
+      // reference was removed (skipped if anything else still mentions them).
+      void cleanupOrphanedImages(prevMd, md, filePath, baseDir, gcDone.current);
     } catch (err) {
       setError(`Save failed: ${(err as Error).message}`);
     } finally {
       setSaving(false);
     }
-  }, [editor, filePath, saving]);
+  }, [editor, filePath, baseDir, saving]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {

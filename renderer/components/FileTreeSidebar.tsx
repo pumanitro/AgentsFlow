@@ -513,6 +513,7 @@ export default function FileTreeSidebar({ dirPath, conversationId, onFileOpen, o
 
   const [renaming, setRenaming] = useState<{ node: TreeNode; value: string; error?: string; busy?: boolean } | null>(null);
   const [removing, setRemoving] = useState<{ node: TreeNode; error?: string; busy?: boolean } | null>(null);
+  const [creating, setCreating] = useState<{ parentRel: string; value: string; error?: string; busy?: boolean } | null>(null);
   const [toast, setToast] = useState<{ kind: 'ok' | 'err'; text: string } | null>(null);
 
   useEffect(() => {
@@ -529,6 +530,51 @@ export default function FileTreeSidebar({ dirPath, conversationId, onFileOpen, o
   const startRemove = (node: TreeNode) => {
     setMenu(null);
     setRemoving({ node });
+  };
+
+  const startCreate = (parentRel: string) => {
+    setMenu(null);
+    setCreating({ parentRel, value: 'untitled.md' });
+  };
+
+  const submitCreate = async () => {
+    if (!creating) return;
+    let name = creating.value.trim();
+    if (!name) { setCreating(null); return; }
+    if (name.includes('/') || name.includes('\\') || name === '.' || name === '..') {
+      setCreating({ ...creating, error: 'Invalid name. No path separators.' });
+      return;
+    }
+    if (!name.includes('.')) name = `${name}.md`;
+    const a = api();
+    if (typeof a.createFile !== 'function') {
+      setCreating(null);
+      setToast({ kind: 'err', text: 'Restart the app to enable this (preload needs to refresh).' });
+      return;
+    }
+    const fullPath = creating.parentRel
+      ? `${dirPath}/${creating.parentRel}/${name}`
+      : `${dirPath}/${name}`;
+    setCreating({ ...creating, busy: true, error: undefined });
+    try {
+      await a.createFile(fullPath);
+      setCreating(null);
+      if (creating.parentRel) {
+        const next = new Set(expanded);
+        let acc = '';
+        for (const seg of creating.parentRel.split('/')) {
+          acc = acc ? `${acc}/${seg}` : seg;
+          next.add(acc);
+        }
+        setExpanded(next);
+      }
+      await refresh();
+      onFileOpen?.(fullPath);
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.error('[agentsflow] create file failed', err);
+      setCreating({ ...creating, busy: false, error: (err as Error)?.message ?? String(err) });
+    }
   };
 
   const copyImage = async (node: TreeNode) => {
@@ -730,6 +776,14 @@ export default function FileTreeSidebar({ dirPath, conversationId, onFileOpen, o
           )}
           <button
             className="w-full text-left px-3 py-1.5 text-sm hover:bg-panel"
+            onClick={() => startCreate(
+              menu.node.kind === 'dir'
+                ? menu.node.path
+                : menu.node.path.includes('/') ? menu.node.path.slice(0, menu.node.path.lastIndexOf('/')) : '',
+            )}
+          >New file…</button>
+          <button
+            className="w-full text-left px-3 py-1.5 text-sm hover:bg-panel"
             onClick={() => startRename(menu.node)}
           >Rename…</button>
           <button
@@ -773,6 +827,51 @@ export default function FileTreeSidebar({ dirPath, conversationId, onFileOpen, o
                 disabled={renaming.busy || !renaming.value.trim()}
                 className="px-3 py-1.5 rounded-md bg-accent text-bg font-medium text-sm disabled:opacity-40 hover:bg-accent2"
               >{renaming.busy ? 'Renaming…' : 'Rename'}</button>
+            </div>
+          </div>
+        </div>
+      )}
+      {creating && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-bg/70 backdrop-blur-sm"
+          onClick={() => !creating.busy && setCreating(null)}
+        >
+          <div
+            className="bg-panel border border-border rounded-md p-4 w-[420px] max-w-[90vw] shadow-xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="text-sm font-medium text-text mb-1">New file</div>
+            <div className="text-[11px] text-muted mb-3 truncate">in {creating.parentRel || './'}</div>
+            <input
+              autoFocus
+              value={creating.value}
+              onFocus={(e) => {
+                // Pre-select the basename so typing replaces "untitled" but keeps ".md".
+                const dot = e.target.value.lastIndexOf('.');
+                e.target.setSelectionRange(0, dot > 0 ? dot : e.target.value.length);
+              }}
+              onChange={(e) => setCreating({ ...creating, value: e.target.value, error: undefined })}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') submitCreate();
+                if (e.key === 'Escape') setCreating(null);
+              }}
+              className="w-full bg-panel2 border border-border rounded-md px-3 py-2 text-sm text-text outline-none focus:border-accent"
+            />
+            <div className="text-[11px] text-muted mt-2">Names without an extension get .md added.</div>
+            {creating.error && (
+              <div className="text-[11px] text-err mt-2">{creating.error}</div>
+            )}
+            <div className="flex justify-end gap-2 mt-3">
+              <button
+                onClick={() => setCreating(null)}
+                disabled={creating.busy}
+                className="px-3 py-1.5 rounded-md text-sm text-muted hover:text-text hover:bg-panel2 disabled:opacity-40"
+              >Cancel</button>
+              <button
+                onClick={submitCreate}
+                disabled={creating.busy || !creating.value.trim()}
+                className="px-3 py-1.5 rounded-md bg-accent text-bg font-medium text-sm disabled:opacity-40 hover:bg-accent2"
+              >{creating.busy ? 'Creating…' : 'Create'}</button>
             </div>
           </div>
         </div>
