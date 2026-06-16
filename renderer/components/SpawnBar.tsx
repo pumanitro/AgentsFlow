@@ -41,9 +41,12 @@ export default function SpawnBar({ targetDir, onSend }: Props) {
   // --- Slash command / skill autocomplete --------------------------------
   const [slashCommands, setSlashCommands] = useState<SlashCommand[]>([]);
   const [menuIndex, setMenuIndex] = useState(0);
-  // The exact prompt value the user dismissed the menu on (via Esc). The menu
-  // stays hidden until the prompt changes again, so Esc actually closes it.
-  const [dismissedAt, setDismissedAt] = useState<string | null>(null);
+  // Caret position in the textarea — lets the slash menu trigger on the token
+  // being typed at the cursor, anywhere in the prompt (not just at the start).
+  const [caret, setCaret] = useState(draft.prompt.length);
+  // Signature ("start:query") of the slash token the user dismissed via Esc.
+  // The menu stays hidden until that token changes, so Esc actually closes it.
+  const [dismissedSig, setDismissedSig] = useState<string | null>(null);
 
   // (Re)load the available commands whenever the spawn target changes. Project
   // (.claude in the target dir) shadows user-level (~/.claude) entries.
@@ -56,12 +59,20 @@ export default function SpawnBar({ targetDir, onSend }: Props) {
     return () => { alive = false; };
   }, [targetDir?.path]);
 
-  // The menu triggers only while the whole input is a bare "/token" with no
-  // space yet — i.e. you're still picking a command, not typing its arguments.
-  const slashQuery = useMemo(() => {
-    const m = /^\/([^\s]*)$/.exec(prompt);
-    return m ? m[1] : null;
-  }, [prompt]);
+  // Find a "/token" at the caret: the word being typed just before the cursor
+  // that starts with "/". This works ANYWHERE in the prompt, so a command/skill
+  // can be dropped mid-message and several can be stacked — the spawned agent
+  // invokes each one it sees (via its Skill tool) regardless of position. A "/"
+  // preceded by a non-space (e.g. "src/file") is ignored so paths don't trigger.
+  const slashCtx = useMemo(() => {
+    const before = prompt.slice(0, caret);
+    const m = /(?:^|\s)\/([^\s]*)$/.exec(before);
+    if (!m) return null;
+    const query = m[1];
+    return { query, start: caret - query.length - 1 };
+  }, [prompt, caret]);
+  const slashQuery = slashCtx?.query ?? null;
+  const slashSig = slashCtx ? `${slashCtx.start}:${slashCtx.query}` : null;
 
   const filtered = useMemo(() => {
     if (slashQuery === null) return [] as SlashCommand[];
@@ -76,7 +87,7 @@ export default function SpawnBar({ targetDir, onSend }: Props) {
       });
   }, [slashCommands, slashQuery]);
 
-  const menuOpen = slashQuery !== null && prompt !== dismissedAt && filtered.length > 0;
+  const menuOpen = slashCtx !== null && slashSig !== dismissedSig && filtered.length > 0;
 
   // Keep the highlighted row valid as the filtered set shrinks/grows.
   useEffect(() => { setMenuIndex(0); }, [slashQuery]);
@@ -84,19 +95,36 @@ export default function SpawnBar({ targetDir, onSend }: Props) {
     if (menuIndex > filtered.length - 1) setMenuIndex(Math.max(0, filtered.length - 1));
   }, [filtered.length, menuIndex]);
 
-  // Once a command has been chosen (text is "/name …"), surface it as a chip so
-  // the user can see which skill their prompt will run.
-  const activeCommand = useMemo(() => {
-    const m = /^\/([^\s]+)(?:\s|$)/.exec(prompt);
-    if (!m) return null;
-    return slashCommands.find((c) => c.name === m[1]) ?? null;
+  // Every "/name" token that resolves to a known command/skill, surfaced as a
+  // chip so the user sees which ones their prompt will run (now possibly many).
+  const activeCommands = useMemo(() => {
+    const out: SlashCommand[] = [];
+    const re = /(?:^|\s)\/([^\s]+)/g;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(prompt)) !== null) {
+      const cmd = slashCommands.find((c) => c.name === m![1]);
+      if (cmd && !out.includes(cmd)) out.push(cmd);
+    }
+    return out;
   }, [prompt, slashCommands]);
 
   const chooseCommand = (cmd: SlashCommand) => {
-    // Insert the invocation followed by a space so the user keeps typing args.
-    setPrompt(`${cmd.invocation} `);
-    setDismissedAt(null);
-    requestAnimationFrame(() => textareaRef.current?.focus());
+    // Replace only the "/token" at the caret with the invocation + a space, so
+    // surrounding text is preserved and the user can keep typing (or add more).
+    if (!slashCtx) return;
+    const before = prompt.slice(0, slashCtx.start);
+    const after = prompt.slice(caret);
+    const insert = `${cmd.invocation} `;
+    const pos = before.length + insert.length;
+    setPrompt(before + insert + after);
+    setCaret(pos);
+    setDismissedSig(null);
+    requestAnimationFrame(() => {
+      const el = textareaRef.current;
+      if (!el) return;
+      el.focus();
+      el.setSelectionRange(pos, pos);
+    });
   };
 
   useEffect(() => { draft.prompt = prompt; }, [prompt]);
@@ -178,6 +206,7 @@ export default function SpawnBar({ targetDir, onSend }: Props) {
     try {
       await onSend(finalPrompt, attachments);
       setPrompt('');
+      setCaret(0);
       setImages([]);
       // Release keyboard focus from the textarea so the global Shift+↑/↓ reorder
       // handler (which ignores keys while an input/textarea is focused) works
@@ -235,13 +264,18 @@ export default function SpawnBar({ targetDir, onSend }: Props) {
             </div>
           </div>
         )}
-        {activeCommand && !menuOpen && (
-          <div className="flex items-center gap-2 text-xs">
-            <span className="inline-flex items-center gap-1.5 px-2 py-1 rounded-md bg-accent/15 border border-accent/50 text-accent font-medium">
-              <span>⚡</span>
-              <span>{activeCommand.invocation}</span>
-            </span>
-            <span className="text-muted truncate">{activeCommand.description}</span>
+        {activeCommands.length > 0 && !menuOpen && (
+          <div className="flex items-center gap-2 text-xs flex-wrap">
+            {activeCommands.map((cmd) => (
+              <span
+                key={`${cmd.scope}:${cmd.name}`}
+                className="inline-flex items-center gap-1.5 px-2 py-1 rounded-md bg-accent/15 border border-accent/50 text-accent font-medium"
+                title={cmd.description}
+              >
+                <span>⚡</span>
+                <span>{cmd.invocation}</span>
+              </span>
+            ))}
           </div>
         )}
         {pasteError && (
@@ -281,7 +315,8 @@ export default function SpawnBar({ targetDir, onSend }: Props) {
           <textarea
             ref={textareaRef}
             value={prompt}
-            onChange={(e) => setPrompt(e.target.value)}
+            onChange={(e) => { setPrompt(e.target.value); setCaret(e.target.selectionStart ?? e.target.value.length); }}
+            onSelect={(e) => setCaret((e.target as HTMLTextAreaElement).selectionStart ?? 0)}
             onPaste={handlePaste}
             onKeyDown={(e) => {
               if (menuOpen) {
@@ -303,7 +338,7 @@ export default function SpawnBar({ targetDir, onSend }: Props) {
                 }
                 if (e.key === 'Escape') {
                   e.preventDefault();
-                  setDismissedAt(prompt);
+                  setDismissedSig(slashSig);
                   return;
                 }
               }
