@@ -6,19 +6,6 @@ Electron + Next.js desktop UI for **Claude Code's background agents** — track 
 
 > Status: early. Built against Claude Code CLI **v2.1.139+** (`claude agents` / `claude --bg`).
 
-## Peers & delegation — the core idea
-
-In Peers Flow every tracked directory is a **peer**: a Claude agent rooted in that directory, with its own skills and MCP connections (Slack, Gmail, …). Peers are *lateral collaborators* — distinct from Claude's own subagents (which are vertical workers a session spawns inside itself).
-
-The point is that **an agent in one directory can ask a peer in another to deliver something, and rely on the result.** Say "ask the `abi` peer to read my Slack DMs with Konrad and send me the last one" — your root agent hands a self-contained goal to `abi`, which runs as a fresh, live session *rooted in `abi`'s directory* (so it inherits `abi`'s Slack connection), works the task to completion, and returns a structured result your root agent can act on.
-
-This is wired up through a small **`peersflow` MCP server** that Peers Flow loads into every session it spawns:
-
-- **`list_peers`** — the live registry of tracked directories: each peer's path, the skills it exposes, and whether it has its own MCP connections. Refreshed from disk on every call, and a snapshot is injected into each new session's system prompt so it boots up aware of its peers.
-- **`delegate`** — ask a peer to deliver a goal. It spawns a **tracked, watchable** peer session (not a hidden one-shot): it appears nested under the root that requested it, with a live status dot (blue = working, amber = blocked, green = done) and the goal as its title. Click it to attach and watch the peer work live; a banner in the root's session view follows along. The root's `delegate` call blocks until the peer finishes, then receives the result.
-
-Open the **MCP server** entry in the hamburger menu to see the tools, the live peer registry, and exactly how sessions connect.
-
 ## Why
 
 Built to scratch three specific itches working with Claude Code day-to-day:
@@ -29,6 +16,7 @@ Built to scratch three specific itches working with Claude Code day-to-day:
 
 ## Highlights
 
+- **Peers that delegate to each other (MCP)** — every tracked directory is a *peer*: an agent rooted there with its own skills and MCP connections (Slack, Gmail, …). A built-in **`peersflow` MCP server** (loaded into every spawned session) lets an agent discover its peers (`list_peers`) and **`delegate`** a self-contained goal to one in another directory — that peer runs as a live, watchable session nested under the one that asked, and returns a result the caller can rely on. Peers are *lateral* collaborators, distinct from Claude's own subagents. (See the **MCP server** entry in the hamburger menu for the tools and live registry.)
 - **Pinned conversations as a to-do list** — every spawn is pinned by default; click ✓ Done to archive into the directory's history. ↻ Reopen brings it back.
 - **Per-directory history** — ⋯ menu on each tracked-directory card opens the full list (pinned + done) for that repo.
 - **Live status + auto-titles** — title comes from Claude's auto-generated short name (e.g. "joke delivery response"), description streams in from `state.json/detail` via `fs.watch` so changes appear within tens of milliseconds.
