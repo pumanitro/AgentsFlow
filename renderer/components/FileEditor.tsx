@@ -212,6 +212,30 @@ function TextEditor({ filePath, baseDir, autoFocus, gotoLine, gotoNonce }: Props
 
   const dirty = !loading && !error && draft !== content;
 
+  // Latest dirty draft, readable from the unmount cleanup below — state would
+  // be stale there.
+  const pendingRef = useRef<{ dirty: boolean; draft: string }>({ dirty: false, draft: '' });
+  pendingRef.current = { dirty, draft };
+
+  // Flush unsaved edits when the editor goes away (switching files, chats, or
+  // closing the window) so they are never silently dropped.
+  useEffect(() => {
+    const flush = () => {
+      const p = pendingRef.current;
+      if (!p.dirty) return;
+      pendingRef.current = { ...p, dirty: false };
+      void api().writeTextFile(filePath, p.draft).catch((err) => {
+        // eslint-disable-next-line no-console
+        console.error('[agentsflow] flush-on-close save failed', filePath, err);
+      });
+    };
+    window.addEventListener('beforeunload', flush);
+    return () => {
+      window.removeEventListener('beforeunload', flush);
+      flush();
+    };
+  }, [filePath]);
+
   const save = async () => {
     if (!dirty || saving) return;
     setSaving(true);

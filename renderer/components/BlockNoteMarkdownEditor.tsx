@@ -262,6 +262,9 @@ function Inner({
   const [saving, setSaving] = useState(false);
   const [savedAt, setSavedAt] = useState<number | null>(null);
   const lastSavedMd = useRef<string>(initialMarkdown);
+  // Latest serialized markdown, kept fresh by the onChange handler so the
+  // unmount flush below can save without an async round-trip.
+  const latestMd = useRef<string>(initialMarkdown);
 
   // Live image GC bookkeeping: the set of local files the document currently
   // references, pending deletion timers, and files already deleted.
@@ -282,6 +285,7 @@ function Inner({
           await editor.blocksToMarkdownLossy(editor.document),
           restoreRef.current,
         );
+        latestMd.current = md;
         setDirty(md !== lastSavedMd.current);
 
         // Live GC: delete a referenced workspace image immediately when its
@@ -317,6 +321,25 @@ function Inner({
     });
     return () => { off?.(); };
   }, [editor, filePath, baseDir]);
+
+  // Flush unsaved edits when the editor goes away (switching files, chats, or
+  // closing the window) so they are never silently dropped.
+  useEffect(() => {
+    const flush = () => {
+      const md = latestMd.current;
+      if (md === lastSavedMd.current) return;
+      lastSavedMd.current = md;
+      void api().writeTextFile(filePath, md).catch((err) => {
+        // eslint-disable-next-line no-console
+        console.error('[agentsflow] flush-on-close save failed', filePath, err);
+      });
+    };
+    window.addEventListener('beforeunload', flush);
+    return () => {
+      window.removeEventListener('beforeunload', flush);
+      flush();
+    };
+  }, [filePath]);
 
   const save = useCallback(async () => {
     if (saving) return;

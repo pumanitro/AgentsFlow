@@ -562,7 +562,16 @@ ipcMain.handle('files:readText', async (_e, filePath: string) => {
 
 ipcMain.handle('files:writeText', async (_e, filePath: string, content: string) => {
   const fsMod = require('fs') as typeof import('fs');
-  fsMod.writeFileSync(filePath, content, 'utf8');
+  // Write to a temp sibling and rename into place — writeFileSync truncates
+  // before writing, so a crash mid-write would leave the file empty.
+  const tmp = `${filePath}.${process.pid}.agentsflow-tmp`;
+  fsMod.writeFileSync(tmp, content, 'utf8');
+  try {
+    fsMod.renameSync(tmp, filePath);
+  } catch (err) {
+    try { fsMod.unlinkSync(tmp); } catch {}
+    throw err;
+  }
   return { ok: true as const };
 });
 
