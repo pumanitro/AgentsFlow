@@ -8,14 +8,11 @@ import { saveUIState, useDirectoryNumber, useUIState } from '../lib/ui-state';
 
 import ShellArea, { appendShell, ShellNode } from '../components/ShellArea';
 import PaneErrorBoundary from '../components/PaneErrorBoundary';
+import paneLoading from '../components/PaneLoading';
 
-const paneLoading = (label: string) => () => (
-  <div className="absolute inset-0 flex items-center justify-center text-muted text-sm">{label}…</div>
-);
-
-const Terminal = dynamic(() => import('../components/Terminal'), { ssr: false, loading: paneLoading('Loading terminal') });
-const FileTreeSidebar = dynamic(() => import('../components/FileTreeSidebar'), { ssr: false, loading: paneLoading('Loading files') });
-const FileEditor = dynamic(() => import('../components/FileEditor'), { ssr: false, loading: paneLoading('Loading editor') });
+const Terminal = dynamic(() => import('../components/Terminal'), { ssr: false, loading: paneLoading('terminal') });
+const FileTreeSidebar = dynamic(() => import('../components/FileTreeSidebar'), { ssr: false, loading: paneLoading('files') });
+const FileEditor = dynamic(() => import('../components/FileEditor'), { ssr: false, loading: paneLoading('editor') });
 
 const MIN_SHELL_HEIGHT = 120;
 const MAX_SHELL_HEIGHT_RATIO = 0.8;

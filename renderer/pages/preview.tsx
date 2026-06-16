@@ -6,14 +6,11 @@ import { TrackedDirectory } from '../../shared/types';
 import { saveUIState, useDirectoryNumber } from '../lib/ui-state';
 import PaneErrorBoundary from '../components/PaneErrorBoundary';
 import { appendShell, ShellNode } from '../components/ShellArea';
+import paneLoading from '../components/PaneLoading';
 
-const paneLoading = (label: string) => () => (
-  <div className="absolute inset-0 flex items-center justify-center text-muted text-sm">{label}…</div>
-);
-
-const FileTreeSidebar = dynamic(() => import('../components/FileTreeSidebar'), { ssr: false, loading: paneLoading('Loading files') });
-const FileEditor = dynamic(() => import('../components/FileEditor'), { ssr: false, loading: paneLoading('Loading editor') });
-const ShellArea = dynamic(() => import('../components/ShellArea'), { ssr: false, loading: paneLoading('Loading shells') });
+const FileTreeSidebar = dynamic(() => import('../components/FileTreeSidebar'), { ssr: false, loading: paneLoading('files') });
+const FileEditor = dynamic(() => import('../components/FileEditor'), { ssr: false, loading: paneLoading('editor') });
+const ShellArea = dynamic(() => import('../components/ShellArea'), { ssr: false, loading: paneLoading('shells') });
 
 const MIN_SIDEBAR_WIDTH = 180;
 const MAX_SIDEBAR_WIDTH_RATIO = 0.6;
