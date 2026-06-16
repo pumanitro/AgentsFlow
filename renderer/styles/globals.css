@@ -22,6 +22,21 @@ body {
 /* The terminal pane uses a custom overlay scrollbar in Terminal.tsx — see that component. */
 .xterm-viewport { background-color: transparent !important; }
 
+/* A freshly-spawned pinned row lands at the bottom of the first section — flash
+   it with an accent tint and a small jiggle so the eye catches where it went. */
+@keyframes row-just-added {
+  0%   { background-color: rgba(255, 120, 71, 0.30); transform: translateX(0); }
+  12%  { transform: translateX(-4px); }
+  26%  { transform: translateX(4px); }
+  40%  { transform: translateX(-3px); }
+  54%  { transform: translateX(2px); }
+  68%  { transform: translateX(-1px); }
+  100% { background-color: rgba(255, 120, 71, 0); transform: translateX(0); }
+}
+.row-just-added {
+  animation: row-just-added 1.1s ease-out;
+}
+
 /* Markdown preview — Obsidian-ish dark theme */
 .md-preview {
   line-height: 1.6;

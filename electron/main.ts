@@ -4,7 +4,7 @@ import * as fs from 'fs';
 import { v4 as uuid } from 'uuid';
 import serve from 'electron-serve';
 
-const APP_NAME = 'Agents Flow';
+const APP_NAME = 'Peers Flow';
 app.setName(APP_NAME);
 
 // Resolve icon for both dev (running from source) and packaged builds.
@@ -34,6 +34,9 @@ import {
   hasLiveDaemon,
 } from './claude-cli';
 import { refreshNow, startPoller, stopPoller, syncWatchers, unwatchConversation, watchConversation } from './poller';
+import { bridgeSocketPath, buildBootstrapSystemPrompt, getMcpServerInfo, writeMcpConfigForConversation } from './mcp-bridge';
+import { buildDelegatePrompt } from './registry';
+import { startDelegationBridge, type DelegateRequest } from './delegation-bridge';
 import * as pty from './pty-manager';
 import * as fileWatcher from './file-watcher';
 import { gitStatus, listFiles } from './git';
@@ -45,6 +48,7 @@ const isDev = process.env.NODE_ENV === 'development';
 const loadURL = isDev ? null : serve({ directory: path.join(__dirname, '..', '..', '..', 'renderer', 'out') });
 
 let mainWindow: BrowserWindow | null = null;
+let stopBridge: (() => void) | null = null;
 
 function createWindow() {
   const win = new BrowserWindow({
@@ -117,6 +121,14 @@ app.whenReady().then(() => {
   createWindow();
   startPoller(() => mainWindow);
 
+  // The delegation bridge must be live before any session can call `delegate`.
+  // handleDelegate is hoisted (function declaration), so it's safe to reference here.
+  try {
+    stopBridge = startDelegationBridge(bridgeSocketPath(), handleDelegate);
+  } catch (err) {
+    console.error('[agentsflow] failed to start delegation bridge', err);
+  }
+
   try {
     const result = sweepOrphanAttachments(store.getDirectories(), store.getConversations());
     if (result.deleted > 0) console.log('[agentsflow] swept orphan attachments', result);
@@ -141,6 +153,10 @@ app.on('window-all-closed', () => {
   pty.detachAll();
   fileWatcher.unwatchAll().catch(() => undefined);
   if (process.platform !== 'darwin') app.quit();
+});
+
+app.on('before-quit', () => {
+  try { stopBridge?.(); } catch { /* ignore */ }
 });
 
 // ----- IPC -----
@@ -204,16 +220,35 @@ ipcMain.handle('dirs:remove', (_e, id: string) => {
   store.setDirectories(recomputeAllDisplayNames(dirs));
 });
 
+ipcMain.handle('mcp:info', () => getMcpServerInfo(store.getDirectories()));
+
 ipcMain.handle('convs:list', () => store.getConversations());
 
-ipcMain.handle('convs:spawn', async (_e, req: SpawnRequest): Promise<{ conversationId: string; sessionId: string; daemonShort: string }> => {
-  const dirs = store.getDirectories();
-  const dir = dirs.find((d) => d.id === req.directoryId);
-  if (!dir) throw new Error('directory not found');
-  const prompt = req.prompt.trim();
-  if (!prompt) throw new Error('prompt required');
-
+/**
+ * Spawns a tracked background session in `dir` and returns its ids. Shared by
+ * the user-initiated `convs:spawn` IPC and the delegation bridge.
+ *
+ * - `peerAware` attaches the Peers Flow MCP config (so the session can list and
+ *   delegate to peers) and injects the registry snapshot into its system prompt.
+ *   Delegated peers run with this OFF, which is also what caps delegation at one
+ *   hop — a delegated peer has no `delegate` tool.
+ * - `delegatedByConversationId`, when set, nests this session under its parent
+ *   in the UI and feeds the parent's "a peer is working" banner.
+ */
+async function spawnConversation(opts: {
+  dir: TrackedDirectory;
+  prompt: string;
+  // Display title for the conversation. Defaults to the (possibly boilerplate)
+  // prompt — delegations pass the human-readable goal instead.
+  title?: string;
+  attachments?: string[];
+  pinned: boolean;
+  peerAware: boolean;
+  delegatedByConversationId?: string;
+}): Promise<{ conversationId: string; sessionId: string; daemonShort: string }> {
+  const { dir, prompt } = opts;
   const conversationId = uuid();
+  const title = (opts.title ?? prompt).trim().slice(0, 80);
 
   const optimistic: Conversation = {
     id: conversationId,
@@ -223,23 +258,35 @@ ipcMain.handle('convs:spawn', async (_e, req: SpawnRequest): Promise<{ conversat
     directoryId: dir.id,
     directoryPath: dir.path,
     displayName: dir.displayName,
-    title: prompt.slice(0, 60),
+    title,
     description: 'starting…',
-    pinned: true,
-    attachments: req.attachments ?? [],
+    pinned: opts.pinned,
+    attachments: opts.attachments ?? [],
     state: 'starting',
     status: 'starting',
     intent: prompt,
     createdAt: new Date().toISOString(),
     lastPrompt: prompt,
+    delegatedByConversationId: opts.delegatedByConversationId,
   };
   store.addConversation(optimistic);
   broadcastConversations();
   broadcastPinnedOrder();
 
+  let mcpConfigPath: string | undefined;
+  let appendSystemPrompt: string | undefined;
+  if (opts.peerAware) {
+    try {
+      mcpConfigPath = writeMcpConfigForConversation(conversationId, dir.path);
+      appendSystemPrompt = buildBootstrapSystemPrompt(store.getDirectories());
+    } catch (err) {
+      console.error('[agentsflow] MCP bootstrap failed — spawning without peer awareness', err);
+    }
+  }
+
   const startedBefore = Date.now();
   const claimedSessionIds = new Set(store.getConversations().map((c) => c.sessionId).filter(Boolean));
-  const dispatch = await dispatchBackground({ cwd: dir.path, prompt });
+  const dispatch = await dispatchBackground({ cwd: dir.path, prompt, mcpConfigPath, appendSystemPrompt });
   const daemonShortFromOut = dispatch.daemonShort ?? '';
   let resolved = daemonShortFromOut
     ? await resolveSessionByDaemonShort(daemonShortFromOut, 10000)
@@ -256,7 +303,7 @@ ipcMain.handle('convs:spawn', async (_e, req: SpawnRequest): Promise<{ conversat
 
   const sessionId = resolved?.sessionId ?? '';
   const daemonShort = daemonShortFromOut || (sessionId ? sessionId.slice(0, 8) : '');
-  console.log('[agentsflow] spawn resolved', { sessionId, daemonShort, daemonShortFromOut });
+  console.log('[agentsflow] spawn resolved', { sessionId, daemonShort, daemonShortFromOut, delegated: !!opts.delegatedByConversationId });
   store.updateConversation(conversationId, { sessionId, daemonShort });
   syncWatchers();
 
@@ -271,7 +318,102 @@ ipcMain.handle('convs:spawn', async (_e, req: SpawnRequest): Promise<{ conversat
   await refreshNow();
   broadcastConversations();
   return { conversationId, sessionId, daemonShort };
+}
+
+ipcMain.handle('convs:spawn', async (_e, req: SpawnRequest): Promise<{ conversationId: string; sessionId: string; daemonShort: string }> => {
+  const dir = store.getDirectories().find((d) => d.id === req.directoryId);
+  if (!dir) throw new Error('directory not found');
+  const prompt = req.prompt.trim();
+  if (!prompt) throw new Error('prompt required');
+  return spawnConversation({ dir, prompt, attachments: req.attachments, pinned: true, peerAware: true });
 });
+
+// ----- Delegation bridge: the MCP server asks main to spawn a tracked peer ----
+
+const DELEGATION_TERMINAL_STATES = new Set(['done', 'completed', 'failed', 'error']);
+
+/**
+ * Polls a delegated conversation until the poller drives it to a terminal state,
+ * then harvests the peer's final result from its job state. The `delegate` MCP
+ * tool blocks on this so the root agent gets a result it can rely on — while the
+ * user can attach and watch the very same session live.
+ */
+async function waitForDelegationCompletion(
+  conversationId: string,
+  timeoutMs: number,
+): Promise<{ status: 'success' | 'failure'; result: string; sessionId: string; error?: string }> {
+  const start = Date.now();
+  const minRunMs = 2500; // don't declare "done" on a momentary startup blip
+  let lastResult = '';
+  let lastSessionId = '';
+  while (Date.now() - start < timeoutMs) {
+    await new Promise((r) => setTimeout(r, 1200));
+    try { await refreshNow(); } catch { /* keep polling on transient CLI failure */ }
+    const conv = store.getConversations().find((c) => c.id === conversationId);
+    if (!conv) return { status: 'failure', result: lastResult, sessionId: lastSessionId, error: 'delegated conversation was removed' };
+    if (conv.sessionId) lastSessionId = conv.sessionId;
+    const job = readJobState(conv.daemonShort);
+    const r = (job?.output?.result || '').trim();
+    if (r) lastResult = r;
+    const st = (conv.state || '').toLowerCase();
+    if (Date.now() - start > minRunMs && DELEGATION_TERMINAL_STATES.has(st)) {
+      const failed = st === 'failed' || st === 'error';
+      const result = lastResult || (conv.description || '').trim();
+      return {
+        status: failed ? 'failure' : 'success',
+        result,
+        sessionId: lastSessionId,
+        error: failed ? (result || 'peer reported an error') : undefined,
+      };
+    }
+  }
+  return { status: 'failure', result: lastResult, sessionId: lastSessionId, error: `peer timed out after ${timeoutMs}ms` };
+}
+
+async function handleDelegate(req: DelegateRequest): Promise<Record<string, unknown>> {
+  const dirs = store.getDirectories();
+  const token = (req.directory || '').trim();
+  const lower = token.toLowerCase();
+  const dir =
+    dirs.find((d) => d.id === token) ||
+    dirs.find((d) => d.path === token) ||
+    dirs.find((d) => d.displayName.toLowerCase() === lower) ||
+    dirs.find((d) => path.basename(d.path).toLowerCase() === lower) ||
+    null;
+  if (!dir) {
+    return { status: 'failure', error: `Unknown peer "${token}". Call list_peers to see valid peers.`, known: dirs.map((d) => d.displayName) };
+  }
+  if (!fs.existsSync(dir.path)) {
+    return { status: 'failure', directory: dir.displayName, error: `Path does not exist: ${dir.path}` };
+  }
+
+  const started = Date.now();
+  const prompt = buildDelegatePrompt(req.goal, req.deliverable || '');
+  const spawn = await spawnConversation({
+    dir,
+    prompt,
+    // The goal is the human-readable summary — use it as the row title instead
+    // of the delegate-prompt boilerplate.
+    title: req.goal,
+    pinned: false,
+    peerAware: false,
+    delegatedByConversationId: req.rootConversationId || undefined,
+  });
+
+  const outcome = await waitForDelegationCompletion(spawn.conversationId, req.timeoutMs);
+  return {
+    status: outcome.status,
+    directory: dir.displayName,
+    directoryPath: dir.path,
+    goal: req.goal,
+    summary: (outcome.result || '').split(/\r?\n/).slice(0, 8).join('\n') || '(no textual result)',
+    deliverable: outcome.result,
+    conversationId: spawn.conversationId,
+    sessionId: outcome.sessionId || spawn.sessionId,
+    durationMs: Date.now() - started,
+    error: outcome.error ?? null,
+  };
+}
 
 ipcMain.handle('convs:updateTitle', (_e, id: string, title: string) => {
   store.updateConversation(id, { title });

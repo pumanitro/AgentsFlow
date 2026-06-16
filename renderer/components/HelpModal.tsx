@@ -67,7 +67,7 @@ export default function HelpModal({ onClose }: Props) {
         <header className="shrink-0 px-5 py-3 border-b border-border flex items-center justify-between">
           <div>
             <div className="text-sm font-semibold text-text">Keyboard shortcuts</div>
-            <div className="text-xs text-muted">Agents Flow · v{pkg.version}</div>
+            <div className="text-xs text-muted">Peers Flow · v{pkg.version}</div>
           </div>
           <button
             onClick={onClose}

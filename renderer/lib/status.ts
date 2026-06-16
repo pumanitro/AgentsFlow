@@ -2,11 +2,17 @@ import { Conversation } from '../../shared/types';
 
 /**
  * Tailwind background class for a conversation's status dot.
- * - When marked done (unpinned), always shows the muted/archived gray.
+ * - When marked done (unpinned), always shows the muted/archived gray —
+ *   UNLESS `treatAsLive` is set (delegated peer rows are intentionally unpinned
+ *   for UI placement but should still reflect their real state: blue=working,
+ *   amber=blocked, green=done).
  * - Otherwise reflects Claude's live state.
  */
-export function statusDotClass(c: Pick<Conversation, 'pinned' | 'state' | 'status'>): string {
-  if (!c.pinned) return 'bg-subtle';
+export function statusDotClass(
+  c: Pick<Conversation, 'pinned' | 'state' | 'status'>,
+  treatAsLive = false,
+): string {
+  if (!treatAsLive && !c.pinned) return 'bg-subtle';
   const { state, status } = c;
   if (state === 'working' || status === 'working') return 'bg-info animate-pulse';
   if (state === 'needs-input' || state === 'blocked' || status === 'needs-input') return 'bg-warn animate-pulse';

@@ -8,6 +8,8 @@ const api: AgentsFlowApi = {
 
   listSlashCommands: (dirPath) => ipcRenderer.invoke('skills:list', dirPath),
 
+  getMcpServerInfo: () => ipcRenderer.invoke('mcp:info'),
+
   listConversations: () => ipcRenderer.invoke('convs:list'),
   spawnAgent: (req: SpawnRequest) => ipcRenderer.invoke('convs:spawn', req),
   updateConversationTitle: (id, title) =>

@@ -199,8 +199,17 @@ export function readJobState(daemonShort: string): JobState | null {
 export async function dispatchBackground(opts: {
   cwd: string;
   prompt: string;
+  // Path to the AgentsFlow `--mcp-config` JSON (adds the sibling-agent /
+  // delegate tools). Merged with the target dir's own MCP config.
+  mcpConfigPath?: string;
+  // Registry snapshot appended to the session's system prompt at boot.
+  appendSystemPrompt?: string;
 }): Promise<{ daemonShort: string | null; raw: string }> {
-  const args = ['--bg', '--permission-mode', 'bypassPermissions', opts.prompt];
+  // The prompt must stay the final positional argument.
+  const args = ['--bg', '--permission-mode', 'bypassPermissions'];
+  if (opts.mcpConfigPath) args.push('--mcp-config', opts.mcpConfigPath);
+  if (opts.appendSystemPrompt) args.push('--append-system-prompt', opts.appendSystemPrompt);
+  args.push(opts.prompt);
   console.log('[agentsflow][dispatch] invoking claude', { bin: CLAUDE_BIN, cwd: opts.cwd, args });
   const { code, stdout, stderr } = await runCmd(args, { cwd: opts.cwd, timeoutMs: 15000 });
   const cleanStdout = stripAnsi(stdout);

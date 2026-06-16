@@ -3,6 +3,7 @@ import * as os from 'os';
 import * as path from 'path';
 import { app } from 'electron';
 import { Conversation, PinnedDivider, PinnedItemRef, TrackedDirectory } from '../shared/types';
+import { placePinnedRefAtEndOfFirstSection } from './pinned-order';
 
 interface StoreShape {
   directories: TrackedDirectory[];
@@ -24,10 +25,11 @@ function getPath(): string {
 
 /**
  * Earlier builds wrote `store.json` to Electron's default `userData` dir, which on macOS is
- * `~/Library/Application Support/Electron/` until `app.setName(...)` is called. Once we set
- * the product name to "Agents Flow" the location moves to `…/Agents Flow/` and the old
- * store would look empty. On first launch in the new location, copy the most recent legacy
- * store over so the user keeps their tracked directories and conversation history.
+ * `~/Library/Application Support/Electron/` until `app.setName(...)` is called. The product
+ * name has since moved (Electron → AgentsFlow → "Agents Flow" → "Peers Flow"), and each
+ * rename relocates `userData`, leaving the prior store behind. On first launch in the new
+ * location, copy the most recent legacy store over so the user keeps their tracked
+ * directories and conversation history across the rename.
  */
 function migrateLegacyStoreIfNeeded(newPath: string): void {
   try {
@@ -36,6 +38,8 @@ function migrateLegacyStoreIfNeeded(newPath: string): void {
     const candidates = [
       path.join(home, 'Library', 'Application Support', 'Electron', 'store.json'),
       path.join(home, 'Library', 'Application Support', 'AgentsFlow', 'store.json'),
+      // The immediate predecessor — "Agents Flow" before the rename to "Peers Flow".
+      path.join(home, 'Library', 'Application Support', 'Agents Flow', 'store.json'),
     ];
     let best: { path: string; mtime: number } | null = null;
     for (const p of candidates) {
@@ -74,6 +78,8 @@ function migrateConversation(c: any): Conversation {
     createdAt: c.createdAt ?? new Date().toISOString(),
     unpinnedAt: typeof c.unpinnedAt === 'string' ? c.unpinnedAt : undefined,
     lastPrompt: c.lastPrompt ?? '',
+    delegatedByConversationId:
+      typeof c.delegatedByConversationId === 'string' ? c.delegatedByConversationId : undefined,
   };
 }
 
@@ -162,19 +168,6 @@ function prependPinnedRef(s: StoreShape, ref: PinnedItemRef): void {
   s.pinnedOrder = [ref, ...s.pinnedOrder];
 }
 
-function insertPinnedRefAfterFirstDivider(s: StoreShape, ref: PinnedItemRef): void {
-  dropPinnedRef(s, ref);
-  const firstDividerIdx = s.pinnedOrder.findIndex((r) => r.kind === 'divider');
-  if (firstDividerIdx < 0) {
-    s.pinnedOrder = [ref, ...s.pinnedOrder];
-    return;
-  }
-  s.pinnedOrder = [
-    ...s.pinnedOrder.slice(0, firstDividerIdx + 1),
-    ref,
-    ...s.pinnedOrder.slice(firstDividerIdx + 1),
-  ];
-}
 
 export const store = {
   getDirectories(): TrackedDirectory[] {
@@ -194,7 +187,7 @@ export const store = {
   addConversation(c: Conversation): void {
     const s = load();
     s.conversations = [c, ...s.conversations.filter((x) => x.id !== c.id)];
-    if (c.pinned) insertPinnedRefAfterFirstDivider(s, { kind: 'conversation', id: c.id });
+    if (c.pinned) s.pinnedOrder = placePinnedRefAtEndOfFirstSection(s.pinnedOrder, { kind: 'conversation', id: c.id });
     save();
   },
   updateConversation(id: string, patch: Partial<Conversation>): Conversation | null {

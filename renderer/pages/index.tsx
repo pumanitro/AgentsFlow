@@ -1,12 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useRouter } from 'next/router';
 import PinnedRow from '../components/PinnedRow';
+import DelegatedChildRow from '../components/DelegatedChildRow';
 import DividerRow from '../components/DividerRow';
 import DirectoryCard from '../components/DirectoryCard';
 import SpawnBar from '../components/SpawnBar';
 import HistoryModal from '../components/HistoryModal';
 import HistoryTimeline from '../components/HistoryTimeline';
 import HelpModal from '../components/HelpModal';
+import McpModal from '../components/McpModal';
 import StatsView from '../components/StatsView';
 import { api } from '../lib/ipc';
 import { useUIState } from '../lib/ui-state';
@@ -31,6 +33,11 @@ export default function Home() {
   const [keyboardNavActive, setKeyboardNavActive] = useState<boolean>(false);
   const [historyDirId, setHistoryDirId] = useState<string | null>(null);
   const [helpOpen, setHelpOpen] = useState(false);
+  const [mcpOpen, setMcpOpen] = useState(false);
+  // A delegated peer (sub-row) can be selected independently of its root row.
+  // When set, the root's own selection highlight is suppressed so only one
+  // element — root OR peer — shows the orange selection at a time.
+  const [selectedChildId, setSelectedChildId] = useState<string | null>(null);
   const [view, setView] = useUIState('view');
   const [menuOpen, setMenuOpen] = useState(false);
   const [pendingRenameDividerId, setPendingRenameDividerId] = useState<string | null>(null);
@@ -38,6 +45,7 @@ export default function Home() {
   const [pendingFocusConvId, setPendingFocusConvId] = useState<string | null>(null);
   const [dragKey, setDragKey] = useState<string | null>(null);
   const [dropTargetIdx, setDropTargetIdx] = useState<number | null>(null);
+  const [justAddedConvId, setJustAddedConvId] = useState<string | null>(null);
 
   const refreshAll = async () => {
     const [d, c, dv, po] = await Promise.all([
@@ -74,6 +82,20 @@ export default function Home() {
     return map;
   }, [convs]);
 
+  // Delegated peer sessions, grouped under the root conversation that spawned
+  // them, so they can be rendered as nested child rows.
+  const childrenByParent = useMemo(() => {
+    const map = new Map<string, Conversation[]>();
+    for (const c of convs) {
+      if (!c.delegatedByConversationId) continue;
+      const list = map.get(c.delegatedByConversationId) ?? [];
+      list.push(c);
+      map.set(c.delegatedByConversationId, list);
+    }
+    for (const list of map.values()) list.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+    return map;
+  }, [convs]);
+
   const pinnedItems = useMemo<PinnedItem[]>(() => {
     const convById = new Map(convs.filter((c) => c.pinned).map((c) => [c.id, c]));
     const divById = new Map(dividers.map((d) => [d.id, d]));
@@ -98,6 +120,20 @@ export default function Home() {
     }
     return out;
   }, [convs, dividers, pinnedOrder]);
+
+  // Flat list of keyboard-selectable rows: each pinned item, with its delegated
+  // peers interleaved right after their parent. Lets ⌘+↑/↓ step into sub-peers.
+  type SelectableRow = { kind: 'item'; idx: number } | { kind: 'child'; id: string; parentIdx: number };
+  const selectableRows = useMemo<SelectableRow[]>(() => {
+    const rows: SelectableRow[] = [];
+    pinnedItems.forEach((it, idx) => {
+      rows.push({ kind: 'item', idx });
+      if (it.kind === 'conversation') {
+        for (const k of childrenByParent.get(it.id) ?? []) rows.push({ kind: 'child', id: k.id, parentIdx: idx });
+      }
+    });
+    return rows;
+  }, [pinnedItems, childrenByParent]);
 
   const historyConvs = useMemo(
     () => (historyDirId ? convs.filter((c) => c.directoryId === historyDirId) : []),
@@ -124,10 +160,21 @@ export default function Home() {
     // early miss doesn't wipe the hint before the data lands.
     if (pinnedItems.length === 0) return;
     const idx = pinnedItems.findIndex((it) => it.kind === 'conversation' && it.id === focusId);
-    if (idx < 0) return;
-    setFocusedIdx(idx);
-    router.replace({ pathname: '/' }, undefined, { shallow: true });
-  }, [router.query.focus, pinnedItems, router]);
+    if (idx >= 0) {
+      setFocusedIdx(idx);
+      setSelectedChildId(null);
+      router.replace({ pathname: '/' }, undefined, { shallow: true });
+      return;
+    }
+    // Returning from a previewed sub-peer: re-select it under its parent.
+    const childConv = convs.find((c) => c.id === focusId && c.delegatedByConversationId);
+    if (childConv) {
+      const pIdx = pinnedItems.findIndex((it) => it.kind === 'conversation' && it.id === childConv.delegatedByConversationId);
+      if (pIdx >= 0) setFocusedIdx(pIdx);
+      setSelectedChildId(focusId);
+      router.replace({ pathname: '/' }, undefined, { shallow: true });
+    }
+  }, [router.query.focus, pinnedItems, convs, router]);
 
   const commitReorder = useCallback(async (nextOrder: PinnedItemRef[]) => {
     setPinnedOrder(nextOrder); // optimistic
@@ -148,24 +195,32 @@ export default function Home() {
 
       // ⌘+↑/↓/→ — navigation / open. Works even inside the spawn prompt.
       if (e.metaKey && !e.altKey && !e.ctrlKey && !e.shiftKey) {
-        if (e.key === 'ArrowDown') {
+        if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
           e.preventDefault();
           setKeyboardNavActive(true);
-          setFocusedIdx((i) => Math.min(pinnedItems.length - 1, Math.max(0, i + 1)));
-          return;
-        }
-        if (e.key === 'ArrowUp') {
-          e.preventDefault();
-          setKeyboardNavActive(true);
-          setFocusedIdx((i) => Math.max(0, i - 1));
+          // Step through the flat list (pinned items + their sub-peers).
+          const cur = selectedChildId
+            ? selectableRows.findIndex((r) => r.kind === 'child' && r.id === selectedChildId)
+            : selectableRows.findIndex((r) => r.kind === 'item' && r.idx === focusedIdx);
+          const base = cur < 0 ? 0 : cur;
+          const nextIdx = e.key === 'ArrowDown'
+            ? Math.min(selectableRows.length - 1, base + 1)
+            : Math.max(0, base - 1);
+          const r = selectableRows[nextIdx];
+          if (!r) return;
+          if (r.kind === 'item') { setFocusedIdx(r.idx); setSelectedChildId(null); }
+          else { setFocusedIdx(r.parentIdx); setSelectedChildId(r.id); }
           return;
         }
         if (e.key === 'ArrowRight') {
-          if (focusedIdx >= 0 && focusedIdx < pinnedItems.length) {
+          e.preventDefault();
+          if (selectedChildId) {
+            const child = convs.find((c) => c.id === selectedChildId);
+            if (child?.sessionId) router.push({ pathname: '/session', query: { id: child.id } });
+          } else if (focusedIdx >= 0 && focusedIdx < pinnedItems.length) {
             const item = pinnedItems[focusedIdx];
-            if (item.kind === 'conversation') {
-              e.preventDefault();
-              if (item.conv.sessionId) router.push({ pathname: '/session', query: { id: item.id } });
+            if (item.kind === 'conversation' && item.conv.sessionId) {
+              router.push({ pathname: '/session', query: { id: item.id } });
             }
           }
           return;
@@ -190,7 +245,7 @@ export default function Home() {
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [pinnedItems, focusedIdx, router, historyDirId, commitReorder, view]);
+  }, [pinnedItems, focusedIdx, selectedChildId, selectableRows, convs, router, historyDirId, commitReorder, view]);
 
   useEffect(() => {
     if (!keyboardNavActive) return;
@@ -230,6 +285,7 @@ export default function Home() {
       if (it.kind === 'conversation' && !expecting.has(it.id)) {
         setFocusedIdx(i);
         setPendingFocusConvId(it.id);
+        setJustAddedConvId(it.id);
         awaitingNewConvRef.current = null;
         return;
       }
@@ -252,6 +308,13 @@ export default function Home() {
       setPendingFocusConvId(null);
     }
   }, [pendingFocusConvId, pinnedItems, pinnedOrder]);
+
+  // Clear the "just added" highlight once the row-just-added animation has run.
+  useEffect(() => {
+    if (!justAddedConvId) return;
+    const t = setTimeout(() => setJustAddedConvId(null), 1200);
+    return () => clearTimeout(t);
+  }, [justAddedConvId]);
 
   const attach = (c: Conversation) => {
     // eslint-disable-next-line no-console
@@ -284,6 +347,9 @@ export default function Home() {
     setDragKey(key);
     e.dataTransfer.effectAllowed = 'move';
     try { e.dataTransfer.setData('text/plain', key); } catch { /* some browsers throw on synthetic events */ }
+    // The draggable element IS the whole unit (a conversation + its delegated
+    // peer rows), so its own box is the right drag ghost.
+    try { e.dataTransfer.setDragImage(e.currentTarget as HTMLElement, 24, 16); } catch { /* not supported */ }
   };
 
   const handleDragEnd = () => {
@@ -369,7 +435,7 @@ export default function Home() {
             <rect x="350" y="480" width="310" height="64" rx="32" ry="32" fill="#ff7847" fillOpacity="0.78" />
             <rect x="350" y="620" width="226" height="64" rx="32" ry="32" fill="#ff7847" fillOpacity="0.52" />
           </svg>
-          <span className="font-semibold text-sm tracking-tight">Agents Flow</span>
+          <span className="font-semibold text-sm tracking-tight">Peers Flow</span>
         </div>
         )}
         <div className="flex items-center gap-2" style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}>
@@ -410,6 +476,16 @@ export default function Home() {
                       {view === opt.key && <span className="text-accent">✓</span>}
                     </button>
                   ))}
+                  <div className="my-1 border-t border-border" />
+                  <button
+                    role="menuitem"
+                    onClick={() => { setMcpOpen(true); setMenuOpen(false); }}
+                    className="w-full text-left px-3 py-1.5 text-sm flex items-center gap-2 text-text hover:bg-panel2"
+                    title="Sibling-agent awareness & delegation"
+                  >
+                    <span className="text-accent">⚡</span>
+                    MCP server
+                  </button>
                 </div>
               </>
             )}
@@ -445,7 +521,7 @@ export default function Home() {
           >
             <div className="grid grid-cols-[16px_200px_minmax(0,1fr)_minmax(0,1fr)_auto] gap-3 px-4 py-2 text-[10px] uppercase tracking-wider text-muted border-b border-border">
               <div></div>
-              <div>Agent</div>
+              <div>Peer</div>
               <div>Title</div>
               <div>Description</div>
               <div></div>
@@ -459,26 +535,56 @@ export default function Home() {
                 const key = refKey(item.ref);
                 const showInsertBefore = dropTargetIdx === i && dragKey !== null && dragKey !== key;
                 const showInsertAfter = dropTargetIdx === i + 1 && i === pinnedItems.length - 1 && dragKey !== null && dragKey !== key;
+                const kids = item.kind === 'conversation' ? (childrenByParent.get(item.id) ?? []) : [];
+                const hasKids = kids.length > 0;
+                const focused = i === focusedIdx;
+                const beingDragged = dragKey === key;
+                // A conversation + its delegated peers form one DRAGGABLE unit, but
+                // each row SELECTS and HOVERS independently (so a peer can be
+                // previewed on its own). The wrapper only owns drag + the closing
+                // bottom border; the grip lives on the parent row, never the peer.
+                const unitCls = `relative ${hasKids ? 'border-b border-b-border' : ''} ${beingDragged ? 'opacity-60' : ''}`;
                 return (
                   <div key={key} onDragOver={handleRowDragOver(i)}>
                     {showInsertBefore && <div className="h-0.5 bg-accent" />}
                     {item.kind === 'conversation' ? (
-                      <PinnedRow
-                        conv={item.conv}
-                        focused={i === focusedIdx}
-                        suppressHover={keyboardNavActive}
-                        onFocus={() => setFocusedIdx(i)}
-                        onAttach={() => attach(item.conv)}
-                        onSaveTitle={(t) => api().updateConversationTitle(item.id, t).then(refreshAll)}
-                        onMarkDone={() => api().setConversationPinned(item.id, false).then(refreshAll)}
+                      <div
+                        className={unitCls}
                         draggable
                         onDragStart={handleDragStart(key)}
                         onDragEnd={handleDragEnd}
-                      />
+                      >
+                        <PinnedRow
+                          conv={item.conv}
+                          focused={i === focusedIdx && !selectedChildId}
+                          suppressHover={keyboardNavActive}
+                          hideBottomBorder={hasKids}
+                          justAdded={item.id === justAddedConvId}
+                          onFocus={() => { setFocusedIdx(i); setSelectedChildId(null); }}
+                          onAttach={() => attach(item.conv)}
+                          onSaveTitle={(t) => api().updateConversationTitle(item.id, t).then(refreshAll)}
+                          onMarkDone={() => api().setConversationPinned(item.id, false).then(refreshAll)}
+                          draggable={false}
+                        />
+                        {hasKids && (
+                          // Peer rows span the FULL width (so hover/selection isn't
+                          // clipped on the left); only their content is indented.
+                          <div className="relative">
+                            {kids.map((child) => (
+                              <DelegatedChildRow
+                                key={child.id}
+                                conv={child}
+                                selected={selectedChildId === child.id}
+                                onAttach={() => { setSelectedChildId(child.id); attach(child); }}
+                              />
+                            ))}
+                          </div>
+                        )}
+                      </div>
                     ) : (
                       <DividerRow
                         divider={item.divider}
-                        focused={i === focusedIdx}
+                        focused={focused}
                         suppressHover={keyboardNavActive}
                         startInRename={pendingRenameDividerId === item.id}
                         onRenameHandled={() => setPendingRenameDividerId(null)}
@@ -510,7 +616,7 @@ export default function Home() {
         />
 
         <section className="px-4 pt-6 pb-4">
-          <h2 className="text-xs uppercase tracking-wider text-muted mb-2">Tracked directories</h2>
+          <h2 className="text-xs uppercase tracking-wider text-muted mb-2">Tracked Peers</h2>
           <div className="grid grid-cols-2 lg:grid-cols-3 gap-3">
             {dirs.map((d) => (
               <DirectoryCard
@@ -529,7 +635,7 @@ export default function Home() {
               className="rounded-lg border-2 border-dashed border-border bg-transparent hover:border-accent hover:bg-panel/40 transition-colors px-4 py-3 text-left"
             >
               <div className="font-medium text-text">+ Add directory</div>
-              <div className="text-xs text-muted mt-0.5">track a new project</div>
+              <div className="text-xs text-muted mt-0.5">track a new peer</div>
             </button>
           </div>
         </section>
@@ -540,6 +646,8 @@ export default function Home() {
       {view !== 'stats' && <SpawnBar targetDir={selectedDir} onSend={handleSpawn} />}
 
       {helpOpen && <HelpModal onClose={() => setHelpOpen(false)} />}
+
+      {mcpOpen && <McpModal onClose={() => setMcpOpen(false)} />}
 
       {historyDir && (
         <HistoryModal

@@ -17,7 +17,7 @@ const PERIODS: { key: PeriodKey; label: string; days: number | null }[] = [
 
 const DAY_MS = 86_400_000;
 
-/** A conversation is "done" once it has been unpinned — that's AgentsFlow's completion signal. */
+/** A conversation is "done" once it has been unpinned — that's Peers Flow's completion signal. */
 function isDone(c: Conversation): boolean {
   return !c.pinned;
 }

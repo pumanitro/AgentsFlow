@@ -67,6 +67,26 @@ function prependRef(state: MockShape, ref: PinnedItemRef) {
   dropRef(state, ref);
   state.pinnedOrder = [ref, ...state.pinnedOrder];
 }
+// Mirrors store.ts / pinned-order.ts: a freshly-spawned conv lands at the bottom
+// of the first section — the group headed by the first divider, just before the
+// second divider (or the very end of the list if there's one divider or none).
+function insertRefAtEndOfFirstSection(state: MockShape, ref: PinnedItemRef) {
+  dropRef(state, ref);
+  const firstDividerIdx = state.pinnedOrder.findIndex((r) => r.kind === 'divider');
+  if (firstDividerIdx < 0) {
+    state.pinnedOrder = [...state.pinnedOrder, ref];
+    return;
+  }
+  const secondDividerIdx = state.pinnedOrder.findIndex(
+    (r, i) => i > firstDividerIdx && r.kind === 'divider',
+  );
+  const insertAt = secondDividerIdx < 0 ? state.pinnedOrder.length : secondDividerIdx;
+  state.pinnedOrder = [
+    ...state.pinnedOrder.slice(0, insertAt),
+    ref,
+    ...state.pinnedOrder.slice(insertAt),
+  ];
+}
 
 export function createMockApi(): AgentsFlowApi {
   let state = load();
@@ -100,6 +120,48 @@ export function createMockApi(): AgentsFlowApi {
       save(state);
     },
 
+    getMcpServerInfo: async () => ({
+      serverName: 'peersflow',
+      connected: true,
+      scriptPath: '/mock/dist/electron/electron/mcp/agentsflow-mcp-server.js',
+      configPath: '/mock/userData/peersflow-mcp.json',
+      configJson: JSON.stringify(
+        {
+          mcpServers: {
+            peersflow: {
+              command: '/mock/Electron',
+              args: ['/mock/dist/electron/electron/mcp/agentsflow-mcp-server.js'],
+              env: { ELECTRON_RUN_AS_NODE: '1', PEERSFLOW_STORE_PATH: '/mock/userData/store.json' },
+            },
+          },
+        },
+        null,
+        2,
+      ),
+      tools: [
+        {
+          name: 'mcp__peersflow__list_peers',
+          title: 'List peers',
+          description: 'Return the current Peers Flow registry: every tracked directory (peer), its path, the skills it exposes, and whether it has its own MCP connections.',
+          usage: 'No arguments. Returns a markdown registry of all peers.',
+        },
+        {
+          name: 'mcp__peersflow__delegate',
+          title: 'Delegate work to a peer',
+          description: "Ask another peer (a tracked directory) to deliver something. Spawns a fresh Claude rooted in that peer's directory and returns a structured result.",
+          usage: 'delegate({ directory, goal, deliverable?, timeout_ms? })',
+        },
+      ],
+      peers: state.directories.map((d) => ({
+        id: d.id,
+        displayName: d.displayName,
+        path: d.path,
+        exists: true,
+        hasProjectMcp: d.displayName === 'abi',
+        skills: d.displayName === 'abi' ? ['slack-connect', 'daily-digest'] : [],
+      })),
+    }),
+
     listConversations: async () => state.conversations,
     spawnAgent: async (req: SpawnRequest) => {
       const dir = state.directories.find((d) => d.id === req.directoryId);
@@ -125,7 +187,7 @@ export function createMockApi(): AgentsFlowApi {
         lastPrompt: req.prompt,
       };
       state.conversations = [conv, ...state.conversations];
-      prependRef(state, { kind: 'conversation', id: conv.id });
+      insertRefAtEndOfFirstSection(state, { kind: 'conversation', id: conv.id });
       save(state);
       fire(state);
       fireOrder(state);

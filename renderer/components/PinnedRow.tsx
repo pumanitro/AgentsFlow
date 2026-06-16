@@ -9,13 +9,25 @@ interface Props {
   onMarkDone: () => void;
   focused: boolean;
   suppressHover: boolean;
+  justAdded?: boolean;
   onFocus: () => void;
   draggable?: boolean;
+  // When the enclosing "unit" owns the drag handle (so it can be centered across
+  // the whole parent+peer group), the row keeps its 16px handle column for
+  // alignment but renders no grip of its own.
+  hideHandle?: boolean;
+  // When the enclosing unit paints the selection/hover background for the whole
+  // group, the row renders no background of its own (so parent and peer rows
+  // always match). It keeps its transparent 2px left rail for column alignment.
+  bare?: boolean;
+  // Drop the row's bottom divider (used for the parent of a unit so the
+  // centered drag handle isn't bisected by a divider line).
+  hideBottomBorder?: boolean;
   onDragStart?: (e: React.DragEvent) => void;
   onDragEnd?: (e: React.DragEvent) => void;
 }
 
-export default function PinnedRow({ conv, onAttach, onSaveTitle, onMarkDone, focused, suppressHover, onFocus, draggable, onDragStart, onDragEnd }: Props) {
+export default function PinnedRow({ conv, onAttach, onSaveTitle, onMarkDone, focused, suppressHover, justAdded, onFocus, draggable, hideHandle, bare, hideBottomBorder, onDragStart, onDragEnd }: Props) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(conv.title);
   const inputRef = useRef<HTMLInputElement | null>(null);
@@ -55,7 +67,7 @@ export default function PinnedRow({ conv, onAttach, onSaveTitle, onMarkDone, foc
       onDragStart={onDragStart}
       onDragEnd={onDragEnd}
       onClick={handleRowClick}
-      className={`group grid grid-cols-[16px_200px_minmax(0,1fr)_minmax(0,1fr)_auto] items-center gap-3 px-4 py-2.5 border-l-2 ${focused ? 'border-l-accent bg-panel2' : `border-l-transparent ${suppressHover ? '' : 'hover:bg-panel2'}`} border-b border-b-border cursor-pointer ${ready ? '' : 'opacity-80'}`}
+      className={`group grid grid-cols-[16px_200px_minmax(0,1fr)_minmax(0,1fr)_auto] items-center gap-3 px-4 py-2.5 border-l-2 ${bare ? 'border-l-transparent' : (focused ? 'border-l-accent bg-panel2' : `border-l-transparent ${suppressHover ? '' : 'hover:bg-panel2'}`)} ${hideBottomBorder ? '' : 'border-b border-b-border'} cursor-pointer ${ready ? '' : 'opacity-80'} ${justAdded ? 'row-just-added' : ''}`}
       title={ready ? 'Open terminal · drag to reorder' : 'Session is still starting…'}
     >
       <span
@@ -63,7 +75,9 @@ export default function PinnedRow({ conv, onAttach, onSaveTitle, onMarkDone, foc
         title="Drag to reorder"
         aria-hidden
       >
-        <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><circle cx="4" cy="4" r="1.4"/><circle cx="4" cy="8" r="1.4"/><circle cx="4" cy="12" r="1.4"/><circle cx="9" cy="4" r="1.4"/><circle cx="9" cy="8" r="1.4"/><circle cx="9" cy="12" r="1.4"/></svg>
+        {!hideHandle && (
+          <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><circle cx="4" cy="4" r="1.4"/><circle cx="4" cy="8" r="1.4"/><circle cx="4" cy="12" r="1.4"/><circle cx="9" cy="4" r="1.4"/><circle cx="9" cy="8" r="1.4"/><circle cx="9" cy="12" r="1.4"/></svg>
+        )}
       </span>
 
       <div className="flex items-center gap-2 min-w-0">

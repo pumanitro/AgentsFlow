@@ -27,6 +27,11 @@ export interface Conversation {
   // as the completion time. Undefined while still pinned / never unpinned.
   unpinnedAt?: string;
   lastPrompt: string;
+  // Set when this conversation was spawned by a peer delegation (the `delegate`
+  // MCP tool). Holds the id of the *root* conversation that requested it, so the
+  // UI can nest it under its parent and the root's session view can show a live
+  // "a peer is working" banner. Undefined for normal user-spawned conversations.
+  delegatedByConversationId?: string;
 }
 
 export interface PinnedDivider {
@@ -70,6 +75,42 @@ export interface SpawnResult {
   daemonShort: string;
 }
 
+// ---- Peers Flow MCP server (peer awareness + delegation) -------------------
+
+export interface McpToolSummary {
+  // Fully-qualified tool name as the peer would call it, e.g.
+  // "mcp__peersflow__delegate".
+  name: string;
+  title: string;
+  description: string;
+  usage: string;
+}
+
+export interface McpPeerSummary {
+  id: string;
+  displayName: string;
+  path: string;
+  exists: boolean;
+  // True when the directory has its own `.mcp.json` (its own connections).
+  hasProjectMcp: boolean;
+  // Names of the skills/commands this peer exposes.
+  skills: string[];
+}
+
+// Everything the "MCP server" preview modal needs: connection details, the
+// tools the server exposes, and a snapshot of the current peer registry.
+export interface McpServerInfo {
+  serverName: string;
+  // Whether the compiled server script is present on disk (wired into spawns).
+  connected: boolean;
+  scriptPath: string;
+  configPath: string;
+  // The exact `--mcp-config` JSON every spawned session loads.
+  configJson: string;
+  tools: McpToolSummary[];
+  peers: McpPeerSummary[];
+}
+
 export interface AgentsFlowApi {
   listDirectories: () => Promise<TrackedDirectory[]>;
   addDirectory: () => Promise<TrackedDirectory | null>;
@@ -79,6 +120,10 @@ export interface AgentsFlowApi {
   // (project scope) merged with `~/.claude` (user scope). Pass null for the
   // user scope only. Project entries shadow user entries with the same name.
   listSlashCommands: (dirPath: string | null) => Promise<SlashCommand[]>;
+
+  // Connection info + tool catalogue + live peer registry for the MCP server
+  // that powers peer awareness and delegation.
+  getMcpServerInfo: () => Promise<McpServerInfo>;
 
   listConversations: () => Promise<Conversation[]>;
   spawnAgent: (req: SpawnRequest) => Promise<SpawnResult>;

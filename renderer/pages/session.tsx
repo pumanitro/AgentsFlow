@@ -24,6 +24,9 @@ export default function SessionPage() {
   const idParam = router.query.id;
   const id = Array.isArray(idParam) ? idParam[0] : idParam;
   const [conv, setConv] = useState<Conversation | null>(null);
+  // Peers this conversation has delegated to — drives the live "a peer is
+  // working" banner so you can watch them without leaving the root session.
+  const [children, setChildren] = useState<Conversation[]>([]);
   const [rightPane, setRightPane] = useUIState('rightPane');
   const [openFile, setOpenFile] = useState<string | null>(null);
   // 1-based line to jump to when a file is opened from search. The nonce makes
@@ -121,12 +124,12 @@ export default function SessionPage() {
 
   useEffect(() => {
     if (!id) return;
-    api().listConversations().then((cs) => {
+    const apply = (cs: Conversation[]) => {
       setConv(cs.find((c) => c.id === id) ?? null);
-    });
-    const off = api().onConversationsUpdated((cs) => {
-      setConv(cs.find((c) => c.id === id) ?? null);
-    });
+      setChildren(cs.filter((c) => c.delegatedByConversationId === id));
+    };
+    api().listConversations().then(apply);
+    const off = api().onConversationsUpdated(apply);
     return off;
   }, [id]);
 
@@ -203,6 +206,40 @@ export default function SessionPage() {
           title={`Add shell in ${conv?.directoryPath ?? 'project directory'}`}
         >+ Shell</button>
       </header>
+
+      {children.length > 0 && (
+        <div className="shrink-0 border-b border-border bg-panel/60 px-4 py-1.5 flex flex-col gap-1">
+          {children.map((child) => {
+            const state = (child.state || '').toLowerCase();
+            const running = !['done', 'completed', 'failed', 'error'].includes(state);
+            const failed = state === 'failed' || state === 'error';
+            return (
+              <div key={child.id} className="flex items-center gap-2 text-[12.5px] min-w-0">
+                <span className="text-muted/70 shrink-0" aria-hidden>⤷</span>
+                <span
+                  className={`inline-block w-2 h-2 rounded-full shrink-0 ${statusDotClass(child, true)}`}
+                />
+                <span className="shrink-0 font-medium text-text/90">{child.displayName}</span>
+                <span className="text-muted shrink-0">
+                  {running ? 'is working' : failed ? 'failed' : 'finished'}
+                </span>
+                <span className="text-muted/60 shrink-0">—</span>
+                <span className="truncate text-text/70 min-w-0 flex-1" title={child.title || child.description}>
+                  {child.title || 'delegated task'}
+                </span>
+                <button
+                  onClick={() => { if (child.sessionId) router.push({ pathname: '/session', query: { id: child.id } }); }}
+                  disabled={!child.sessionId}
+                  className="shrink-0 text-[11px] uppercase tracking-wider px-2 py-0.5 rounded border border-border text-accent hover:bg-panel2 disabled:opacity-40 disabled:cursor-not-allowed"
+                  title="Open the delegated peer and watch it live"
+                >
+                  Open ▸
+                </button>
+              </div>
+            );
+          })}
+        </div>
+      )}
 
       <div ref={splitContainerRef} className="flex-1 flex flex-col min-h-0">
         <div ref={horizontalSplitRef} className="flex-1 flex min-h-0">

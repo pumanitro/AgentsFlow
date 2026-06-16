@@ -1,20 +1,31 @@
-# AgentsFlow
+# Peers Flow
 
-![Home – pinned conversations and tracked directories](./assets/screenshots/home.png)
-![Embedded terminal attached to a background session](./assets/screenshots/terminal.png)
-![File editor with git-aware sidebar](./assets/screenshots/file-editor.png)
+![Peers Flow — pinned conversations with a delegated peer nested under its root, and tracked peers below](./assets/screenshots/peers-flow.png)
 
-Electron + Next.js desktop UI for **Claude Code's background agents** — track only the sessions this app launches, treat them like a to-do list, and inspect the working tree of each one without leaving the window.
+Electron + Next.js desktop UI for **Claude Code's background agents** — track the sessions this app launches, treat them like a to-do list, inspect each one's working tree without leaving the window, and let your agents **delegate work to one another across directories**.
 
 > Status: early. Built against Claude Code CLI **v2.1.139+** (`claude agents` / `claude --bg`).
+
+## Peers & delegation — the core idea
+
+In Peers Flow every tracked directory is a **peer**: a Claude agent rooted in that directory, with its own skills and MCP connections (Slack, Gmail, …). Peers are *lateral collaborators* — distinct from Claude's own subagents (which are vertical workers a session spawns inside itself).
+
+The point is that **an agent in one directory can ask a peer in another to deliver something, and rely on the result.** Say "ask the `abi` peer to read my Slack DMs with Konrad and send me the last one" — your root agent hands a self-contained goal to `abi`, which runs as a fresh, live session *rooted in `abi`'s directory* (so it inherits `abi`'s Slack connection), works the task to completion, and returns a structured result your root agent can act on.
+
+This is wired up through a small **`peersflow` MCP server** that Peers Flow loads into every session it spawns:
+
+- **`list_peers`** — the live registry of tracked directories: each peer's path, the skills it exposes, and whether it has its own MCP connections. Refreshed from disk on every call, and a snapshot is injected into each new session's system prompt so it boots up aware of its peers.
+- **`delegate`** — ask a peer to deliver a goal. It spawns a **tracked, watchable** peer session (not a hidden one-shot): it appears nested under the root that requested it, with a live status dot (blue = working, amber = blocked, green = done) and the goal as its title. Click it to attach and watch the peer work live; a banner in the root's session view follows along. The root's `delegate` call blocks until the peer finishes, then receives the result.
+
+Open the **MCP server** entry in the hamburger menu to see the tools, the live peer registry, and exactly how sessions connect.
 
 ## Why
 
 Built to scratch three specific itches working with Claude Code day-to-day:
 
-1. **Agent management in the CLI is ugly.** `claude agents` is functional but unpleasant to live in — no real overview, no pinning, no per-directory grouping. AgentsFlow turns background sessions into a visual to-do list scoped to the agents *you* launched from this app.
-2. **No native Markdown editor.** When an agent is working in a repo full of `.md` files, there's nowhere to read or edit them comfortably without alt-tabbing to another app. AgentsFlow ships an Obsidian-style live Markdown editor inline, next to the chat.
-3. **No tree preview.** Watching agents touch a codebase is hard without seeing the working tree. AgentsFlow shows a `git status`-colored file tree per session, with an embedded shell, so you can inspect changes the moment the agent finishes — no terminal-juggling.
+1. **Agent management in the CLI is ugly.** `claude agents` is functional but unpleasant to live in — no real overview, no pinning, no per-directory grouping. Peers Flow turns background sessions into a visual to-do list scoped to the agents *you* launched from this app.
+2. **No native Markdown editor.** When an agent is working in a repo full of `.md` files, there's nowhere to read or edit them comfortably without alt-tabbing to another app. Peers Flow ships an Obsidian-style live Markdown editor inline, next to the chat.
+3. **No tree preview.** Watching agents touch a codebase is hard without seeing the working tree. Peers Flow shows a `git status`-colored file tree per session, with an embedded shell, so you can inspect changes the moment the agent finishes — no terminal-juggling.
 
 ## Highlights
 
@@ -62,7 +73,7 @@ npm run start        # launch Electron with the prebuilt renderer
 ## Storage
 
 A single JSON file under Electron's `userData` directory.
-- macOS: `~/Library/Application Support/AgentsFlow/store.json` (or `…/Electron/store.json` if the productName isn't set).
+- macOS: `~/Library/Application Support/Peers Flow/store.json` (or `…/Electron/store.json` if the productName isn't set).
 
 Per-conversation tree-expand state is in the renderer's `localStorage`.
 
