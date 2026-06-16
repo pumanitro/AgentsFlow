@@ -8,11 +8,12 @@ Electron + Next.js desktop UI for **Claude Code's background agents** — track 
 
 ## Why
 
-Built to scratch three specific itches working with Claude Code day-to-day:
+Built to scratch four specific itches working with Claude Code day-to-day:
 
 1. **Agent management in the CLI is ugly.** `claude agents` is functional but unpleasant to live in — no real overview, no pinning, no per-directory grouping. Peers Flow turns background sessions into a visual to-do list scoped to the agents *you* launched from this app.
 2. **No native Markdown editor.** When an agent is working in a repo full of `.md` files, there's nowhere to read or edit them comfortably without alt-tabbing to another app. Peers Flow ships an Obsidian-style live Markdown editor inline, next to the chat.
 3. **No tree preview.** Watching agents touch a codebase is hard without seeing the working tree. Peers Flow shows a `git status`-colored file tree per session, with an embedded shell, so you can inspect changes the moment the agent finishes — no terminal-juggling.
+4. **No communication between directory agents.** Each `claude` session is an island — an agent in one directory can't ask one in another to do something, even when that other directory has exactly the skills or connections (a Slack login, a database) the task needs. Peers Flow makes every tracked directory a *peer* and hands agents a `delegate` tool, so one can pass a self-contained goal to another and rely on the result.
 
 ## Highlights
 
