@@ -2,6 +2,7 @@ import { BrowserWindow } from 'electron';
 import * as os from 'os';
 import * as path from 'path';
 import type { IPty } from 'node-pty';
+import { withUtf8Locale } from './locale';
 
 let ptyMod: typeof import('node-pty') | null = null;
 function getPty(): typeof import('node-pty') {
@@ -27,7 +28,7 @@ const CLAUDE_BIN = process.env.CLAUDE_BIN || 'claude';
 //    sessionId, subscriber-tracked, with a replay buffer. Killing it on detach
 //    is what was aborting in-progress turns when switching/closing the view.
 
-const env = () => ({
+const env = () => withUtf8Locale({
   ...process.env,
   PATH: `${process.env.PATH}:${path.join(os.homedir(), '.local/bin')}`,
   TERM: 'xterm-256color',
@@ -111,7 +112,10 @@ function attachResume(opts: {
   let sess = resumeSessions.get(opts.sessionId);
 
   if (!sess) {
-    const args = ['--resume', opts.sessionId];
+    // Match dispatchBackground: resumed sessions don't inherit the original
+    // session's permission mode, so re-assert bypassPermissions explicitly or
+    // the user lands back in the default/auto mode after detach + reattach.
+    const args = ['--resume', opts.sessionId, '--permission-mode', 'bypassPermissions'];
     const cwd = opts.cwd || os.homedir();
     console.log('[agentsflow][pty] spawning resume', { bin: CLAUDE_BIN, args, cwd, cols: opts.cols, rows: opts.rows });
     let pty: IPty;
@@ -215,11 +219,11 @@ export function attachShell(opts: {
 
   if (!shell) {
     const shellBin = process.env.SHELL || '/bin/zsh';
-    const env = {
+    const env = withUtf8Locale({
       ...process.env,
       PATH: `${process.env.PATH}:${path.join(os.homedir(), '.local/bin')}`,
       TERM: 'xterm-256color',
-    } as Record<string, string>;
+    } as Record<string, string>);
     console.log('[agentsflow][pty] spawning shell', { shellId: opts.shellId, shell: shellBin, cwd: opts.cwd, cols: opts.cols, rows: opts.rows });
     let pty: IPty;
     try {

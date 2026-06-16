@@ -2,6 +2,7 @@ import { spawn } from 'child_process';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+import { withUtf8Locale } from './locale';
 
 const CLAUDE_BIN = process.env.CLAUDE_BIN || 'claude';
 
@@ -59,6 +60,9 @@ function runCmd(args: string[], opts: { cwd?: string; timeoutMs?: number } = {})
     env.NO_COLOR = '1';
     delete env.FORCE_COLOR;
     delete env.CLICOLOR_FORCE;
+    // GUI-launched Electron inherits no LANG, so claude would run in the C locale
+    // and mangle multibyte UTF-8 (Polish chars, accents) in prompts/output.
+    withUtf8Locale(env);
     const child = spawn(CLAUDE_BIN, args, { cwd: opts.cwd, env, stdio: ['ignore', 'pipe', 'pipe'] });
     const stdoutChunks: Buffer[] = [];
     const stderrChunks: Buffer[] = [];
@@ -164,6 +168,7 @@ function runCmdToFile(args: string[], outPath: string, opts: { cwd?: string; tim
     env.NO_COLOR = '1';
     delete env.FORCE_COLOR;
     delete env.CLICOLOR_FORCE;
+    withUtf8Locale(env);
     const out = fs.openSync(outPath, 'w');
     const child = spawn(CLAUDE_BIN, args, { cwd: opts.cwd, env, stdio: ['ignore', out, 'pipe'] });
     fs.closeSync(out);
