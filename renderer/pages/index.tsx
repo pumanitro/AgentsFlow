@@ -42,6 +42,10 @@ export default function Home() {
   const [menuOpen, setMenuOpen] = useState(false);
   const [pendingRenameDividerId, setPendingRenameDividerId] = useState<string | null>(null);
   const awaitingNewConvRef = useRef<Set<string> | null>(null);
+  // After a task is finished its row vanishes; this records which neighbour to
+  // re-focus once the list has actually dropped the finished row, so focus
+  // never gets parked on a separator. { doneId, targetId } — see markDone.
+  const pendingDoneRef = useRef<{ doneId: string; targetId: string } | null>(null);
   const [pendingFocusConvId, setPendingFocusConvId] = useState<string | null>(null);
   const [dragKey, setDragKey] = useState<string | null>(null);
   const [dropTargetIdx, setDropTargetIdx] = useState<number | null>(null);
@@ -81,6 +85,25 @@ export default function Home() {
     }
     return map;
   }, [convs]);
+
+  // Tracked Peers are ordered by their most recently *created* chat (newest
+  // first), so spawning a conversation floats its peer to the front. Peers with
+  // no chats yet fall back to when they were added. ISO timestamps compare
+  // correctly as plain strings.
+  const sortedDirs = useMemo(() => {
+    const lastChatAt = (dirId: string): string => {
+      let max = '';
+      for (const c of convsByDir.get(dirId) ?? []) {
+        if (c.createdAt > max) max = c.createdAt;
+      }
+      return max;
+    };
+    return [...dirs].sort((a, b) => {
+      const ax = lastChatAt(a.id) || a.addedAt;
+      const bx = lastChatAt(b.id) || b.addedAt;
+      return ax < bx ? 1 : ax > bx ? -1 : 0; // descending — newest first
+    });
+  }, [dirs, convsByDir]);
 
   // Delegated peer sessions, grouped under the root conversation that spawned
   // them, so they can be rendered as nested child rows.
@@ -309,6 +332,18 @@ export default function Home() {
     }
   }, [pendingFocusConvId, pinnedItems, pinnedOrder]);
 
+  // Re-aim focus after a task is finished. We wait until the finished row has
+  // actually left pinnedItems so the target's index is resolved against the
+  // post-removal list (never a stale one), then land on the chosen neighbour.
+  useEffect(() => {
+    const pending = pendingDoneRef.current;
+    if (!pending) return;
+    if (pinnedItems.some((it) => it.kind === 'conversation' && it.id === pending.doneId)) return;
+    const idx = pinnedItems.findIndex((it) => it.kind === 'conversation' && it.id === pending.targetId);
+    pendingDoneRef.current = null;
+    if (idx >= 0) { setFocusedIdx(idx); setSelectedChildId(null); }
+  }, [pinnedItems]);
+
   // Clear the "just added" highlight once the row-just-added animation has run.
   useEffect(() => {
     if (!justAddedConvId) return;
@@ -325,6 +360,27 @@ export default function Home() {
       return;
     }
     router.push({ pathname: '/session', query: { id: c.id } });
+  };
+
+  // Finish a task: unpin its conversation and move focus to a sensible
+  // neighbour. We prefer the nearest real conversation BEFORE the finished one
+  // (the user's "step back up the list"), then fall back to the nearest one
+  // AFTER it. Separators are skipped on both passes, so finishing the last item
+  // in a separator-bounded group lands focus on the previous item, not the
+  // separator. Only when nothing else remains does focus fall back (via the
+  // bounds check) to whatever's left.
+  const markDone = (idx: number) => {
+    const item = pinnedItems[idx];
+    if (!item || item.kind !== 'conversation') return;
+    let target: PinnedItem | undefined;
+    for (let j = idx - 1; j >= 0 && !target; j--) {
+      if (pinnedItems[j].kind === 'conversation') target = pinnedItems[j];
+    }
+    for (let j = idx + 1; j < pinnedItems.length && !target; j++) {
+      if (pinnedItems[j].kind === 'conversation') target = pinnedItems[j];
+    }
+    pendingDoneRef.current = target ? { doneId: item.id, targetId: target.id } : null;
+    api().setConversationPinned(item.id, false).then(refreshAll);
   };
 
   const handleAddDivider = async () => {
@@ -563,7 +619,7 @@ export default function Home() {
                           onFocus={() => { setFocusedIdx(i); setSelectedChildId(null); }}
                           onAttach={() => attach(item.conv)}
                           onSaveTitle={(t) => api().updateConversationTitle(item.id, t).then(refreshAll)}
-                          onMarkDone={() => api().setConversationPinned(item.id, false).then(refreshAll)}
+                          onMarkDone={() => markDone(i)}
                           draggable={false}
                         />
                         {hasKids && (
@@ -618,7 +674,7 @@ export default function Home() {
         <section className="px-4 pt-6 pb-4">
           <h2 className="text-xs uppercase tracking-wider text-muted mb-2">Tracked Peers</h2>
           <div className="grid grid-cols-2 lg:grid-cols-3 gap-3">
-            {dirs.map((d) => (
+            {sortedDirs.map((d) => (
               <DirectoryCard
                 key={d.id}
                 dir={d}

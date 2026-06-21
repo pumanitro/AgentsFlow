@@ -5,6 +5,7 @@ import { api } from '../lib/ipc';
 import { Conversation } from '../../shared/types';
 import { statusDotClass } from '../lib/status';
 import { saveUIState, useDirectoryNumber, useUIState } from '../lib/ui-state';
+import { useBackNavKeys, BackNavHint } from '../lib/back-nav';
 
 import ShellArea, { appendShell, ShellNode } from '../components/ShellArea';
 import PaneErrorBoundary from '../components/PaneErrorBoundary';
@@ -115,12 +116,35 @@ export default function SessionPage() {
     window.addEventListener('mouseup', onUp);
   }, [setSidebarWidth]);
 
-  // FILE pane is meaningless without an open file. If the persisted state lands
-  // us there with nothing loaded (re-entering the session after navigating away,
-  // or after the previously-open file was renamed/deleted), fall back to CHAT.
+  // Remember the last file opened in this peer (keyed on its directory, like the
+  // shell/sidebar sizes) so the FILE switch reopens it on return instead of
+  // stranding us on an empty pane.
+  const lastFileKey = conv?.directoryId;
+  const lastFileHydratedFor = useRef<string | null>(null);
   useEffect(() => {
-    if (rightPane === 'file' && !openFile) setRightPane('chat');
-  }, [rightPane, openFile, setRightPane]);
+    if (!lastFileKey || typeof localStorage === 'undefined') return;
+    if (lastFileHydratedFor.current === lastFileKey) return;
+    lastFileHydratedFor.current = lastFileKey;
+    let stored: string | null = null;
+    try { stored = localStorage.getItem(`agentsflow:dir:${lastFileKey}:lastFile`); } catch { /* ignore */ }
+    setOpenFile(stored || null);
+    // Nothing remembered → a persisted FILE pane has nothing to show, so fall
+    // back to CHAT. (A remembered file that was since deleted surfaces as an
+    // error inside the editor, which is friendlier than silently hiding it.)
+    if (!stored && rightPane === 'file') setRightPane('chat');
+  }, [lastFileKey, rightPane, setRightPane]);
+
+  // Persist the last-opened file per peer. Skip until the restore above has run
+  // for this directory so the initial null never clobbers the stored path.
+  useEffect(() => {
+    if (!lastFileKey || typeof localStorage === 'undefined') return;
+    if (lastFileHydratedFor.current !== lastFileKey) return;
+    try {
+      const key = `agentsflow:dir:${lastFileKey}:lastFile`;
+      if (openFile) localStorage.setItem(key, openFile);
+      else localStorage.removeItem(key);
+    } catch { /* ignore */ }
+  }, [lastFileKey, openFile]);
 
   useEffect(() => {
     if (!id) return;
@@ -138,24 +162,13 @@ export default function SessionPage() {
     router.push({ pathname: '/', query: id ? { focus: String(id) } : undefined });
   }, [router, id, conv]);
 
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'ArrowLeft' && (e.metaKey || e.altKey)) {
-        e.preventDefault();
-        goBack();
-      } else if (e.key === 'Escape' && e.shiftKey) {
-        e.preventDefault();
-        goBack();
-      }
-    };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [goBack]);
+  const backHint = useBackNavKeys(goBack);
 
   if (!id) return null;
 
   return (
     <div className="h-screen flex flex-col">
+      <BackNavHint hint={backHint} />
       <header
         className="shrink-0 px-4 py-2.5 border-b border-border flex items-center gap-3"
         style={{ WebkitAppRegion: 'drag' } as React.CSSProperties}

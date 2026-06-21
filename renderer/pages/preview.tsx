@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { api } from '../lib/ipc';
 import { TrackedDirectory } from '../../shared/types';
 import { saveUIState, useDirectoryNumber } from '../lib/ui-state';
+import { useBackNavKeys, BackNavHint } from '../lib/back-nav';
 import PaneErrorBoundary from '../components/PaneErrorBoundary';
 import { appendShell, ShellNode } from '../components/ShellArea';
 import paneLoading from '../components/PaneLoading';
@@ -150,24 +151,13 @@ export default function PreviewPage() {
     router.push({ pathname: '/' });
   }, [router, dir]);
 
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'ArrowLeft' && (e.metaKey || e.altKey)) {
-        e.preventDefault();
-        goBack();
-      } else if (e.key === 'Escape' && e.shiftKey) {
-        e.preventDefault();
-        goBack();
-      }
-    };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [goBack]);
+  const backHint = useBackNavKeys(goBack);
 
   if (!dirId) return null;
 
   return (
     <div className="h-screen flex flex-col">
+      <BackNavHint hint={backHint} />
       <header
         className="shrink-0 px-4 py-2.5 border-b border-border flex items-center gap-3"
         style={{ WebkitAppRegion: 'drag' } as React.CSSProperties}

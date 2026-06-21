@@ -49,7 +49,28 @@ export default function Terminal({ conversationId, shellId, shellCwd, onExit, au
       }
       if (disposed || !containerRef.current) return;
 
+      // Open every terminal link in the system browser by handing the REAL url
+      // to window.open(url, '_blank'). The main process's setWindowOpenHandler
+      // forwards http(s)/mailto urls to shell.openExternal and then denies the
+      // popup, so no stray BrowserWindow appears.
+      //
+      // We must supply this explicitly for BOTH link kinds because both of
+      // xterm's built-in handlers are broken under our deny-by-default open
+      // handler: they call window.open() with NO url and only afterwards set
+      // newWindow.location.href = uri. Since the open is denied, window.open()
+      // returns null and the url (never passed to the main process) is dropped
+      // — the link silently never opens. The OSC 8 handler additionally pops a
+      // "WARNING: this link could be dangerous" confirm() first; routing it
+      // through our handler replaces that default entirely, so the dialog and
+      // the dead no-op both go away.
+      const openLink = (_event: MouseEvent, uri: string) => {
+        if (!/^(https?:|mailto:)/i.test(uri)) return;
+        window.open(uri, '_blank', 'noopener,noreferrer');
+      };
+
       const term = new xtermMod.Terminal({
+        // OSC 8 hyperlinks (e.g. a GitHub PR rendered as a clickable label).
+        linkHandler: { activate: openLink },
         fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace',
         fontSize: 13,
         cursorBlink: true,
@@ -79,7 +100,10 @@ export default function Terminal({ conversationId, shellId, shellCwd, onExit, au
 
       const fit = new fitMod.FitAddon();
       term.loadAddon(fit);
-      term.loadAddon(new linksMod.WebLinksAddon());
+      // Plain-text URLs detected in the output. Same handler so both link
+      // kinds funnel through shell.openExternal instead of window.open()'s
+      // urlless no-op.
+      term.loadAddon(new linksMod.WebLinksAddon(openLink));
 
       term.open(containerRef.current);
       fit.fit();
