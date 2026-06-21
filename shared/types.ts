@@ -156,6 +156,13 @@ export interface AgentsFlowApi {
   gitStatus: (dirPath: string) => Promise<GitStatusResult>;
   listFiles: (dirPath: string) => Promise<FileEntry[]>;
 
+  // The per-peer private "notes" folder, stored under Peers Flow's app-data
+  // (NOT inside the project, so note files never appear in git or the project
+  // tree). Creates it on first access and returns its absolute path.
+  notesRoot: (dirPath: string) => Promise<{ root: string }>;
+  // Plain recursive listing of a notes folder (no git semantics).
+  listNotes: (root: string) => Promise<FileEntry[]>;
+
   // Full-text search across the non-ignored files in `dirPath` (the same set
   // the Files tree shows). Returns matching lines grouped by file.
   searchFiles: (dirPath: string, query: string, opts?: SearchOptions) => Promise<SearchResult>;

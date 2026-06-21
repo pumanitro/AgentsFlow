@@ -42,7 +42,7 @@ import * as fileWatcher from './file-watcher';
 import { gitStatus, listFiles } from './git';
 import { searchInFiles } from './search';
 import { deleteAttachmentFiles, pastedImagesRoot, prunePastedImages, sweepOrphanAttachments, todayDateSlug } from './attachments';
-import { Conversation, PinnedDivider, PinnedItemRef, SlashCommand, SpawnRequest, TrackedDirectory } from '../shared/types';
+import { Conversation, FileEntry, PinnedDivider, PinnedItemRef, SlashCommand, SpawnRequest, TrackedDirectory } from '../shared/types';
 
 const isDev = process.env.NODE_ENV === 'development';
 const loadURL = isDev ? null : serve({ directory: path.join(__dirname, '..', '..', '..', 'renderer', 'out') });
@@ -667,6 +667,45 @@ ipcMain.handle('files:search', async (_e, dirPath: string, query: string, opts) 
   } catch (err) {
     return { files: [], totalMatches: 0, filesScanned: 0, truncated: false, error: (err as Error)?.message ?? String(err) };
   }
+});
+
+// ---- Notes: a per-peer private scratch folder kept OUTSIDE the project ------
+// Each tracked directory ("peer") gets its own notes folder under Peers Flow's
+// app-data, so note files never appear in the project tree or git. Keyed on the
+// peer's tracked-directory id (stable across display-name renames); falls back
+// to a hash of the path for any dir not in the store. Once the absolute root is
+// known, every mutation reuses the existing files:* handlers unchanged.
+function notesRootFor(dirPath: string): string {
+  const match = store.getDirectories().find((d) => d.path === dirPath);
+  const key = match
+    ? match.id
+    : require('crypto').createHash('sha1').update(dirPath).digest('hex').slice(0, 16);
+  return path.join(app.getPath('userData'), 'notes', key);
+}
+
+ipcMain.handle('notes:root', async (_e, dirPath: string): Promise<{ root: string }> => {
+  const root = notesRootFor(dirPath);
+  fs.mkdirSync(root, { recursive: true });
+  return { root };
+});
+
+ipcMain.handle('notes:list', async (_e, root: string): Promise<FileEntry[]> => {
+  // Plain recursive walk — the notes folder isn't a git repo and notes have no
+  // changed/ignored concept, so we deliberately skip the git-aware listFiles().
+  const out: FileEntry[] = [];
+  const walk = (sub: string) => {
+    const here = sub ? path.join(root, sub) : root;
+    let entries: fs.Dirent[];
+    try { entries = fs.readdirSync(here, { withFileTypes: true }); } catch { return; }
+    for (const ent of entries) {
+      if (ent.name === '.DS_Store') continue;
+      const rel = sub ? path.join(sub, ent.name) : ent.name;
+      if (ent.isDirectory()) walk(rel);
+      else out.push({ path: rel, isIgnored: false });
+    }
+  };
+  walk('');
+  return out;
 });
 
 ipcMain.handle('files:watch', async (e, dirPath: string) => {

@@ -407,6 +407,12 @@ export function createMockApi(): AgentsFlowApi {
       { path: '.next/cache/data.bin', isIgnored: true },
     ],
 
+    notesRoot: async (dirPath: string) => ({ root: `${dirPath}/.peersflow-notes-mock` }),
+    listNotes: async (): Promise<FileEntry[]> => [
+      { path: 'scratch.md', isIgnored: false },
+      { path: 'ideas/roadmap.md', isIgnored: false },
+    ],
+
     searchFiles: async (_dir: string, query: string, opts?: SearchOptions): Promise<SearchResult> => {
       const empty: SearchResult = { files: [], totalMatches: 0, filesScanned: 0, truncated: false };
       if (!query) return empty;

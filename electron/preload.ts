@@ -63,6 +63,9 @@ const api: AgentsFlowApi = {
 
   gitStatus: (dirPath) => ipcRenderer.invoke('git:status', dirPath),
   listFiles: (dirPath) => ipcRenderer.invoke('files:list', dirPath),
+
+  notesRoot: (dirPath) => ipcRenderer.invoke('notes:root', dirPath),
+  listNotes: (root) => ipcRenderer.invoke('notes:list', root),
   searchFiles: (dirPath, query, opts) => ipcRenderer.invoke('files:search', dirPath, query, opts),
 
   watchFiles: (dirPath) => ipcRenderer.invoke('files:watch', dirPath),
