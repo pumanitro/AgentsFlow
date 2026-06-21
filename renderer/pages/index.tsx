@@ -49,6 +49,9 @@ export default function Home() {
   const [pendingFocusConvId, setPendingFocusConvId] = useState<string | null>(null);
   const [dragKey, setDragKey] = useState<string | null>(null);
   const [dropTargetIdx, setDropTargetIdx] = useState<number | null>(null);
+  // Key of the row whose inline title editor is open; that row's wrapper must
+  // not be draggable, or click-dragging to select text starts a row drag.
+  const [editingKey, setEditingKey] = useState<string | null>(null);
   const [justAddedConvId, setJustAddedConvId] = useState<string | null>(null);
 
   const refreshAll = async () => {
@@ -606,7 +609,7 @@ export default function Home() {
                     {item.kind === 'conversation' ? (
                       <div
                         className={unitCls}
-                        draggable
+                        draggable={editingKey !== key}
                         onDragStart={handleDragStart(key)}
                         onDragEnd={handleDragEnd}
                       >
@@ -620,6 +623,7 @@ export default function Home() {
                           onAttach={() => attach(item.conv)}
                           onSaveTitle={(t) => api().updateConversationTitle(item.id, t).then(refreshAll)}
                           onMarkDone={() => markDone(i)}
+                          onEditingChange={(ed) => setEditingKey((cur) => (ed ? key : cur === key ? null : cur))}
                           draggable={false}
                         />
                         {hasKids && (

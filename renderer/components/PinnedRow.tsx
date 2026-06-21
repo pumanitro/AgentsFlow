@@ -25,9 +25,13 @@ interface Props {
   hideBottomBorder?: boolean;
   onDragStart?: (e: React.DragEvent) => void;
   onDragEnd?: (e: React.DragEvent) => void;
+  // Notifies the parent when the inline title editor opens/closes, so the
+  // enclosing draggable wrapper can stop hijacking the mouse (otherwise a
+  // click-drag to select text starts a row drag instead).
+  onEditingChange?: (editing: boolean) => void;
 }
 
-export default function PinnedRow({ conv, onAttach, onSaveTitle, onMarkDone, focused, suppressHover, justAdded, onFocus, draggable, hideHandle, bare, hideBottomBorder, onDragStart, onDragEnd }: Props) {
+export default function PinnedRow({ conv, onAttach, onSaveTitle, onMarkDone, focused, suppressHover, justAdded, onFocus, draggable, hideHandle, bare, hideBottomBorder, onDragStart, onDragEnd, onEditingChange }: Props) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(conv.title);
   const inputRef = useRef<HTMLInputElement | null>(null);
@@ -40,13 +44,19 @@ export default function PinnedRow({ conv, onAttach, onSaveTitle, onMarkDone, foc
     if (editing) inputRef.current?.focus();
   }, [editing]);
 
+  const beginEdit = () => {
+    setEditing(true);
+    onEditingChange?.(true);
+  };
   const commit = () => {
     setEditing(false);
+    onEditingChange?.(false);
     const v = draft.trim();
     if (v !== conv.title) onSaveTitle(v);
   };
   const cancel = () => {
     setEditing(false);
+    onEditingChange?.(false);
     setDraft(conv.title);
   };
 
@@ -106,7 +116,7 @@ export default function PinnedRow({ conv, onAttach, onSaveTitle, onMarkDone, foc
           <div className="min-w-0 flex items-center gap-1 flex-1">
             <button
               type="button"
-              onDoubleClick={(e) => { e.stopPropagation(); setEditing(true); }}
+              onDoubleClick={(e) => { e.stopPropagation(); beginEdit(); }}
               onClick={(e) => e.stopPropagation()}
               className="min-w-0 truncate text-left text-sm select-text rounded px-1 -mx-1 hover:bg-bg/40 text-text/90"
               title="Double-click to rename"
@@ -114,7 +124,7 @@ export default function PinnedRow({ conv, onAttach, onSaveTitle, onMarkDone, foc
               {conv.title || <span className="text-muted italic">—</span>}
             </button>
             <button
-              onClick={(e) => { e.stopPropagation(); setEditing(true); }}
+              onClick={(e) => { e.stopPropagation(); beginEdit(); }}
               className="shrink-0 text-muted hover:text-accent p-1 rounded hover:bg-bg/40 opacity-60 group-hover:opacity-100"
               title="Rename title"
               aria-label="Rename title"

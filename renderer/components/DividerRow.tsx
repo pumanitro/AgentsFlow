@@ -64,12 +64,12 @@ export default function DividerRow({
     <div
       data-focused={focused}
       data-testid={`divider-row-${divider.id}`}
-      draggable={draggable}
+      draggable={draggable && !editing}
       onDragStart={onDragStart}
       onDragEnd={onDragEnd}
       onClick={onFocus}
-      className={`group flex items-center gap-3 px-4 py-2 border-l-2 ${focused ? 'border-l-accent bg-panel2' : `border-l-transparent ${suppressHover ? '' : 'hover:bg-panel2/60'}`} border-b border-b-border cursor-grab active:cursor-grabbing select-none`}
-      title="Drag to reorder · Shift+↑/↓"
+      className={`group flex items-center gap-3 px-4 py-2 border-l-2 ${focused ? 'border-l-accent bg-panel2' : `border-l-transparent ${suppressHover ? '' : 'hover:bg-panel2/60'}`} border-b border-b-border ${editing ? 'cursor-default' : 'cursor-grab active:cursor-grabbing select-none'}`}
+      title={editing ? undefined : 'Drag to reorder · Shift+↑/↓'}
     >
       <span className="text-muted/70 shrink-0" aria-hidden>
         <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><circle cx="4" cy="4" r="1.4"/><circle cx="4" cy="8" r="1.4"/><circle cx="4" cy="12" r="1.4"/><circle cx="9" cy="4" r="1.4"/><circle cx="9" cy="8" r="1.4"/><circle cx="9" cy="12" r="1.4"/></svg>
