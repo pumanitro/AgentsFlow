@@ -193,6 +193,86 @@ function restoreImageRefs(markdown: string, restoreMap: Map<string, string>): st
   });
 }
 
+// An empty paragraph has no markdown representation: the lossy serializer emits
+// it as a bare blank line, and the markdown parser then collapses any run of
+// blank lines on the next load — so deliberately-added empty rows vanish after a
+// save → reopen round-trip (the in-memory blocks keep them alive only until the
+// editor unmounts). To make them survive, empty paragraphs are encoded on the
+// way out as a single zero-width space (U+200B): it renders invisibly, it is NOT
+// removed by the serializer's trailing .trim() (ZWSP isn't ECMAScript
+// whitespace, unlike NBSP), and the parser treats it as real text so the
+// paragraph is never collapsed. On load we strip the sentinel back to a truly
+// empty paragraph so the editor shows a blank row, not a stray character.
+const BLANK_SENTINEL = '​';
+
+function isEmptyParagraph(block: Block): boolean {
+  return block.type === 'paragraph' && Array.isArray(block.content) && block.content.length === 0;
+}
+
+/**
+ * Concatenated text of a block's inline content, or null if it holds anything
+ * other than plain text nodes (links, mentions, …) — those are never blanks.
+ */
+function inlinePlainText(content: unknown): string | null {
+  if (!Array.isArray(content)) return null;
+  let s = '';
+  for (const node of content as Array<{ type?: string; text?: string }>) {
+    if (node && node.type === 'text' && typeof node.text === 'string') s += node.text;
+    else return null;
+  }
+  return s;
+}
+
+function isBlankSentinelParagraph(block: Block): boolean {
+  if (block.type !== 'paragraph') return false;
+  const text = inlinePlainText(block.content);
+  return text !== null && text.length > 0 && text.replace(/​/g, '') === '';
+}
+
+/**
+ * Replace empty paragraphs with a zero-width-space paragraph so they survive
+ * markdown serialization. Recurses into nested children (list items, columns).
+ */
+function encodeBlankBlocks(blocks: Block[]): Block[] {
+  // Trailing empty paragraphs are a UX affordance (BlockNote keeps one after the
+  // last content), and the lossy serializer's final .trim() drops them anyway —
+  // only interior blanks carry meaning. Encode an empty paragraph only when a
+  // later sibling still has content, so trailing blanks keep being trimmed and
+  // the round-trip stays stable (no spurious sentinel line accreting at EOF).
+  let lastContent = -1;
+  for (let i = 0; i < blocks.length; i++) if (!isEmptyParagraph(blocks[i])) lastContent = i;
+  return blocks.map((b, i) => {
+    const kids = b.children && b.children.length ? encodeBlankBlocks(b.children as Block[]) : b.children;
+    if (i < lastContent && isEmptyParagraph(b)) {
+      return { ...b, content: [{ type: 'text', text: BLANK_SENTINEL, styles: {} }], children: kids } as unknown as Block;
+    }
+    return kids === b.children ? b : ({ ...b, children: kids } as Block);
+  });
+}
+
+/**
+ * Reverse of encodeBlankBlocks — strip sentinel paragraphs back to truly empty
+ * ones so the editor shows blank rows, not invisible characters.
+ */
+function decodeBlankBlocks(blocks: Block[]): Block[] {
+  return blocks.map((b) => {
+    const kids = b.children && b.children.length ? decodeBlankBlocks(b.children as Block[]) : b.children;
+    if (isBlankSentinelParagraph(b)) {
+      return { ...b, content: [], children: kids } as Block;
+    }
+    return kids === b.children ? b : ({ ...b, children: kids } as Block);
+  });
+}
+
+/**
+ * Serialize the editor document to markdown, preserving deliberately-empty rows
+ * (see BLANK_SENTINEL) and restoring inlined image data URLs to their on-disk refs.
+ */
+async function serializeDoc(editor: BNEditorInstance, restoreMap: Map<string, string>): Promise<string> {
+  const md = await editor.blocksToMarkdownLossy(encodeBlankBlocks(editor.document as Block[]));
+  return restoreImageRefs(md, restoreMap);
+}
+
 /**
  * Inner editor — owns the BlockNote instance. Receives the parsed initial blocks
  * so `useCreateBlockNote` only runs once with a stable initialContent.
@@ -281,10 +361,7 @@ function Inner({
   useEffect(() => {
     const off = editor.onChange(async () => {
       try {
-        const md = restoreImageRefs(
-          await editor.blocksToMarkdownLossy(editor.document),
-          restoreRef.current,
-        );
+        const md = await serializeDoc(editor, restoreRef.current);
         latestMd.current = md;
         setDirty(md !== lastSavedMd.current);
 
@@ -303,10 +380,7 @@ function Inner({
           const timer = setTimeout(async () => {
             gcTimers.current.delete(abs);
             try {
-              const latest = restoreImageRefs(
-                await editor.blocksToMarkdownLossy(editor.document),
-                restoreRef.current,
-              );
+              const latest = await serializeDoc(editor, restoreRef.current);
               if (extractLocalRefs(latest, filePath, baseDir).has(abs)) return; // came back
               await gcLocalFile(abs, filePath, baseDir, gcDone.current);
             } catch {
@@ -346,10 +420,7 @@ function Inner({
     setSaving(true);
     setError(null);
     try {
-      const md = restoreImageRefs(
-        await editor.blocksToMarkdownLossy(editor.document),
-        restoreRef.current,
-      );
+      const md = await serializeDoc(editor, restoreRef.current);
       await api().writeTextFile(filePath, md);
       const prevMd = lastSavedMd.current;
       lastSavedMd.current = md;
@@ -427,7 +498,7 @@ export default function BlockNoteMarkdownEditor({ filePath, baseDir, autoFocus }
         if (cancelled) return;
         // Spin up a throwaway editor just to use the markdown parser.
         const parser = BNEditorInstance.create();
-        const blocks = (await parser.tryParseMarkdownToBlocks(inlined)) as Block[];
+        const blocks = decodeBlankBlocks((await parser.tryParseMarkdownToBlocks(inlined)) as Block[]);
         if (cancelled) return;
         setState({ kind: 'ready', blocks, markdown: res.content, size: res.size, restoreMap });
       } catch (err) {
