@@ -43,9 +43,79 @@ interface ResumeSession {
   buffer: string[];
   bufferBytes: number;
   subscribers: Map<string, ShellSubscriber>;
+  lastDataAt: number;            // last time the PTY produced output
+  detachedAt: number | null;     // when the last subscriber left (null while watched)
 }
 const resumeSessions = new Map<string, ResumeSession>();
 const resumeChannelToSessionId = new Map<string, string>();
+
+// ---------- PTY capacity guard ----------
+// node-pty's native spawn (PtyFork) throws a C++ exception when the OS can't
+// allocate a pseudo-terminal — e.g. macOS exhausts its system-wide cap
+// (`kern.tty.ptmx_max`, 511 by default). That throw crosses the native/V8
+// boundary and is *uncatchable* by the JS try/catch around spawn(): it reaches
+// std::terminate → abort(), taking the whole app down with SIGABRT. So we must
+// refuse to spawn *before* node-pty does, while the count is still safely under
+// the OS limit. The ceiling sits well below 511 to leave headroom for other
+// apps sharing the same /dev/ptmx budget (the user's terminal tabs, etc.).
+const MAX_LIVE_PTYS = Number(process.env.AGENTSFLOW_MAX_PTYS) || 64;
+
+function livePtyCount(): number {
+  return claudeChannels.size + resumeSessions.size + shells.size;
+}
+
+// True if another PTY may be spawned. On false, emits a graceful error to the
+// channel (mirroring the spawn-failure path) so the renderer surfaces it
+// instead of the app aborting.
+function ensurePtyCapacity(win: BrowserWindow, channelId: string, label: string): boolean {
+  const live = livePtyCount();
+  if (live < MAX_LIVE_PTYS) return true;
+  console.error(`[agentsflow][pty] refusing to spawn ${label}: PTY ceiling reached`, { live, max: MAX_LIVE_PTYS });
+  if (!win.isDestroyed()) {
+    win.webContents.send('terminal:data', channelId, `\r\n\x1b[31m[${label} spawn refused] too many open terminals (${live}/${MAX_LIVE_PTYS}). Close some sessions or shells, then retry.\x1b[0m\r\n`);
+    win.webContents.send('terminal:exit', channelId);
+  }
+  return false;
+}
+
+// ---------- Idle-PTY reaper ----------
+// Shells and resume sessions are deliberately kept alive across renderer detach
+// (instant re-attach; in-progress turns aren't aborted). Their underlying
+// processes (`zsh -l`, `claude --resume`) don't self-exit, so over a long
+// session they accumulate toward the OS PTY cap — which is what drove the
+// SIGABRT crashes. The reaper kills the ones that have been detached *and*
+// silent past a TTL: nobody's watching and nothing's happening. Resume sessions
+// get a longer TTL, and "idle" requires zero output, so an actively printing
+// turn is never reaped — only a quiet, detached (very likely finished) one.
+const SHELL_IDLE_TTL_MS = 30 * 60 * 1000;
+const RESUME_IDLE_TTL_MS = 60 * 60 * 1000;
+const REAPER_INTERVAL_MS = 5 * 60 * 1000;
+
+let reaperTimer: ReturnType<typeof setInterval> | null = null;
+function startPtyReaper(): void {
+  if (reaperTimer) return;
+  reaperTimer = setInterval(reapIdlePtys, REAPER_INTERVAL_MS);
+  // Don't keep the process alive just for the reaper.
+  reaperTimer.unref?.();
+}
+
+function reapIdlePtys(): void {
+  const now = Date.now();
+  for (const [shellId, s] of Array.from(shells.entries())) {
+    if (s.subscribers.size > 0 || s.detachedAt == null) continue;
+    if (now - s.detachedAt < SHELL_IDLE_TTL_MS || now - s.lastDataAt < SHELL_IDLE_TTL_MS) continue;
+    console.log('[agentsflow][pty] reaping idle shell', { shellId, idleMs: now - s.lastDataAt });
+    try { s.pty.kill(); } catch { /* ignore */ }
+    shells.delete(shellId);
+  }
+  for (const [sessionId, s] of Array.from(resumeSessions.entries())) {
+    if (s.subscribers.size > 0 || s.detachedAt == null) continue;
+    if (now - s.detachedAt < RESUME_IDLE_TTL_MS || now - s.lastDataAt < RESUME_IDLE_TTL_MS) continue;
+    console.log('[agentsflow][pty] reaping idle resume session', { sessionId, idleMs: now - s.lastDataAt });
+    try { s.pty.kill(); } catch { /* ignore */ }
+    resumeSessions.delete(sessionId);
+  }
+}
 
 export function attach(opts: {
   channelId: string;
@@ -60,12 +130,14 @@ export function attach(opts: {
   // session was originally run in, so Claude finds the right .claude project.
   cwd?: string;
 }): string {
+  startPtyReaper();
   const mode = opts.mode ?? 'attach';
   if (mode === 'resume') return attachResume(opts);
 
   const args = ['attach', opts.sessionId];
   const cwd = os.homedir();
   console.log('[agentsflow][pty] spawning', { bin: CLAUDE_BIN, args, cols: opts.cols, rows: opts.rows, cwd, mode });
+  if (!ensurePtyCapacity(opts.win, opts.channelId, 'pty')) return '';
   let pty: IPty;
   try {
     pty = getPty().spawn(CLAUDE_BIN, args, {
@@ -118,6 +190,7 @@ function attachResume(opts: {
     const args = ['--resume', opts.sessionId, '--permission-mode', 'bypassPermissions'];
     const cwd = opts.cwd || os.homedir();
     console.log('[agentsflow][pty] spawning resume', { bin: CLAUDE_BIN, args, cwd, cols: opts.cols, rows: opts.rows });
+    if (!ensurePtyCapacity(opts.win, opts.channelId, 'resume')) return '';
     let pty: IPty;
     try {
       pty = getPty().spawn(CLAUDE_BIN, args, {
@@ -143,6 +216,8 @@ function attachResume(opts: {
       buffer: [],
       bufferBytes: 0,
       subscribers: new Map(),
+      lastDataAt: Date.now(),
+      detachedAt: null,
     };
     resumeSessions.set(opts.sessionId, newSess);
     sess = newSess;
@@ -150,6 +225,7 @@ function attachResume(opts: {
     pty.onData((data) => {
       const s = resumeSessions.get(opts.sessionId);
       if (!s) return;
+      s.lastDataAt = Date.now();
       appendBuffer(s, data);
       for (const sub of s.subscribers.values()) {
         if (!sub.win.isDestroyed()) sub.win.webContents.send('terminal:data', sub.channelId, data);
@@ -176,6 +252,7 @@ function attachResume(opts: {
   }
 
   sess.subscribers.set(opts.channelId, { channelId: opts.channelId, win: opts.win });
+  sess.detachedAt = null;
   resumeChannelToSessionId.set(opts.channelId, opts.sessionId);
 
   // Replay buffer is written by the renderer after its data listener is wired.
@@ -192,6 +269,8 @@ interface ShellState {
   buffer: string[];        // chunks of recent output, capped by total bytes
   bufferBytes: number;
   subscribers: Map<string, ShellSubscriber>;
+  lastDataAt: number;            // last time the PTY produced output
+  detachedAt: number | null;     // when the last subscriber left (null while watched)
 }
 const shells = new Map<string, ShellState>();
 const shellChannelToShellId = new Map<string, string>();
@@ -215,6 +294,7 @@ export function attachShell(opts: {
   rows: number;
   win: BrowserWindow;
 }): string {
+  startPtyReaper();
   let shell = shells.get(opts.shellId);
 
   if (!shell) {
@@ -225,6 +305,7 @@ export function attachShell(opts: {
       TERM: 'xterm-256color',
     } as Record<string, string>);
     console.log('[agentsflow][pty] spawning shell', { shellId: opts.shellId, shell: shellBin, cwd: opts.cwd, cols: opts.cols, rows: opts.rows });
+    if (!ensurePtyCapacity(opts.win, opts.channelId, 'shell')) return '';
     let pty: IPty;
     try {
       pty = getPty().spawn(shellBin, ['-l'], {
@@ -251,6 +332,8 @@ export function attachShell(opts: {
       buffer: [],
       bufferBytes: 0,
       subscribers: new Map(),
+      lastDataAt: Date.now(),
+      detachedAt: null,
     };
     shells.set(opts.shellId, newShell);
     shell = newShell;
@@ -258,6 +341,7 @@ export function attachShell(opts: {
     pty.onData((data) => {
       const s = shells.get(opts.shellId);
       if (!s) return;
+      s.lastDataAt = Date.now();
       appendBuffer(s, data);
       for (const sub of s.subscribers.values()) {
         if (!sub.win.isDestroyed()) {
@@ -285,6 +369,7 @@ export function attachShell(opts: {
   }
 
   shell.subscribers.set(opts.channelId, { channelId: opts.channelId, win: opts.win });
+  shell.detachedAt = null;
   shellChannelToShellId.set(opts.channelId, opts.shellId);
 
   // Return the replay buffer to the caller so the renderer can write it AFTER
@@ -342,8 +427,11 @@ export function detach(channelId: string): void {
   // background so the in-progress turn isn't aborted by detaching the view.
   const rsid = resumeChannelToSessionId.get(channelId);
   if (rsid) {
-    resumeSessions.get(rsid)?.subscribers.delete(channelId);
+    const rs = resumeSessions.get(rsid);
+    rs?.subscribers.delete(channelId);
     resumeChannelToSessionId.delete(channelId);
+    // Last viewer gone — start the idle clock so the reaper can reclaim the PTY.
+    if (rs && rs.subscribers.size === 0) rs.detachedAt = Date.now();
     return;
   }
   // Shell: just unsubscribe — PTY stays alive for future re-attach.
@@ -352,6 +440,7 @@ export function detach(channelId: string): void {
   const s = shells.get(sid);
   s?.subscribers.delete(channelId);
   shellChannelToShellId.delete(channelId);
+  if (s && s.subscribers.size === 0) s.detachedAt = Date.now();
 }
 
 export function detachAll(): void {
