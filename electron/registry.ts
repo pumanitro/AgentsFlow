@@ -92,6 +92,32 @@ export const TOOL_DEFS = [
       additionalProperties: false,
     },
   },
+  {
+    name: 'open_file',
+    title: 'Open a file in Peers Flow',
+    description:
+      'Open a file in the Peers Flow desktop app so the user can see it: the app switches to its file view ("Preview" mode) and displays the file. Use this whenever the user asks you to open / show / pull up / display a file in Peers Flow. By default the file is opened in the peer this session is rooted in; pass `directory` to open it in a different peer. The path may be absolute or relative to that peer\'s directory. PDFs are handed to the system\'s default PDF application when one is available (and only previewed in-app as a fallback).',
+    usage: 'open_file({ file, directory?, line? })',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        file: {
+          type: 'string',
+          description: 'Path to the file to open — absolute, or relative to the target peer\'s directory (e.g. "src/index.ts" or "README.md").',
+        },
+        directory: {
+          type: 'string',
+          description: 'Which peer to open the file in: its name (e.g. "trial_case"), its absolute path, or its id — as shown by list_peers. Defaults to the peer this session is rooted in.',
+        },
+        line: {
+          type: 'number',
+          description: 'Optional 1-based line number to scroll to and highlight when the file opens.',
+        },
+      },
+      required: ['file'],
+      additionalProperties: false,
+    },
+  },
 ] as const;
 
 export type ToolName = (typeof TOOL_DEFS)[number]['name'];
@@ -252,6 +278,9 @@ export function renderBootstrapPrompt(reg: Registry): string {
     '- The peer shares **none** of your context: make the `goal` self-contained and state the exact `deliverable` you need back.',
   );
   lines.push("- Prefer delegating over reaching into another peer's files directly.");
+  lines.push(
+    `- Call \`${qualifiedToolName('open_file')}\` when the user asks you to open / show / display a file in Peers Flow — it brings the file up in the app's file view. Defaults to the peer you're rooted in; pass \`directory\` to target another peer.`,
+  );
   lines.push(
     '- Right BEFORE each `delegate` call, post one short line to the chat stating (a) which peer you are asking and (b) the concrete goal you are handing it — paraphrase the actual `goal` you pass, including the key specifics (what to fetch/do and any names, channels, or constraints). The host shows the call only as "Calling peersflow…", so this line is what gives the user the context of what is being delegated and why.',
   );

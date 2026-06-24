@@ -7,6 +7,7 @@ import { saveUIState, useDirectoryNumber } from '../lib/ui-state';
 import { useBackNavKeys, BackNavHint } from '../lib/back-nav';
 import PaneErrorBoundary from '../components/PaneErrorBoundary';
 import { appendShell, ShellNode } from '../components/ShellArea';
+import { buildTree, flattenSingleChildDirs, TreeDir } from '../components/file-tree';
 import paneLoading from '../components/PaneLoading';
 
 const FileTreeSidebar = dynamic(() => import('../components/FileTreeSidebar'), { ssr: false, loading: paneLoading('files') });
@@ -25,10 +26,36 @@ function findDefaultFile(paths: string[]): string | null {
   return readme ?? null;
 }
 
+// The first note in the Notes panel's display order (folders sort before files,
+// then alphabetical, and the panel expands folders by default) — so "open the
+// first note" lands on exactly the file shown at the top. Returns a path
+// relative to the notes root, or null if there are no notes.
+function findFirstNoteFile(paths: string[]): string | null {
+  const tree = flattenSingleChildDirs(buildTree(paths.map((path) => ({ path }))));
+  const firstFile = (node: TreeDir): string | null => {
+    for (const child of node.children) {
+      if (child.kind === 'file') return child.path;
+      const found = firstFile(child);
+      if (found) return found;
+    }
+    return null;
+  };
+  return firstFile(tree);
+}
+
 export default function PreviewPage() {
   const router = useRouter();
   const dirParam = router.query.dir;
   const dirId = Array.isArray(dirParam) ? dirParam[0] : dirParam;
+  // An explicit file to open, e.g. from the `open_file` MCP tool. When present
+  // it overrides the default-file picker below.
+  const fileParam = router.query.file;
+  const explicitFile = Array.isArray(fileParam) ? fileParam[0] : fileParam;
+  const lineParam = router.query.line;
+  const explicitLine = Array.isArray(lineParam) ? lineParam[0] : lineParam;
+  // Per-request token so re-opening the same file re-triggers the open effect.
+  const tokenParam = router.query.t;
+  const explicitToken = Array.isArray(tokenParam) ? tokenParam[0] : tokenParam;
   const [dir, setDir] = useState<TrackedDirectory | null>(null);
   const [openFile, setOpenFile] = useState<string | null>(null);
   // 1-based line to jump to when a file is opened from search.
@@ -48,6 +75,15 @@ export default function PreviewPage() {
       setDir(ds.find((d) => d.id === dirId) ?? null);
     });
   }, [dirId]);
+
+  // Open the file named in the URL (the `open_file` MCP tool routes here). Re-runs
+  // whenever the query changes, so asking to open a second file updates the view.
+  useEffect(() => {
+    if (!explicitFile) return;
+    setOpenFile(explicitFile);
+    const ln = Number(explicitLine);
+    setGotoLine(Number.isFinite(ln) && ln > 0 ? { line: ln, nonce: Date.now() } : null);
+  }, [explicitFile, explicitLine, explicitToken]);
 
   const addShell = useCallback(() => {
     const cwd = dir?.path;
@@ -82,25 +118,48 @@ export default function PreviewPage() {
     }
   }, [directoryKey, shellsHydrated, shellRoot]);
 
-  // Open the project README by default (if there is one). Best-effort: if the
-  // listing fails or there's no readme, we just leave the "select a file"
-  // placeholder showing.
+  // Pick a default file to open when entering preview with nothing selected.
+  // The peer's first note wins (its curated, private notes), falling back to the
+  // project README. Best-effort: on any failure or when neither exists we just
+  // leave the "select a file" placeholder showing. The functional `setOpenFile`
+  // only fills in a default if the user hasn't already opened something while the
+  // (async) listing was in flight — it never clobbers an explicit selection.
   useEffect(() => {
     const dirPath = dir?.path;
+    // An explicit ?file= wins — don't auto-pick a default over it.
+    if (explicitFile) return;
     if (!dirPath || pickedDefaultRef.current === dirPath) return;
     pickedDefaultRef.current = dirPath;
     const a = api();
-    if (typeof a.listFiles !== 'function') return;
     let cancelled = false;
-    a.listFiles(dirPath)
-      .then((files) => {
-        if (cancelled) return;
-        const rel = findDefaultFile(files.map((f) => f.path));
-        if (rel) setOpenFile(`${dirPath}/${rel}`);
-      })
-      .catch(() => undefined);
+
+    const openProjectReadme = () => {
+      if (typeof a.listFiles !== 'function') return;
+      a.listFiles(dirPath)
+        .then((files) => {
+          if (cancelled) return;
+          const rel = findDefaultFile(files.map((f) => f.path));
+          if (rel) setOpenFile((cur) => cur ?? `${dirPath}/${rel}`);
+        })
+        .catch(() => undefined);
+    };
+
+    if (typeof a.notesRoot === 'function' && typeof a.listNotes === 'function') {
+      a.notesRoot(dirPath)
+        .then((r) => a.listNotes(r.root).then((notes) => ({ root: r.root, notes })))
+        .then(({ root, notes }) => {
+          if (cancelled) return;
+          const rel = findFirstNoteFile(notes.map((f) => f.path));
+          if (rel) setOpenFile((cur) => cur ?? `${root}/${rel}`);
+          else openProjectReadme();
+        })
+        .catch(() => { if (!cancelled) openProjectReadme(); });
+    } else {
+      openProjectReadme();
+    }
+
     return () => { cancelled = true; };
-  }, [dir?.path]);
+  }, [dir?.path, explicitFile]);
 
   const startSidebarResize = useCallback((e: React.MouseEvent) => {
     e.preventDefault();

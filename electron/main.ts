@@ -36,7 +36,7 @@ import {
 import { refreshNow, startPoller, stopPoller, syncWatchers, unwatchConversation, watchConversation } from './poller';
 import { bridgeSocketPath, buildBootstrapSystemPrompt, getMcpServerInfo, writeMcpConfigForConversation } from './mcp-bridge';
 import { buildDelegatePrompt } from './registry';
-import { startDelegationBridge, type DelegateRequest } from './delegation-bridge';
+import { startPeersBridge, type DelegateRequest, type OpenFileRequest } from './delegation-bridge';
 import * as pty from './pty-manager';
 import * as fileWatcher from './file-watcher';
 import { gitStatus, listFiles } from './git';
@@ -121,12 +121,15 @@ app.whenReady().then(() => {
   createWindow();
   startPoller(() => mainWindow);
 
-  // The delegation bridge must be live before any session can call `delegate`.
-  // handleDelegate is hoisted (function declaration), so it's safe to reference here.
+  // The bridge must be live before any session can call `delegate` / `open_file`.
+  // The handlers are hoisted (function declarations), so it's safe to reference them here.
   try {
-    stopBridge = startDelegationBridge(bridgeSocketPath(), handleDelegate);
+    stopBridge = startPeersBridge(bridgeSocketPath(), {
+      onDelegate: handleDelegate,
+      onOpenFile: handleOpenFile,
+    });
   } catch (err) {
-    console.error('[agentsflow] failed to start delegation bridge', err);
+    console.error('[agentsflow] failed to start peers bridge', err);
   }
 
   try {
@@ -412,6 +415,101 @@ async function handleDelegate(req: DelegateRequest): Promise<Record<string, unkn
     sessionId: outcome.sessionId || spawn.sessionId,
     durationMs: Date.now() - started,
     error: outcome.error ?? null,
+  };
+}
+
+/**
+ * Resolve a peer + file from an `open_file` request, then tell the renderer to
+ * navigate to that peer's file view and display the file. Returns a small
+ * envelope the calling agent can report back from.
+ */
+async function handleOpenFile(req: OpenFileRequest): Promise<Record<string, unknown>> {
+  const dirs = store.getDirectories();
+  const token = (req.directory || '').trim();
+  const lower = token.toLowerCase();
+  let dir =
+    dirs.find((d) => d.id === token) ||
+    dirs.find((d) => d.path === token) ||
+    dirs.find((d) => d.displayName.toLowerCase() === lower) ||
+    dirs.find((d) => path.basename(d.path).toLowerCase() === lower) ||
+    null;
+  // No (or unknown) directory token → fall back to the directory of the
+  // conversation that asked, so "open this file" just works without naming a peer.
+  if (!dir && req.rootConversationId) {
+    const conv = store.getConversations().find((c) => c.id === req.rootConversationId);
+    if (conv) dir = dirs.find((d) => d.id === conv.directoryId) ?? null;
+  }
+  if (!dir) {
+    return { status: 'failure', error: `Unknown peer "${token}". Call list_peers to see valid peers.`, known: dirs.map((d) => d.displayName) };
+  }
+
+  const rawFile = (req.file || '').trim();
+  if (!rawFile) {
+    return { status: 'failure', directory: dir.displayName, error: '`file` is required.' };
+  }
+  const abs = path.isAbsolute(rawFile) ? path.normalize(rawFile) : path.join(dir.path, rawFile);
+  // A relative path must stay inside the peer's directory — no `../` escapes.
+  if (!path.isAbsolute(rawFile) && abs !== dir.path && !abs.startsWith(dir.path + path.sep)) {
+    return { status: 'failure', directory: dir.displayName, error: `Refusing to open a path outside the peer: ${rawFile}` };
+  }
+  let stat: fs.Stats;
+  try {
+    stat = fs.statSync(abs);
+  } catch {
+    return { status: 'failure', directory: dir.displayName, error: `File not found: ${abs}` };
+  }
+  if (!stat.isFile()) {
+    return { status: 'failure', directory: dir.displayName, error: `Not a file: ${abs}` };
+  }
+
+  // PDFs render better in a native viewer, so prefer handing them to the OS
+  // default application. shell.openPath returns '' on success and an error
+  // string when there's no associated app (or it failed to launch) — in that
+  // case we fall through to our own in-app PDF preview.
+  if (path.extname(abs).toLowerCase() === '.pdf') {
+    const openErr = await shell.openPath(abs);
+    if (!openErr) {
+      return {
+        status: 'success',
+        directory: dir.displayName,
+        directoryPath: dir.path,
+        filePath: abs,
+        openedWith: 'external',
+        summary: `Opened ${path.basename(abs)} in the system's default PDF application.`,
+      };
+    }
+    console.warn('[agentsflow] shell.openPath failed; falling back to in-app editor', abs, openErr);
+  }
+
+  const line = typeof req.line === 'number' && req.line > 0 ? Math.floor(req.line) : undefined;
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    return { status: 'failure', directory: dir.displayName, error: 'Peers Flow window is not available.' };
+  }
+  // If the request came from a conversation rooted in the same directory as the
+  // file, open it inside that conversation's session view (so the user keeps the
+  // Chat/File toggle and can flip back to the chat). Otherwise the renderer falls
+  // back to the standalone directory Preview.
+  const conv = req.rootConversationId
+    ? store.getConversations().find((c) => c.id === req.rootConversationId)
+    : undefined;
+  const conversationId = conv && conv.directoryId === dir.id ? conv.id : undefined;
+  mainWindow.webContents.send('navigate:openFile', { directoryId: dir.id, conversationId, filePath: abs, line });
+  try {
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.show();
+    mainWindow.focus();
+  } catch { /* best-effort focus */ }
+
+  return {
+    status: 'success',
+    directory: dir.displayName,
+    directoryPath: dir.path,
+    filePath: abs,
+    line: line ?? null,
+    openedWith: 'inApp',
+    summary: conversationId
+      ? `Opened ${path.basename(abs)} in the file pane of this Peers Flow chat — the user can toggle back to Chat anytime.`
+      : `Opened ${path.basename(abs)} in Peers Flow (file view of "${dir.displayName}").`,
   };
 }
 

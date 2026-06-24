@@ -167,6 +167,18 @@ export default function Terminal({ conversationId, shellId, shellCwd, onExit, au
       }
       channelId = cid;
 
+      // attachTerminal above is async — by the time it resolves the component may
+      // have unmounted (e.g. the user navigated away, or `open_file` switched to
+      // the file view, while the attach was still in flight). The cleanup has then
+      // already run (disposed=true) and the container ref is gone, so every
+      // `containerRef.current` below would be null. Bail before touching it, and
+      // release the channel we just claimed so it isn't leaked.
+      if (disposed || !containerRef.current) {
+        api().detachTerminal(cid).catch(() => undefined);
+        return;
+      }
+      const container = containerRef.current;
+
       // Push the current (possibly font-corrected) size to the freshly-attached
       // PTY. The font-ready refit above can run while channelId is still null —
       // it fixes xterm's grid but skips its resizeTerminal() call, leaving the
@@ -245,7 +257,7 @@ export default function Terminal({ conversationId, shellId, shellCwd, onExit, au
         wheelAccum = 0; // consume everything so momentum can't bank a backlog
         api().writeTerminal(cid, key);
       };
-      containerRef.current!.addEventListener('wheel', onWheel, { passive: false, capture: true });
+      container.addEventListener('wheel', onWheel, { passive: false, capture: true });
 
       const ro = new ResizeObserver(() => {
         try {
@@ -254,14 +266,14 @@ export default function Terminal({ conversationId, shellId, shellCwd, onExit, au
           sync();
         } catch {}
       });
-      ro.observe(containerRef.current);
+      ro.observe(container);
 
       detach = () => {
         scrollDisp.dispose();
         bufDisp.dispose();
         ro.disconnect();
-        containerRef.current?.removeEventListener('mousedown', onContainerMouseDown);
-        containerRef.current?.removeEventListener('wheel', onWheel, { capture: true } as any);
+        container.removeEventListener('mousedown', onContainerMouseDown);
+        container.removeEventListener('wheel', onWheel, { capture: true } as any);
         if (channelId) api().detachTerminal(channelId).catch(() => undefined);
         term.dispose();
         scrollToLineRef.current = null;

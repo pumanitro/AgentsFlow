@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer, IpcRendererEvent } from 'electron';
-import type { AgentsFlowApi, Conversation, PinnedDivider, PinnedItemRef, SpawnRequest } from '../shared/types';
+import type { AgentsFlowApi, Conversation, OpenFileNavPayload, PinnedDivider, PinnedItemRef, SpawnRequest } from '../shared/types';
 
 const api: AgentsFlowApi = {
   listDirectories: () => ipcRenderer.invoke('dirs:list'),
@@ -42,6 +42,11 @@ const api: AgentsFlowApi = {
     const listener = (_e: IpcRendererEvent, conversations: Conversation[]) => cb(conversations);
     ipcRenderer.on('conversations:updated', listener);
     return () => ipcRenderer.removeListener('conversations:updated', listener);
+  },
+  onOpenFile: (cb) => {
+    const listener = (_e: IpcRendererEvent, payload: OpenFileNavPayload) => cb(payload);
+    ipcRenderer.on('navigate:openFile', listener);
+    return () => ipcRenderer.removeListener('navigate:openFile', listener);
   },
 
   listDividers: () => ipcRenderer.invoke('dividers:list'),

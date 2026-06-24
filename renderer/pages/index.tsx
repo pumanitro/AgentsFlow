@@ -220,6 +220,8 @@ export default function Home() {
       const inEditable = !!target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable);
 
       // ⌘+↑/↓/→ — navigation / open. Works even inside the spawn prompt.
+      // Shift is deliberately excluded: ⇧⌘← / ⇧⌘→ are left for text selection,
+      // so holding Shift never triggers navigation.
       if (e.metaKey && !e.altKey && !e.ctrlKey && !e.shiftKey) {
         if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
           e.preventDefault();
@@ -666,7 +668,7 @@ export default function Home() {
 
         <HistoryTimeline
           conversations={convs}
-          dirs={dirs}
+          dirs={sortedDirs}
           onAttach={(c) => attach(c)}
           onTogglePin={(c) => api().setConversationPinned(c.id, !c.pinned).then(refreshAll)}
           onRemove={(c) => {

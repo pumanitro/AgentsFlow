@@ -52,10 +52,12 @@ export function useUIState<K extends keyof UIState>(key: K): [UIState[K], (v: UI
   useEffect(() => {
     setRaw(loadUIState()[key]);
   }, [key]);
-  const setValue = (v: UIState[K]) => {
+  // Stable identity (only `key` matters) so consumers can safely use the setter
+  // as an effect dependency without it churning on every render.
+  const setValue = useCallback((v: UIState[K]) => {
     setRaw(v);
     saveUIState({ [key]: v } as Partial<UIState>);
-  };
+  }, [key]);
   return [value, setValue];
 }
 

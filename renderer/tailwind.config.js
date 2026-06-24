@@ -5,6 +5,7 @@ module.exports = {
   content: [
     path.join(__dirname, 'pages/**/*.{ts,tsx}'),
     path.join(__dirname, 'components/**/*.{ts,tsx}'),
+    path.join(__dirname, 'lib/**/*.{ts,tsx}'),
   ],
   safelist: [
     'bg-accent', 'bg-accent2', 'bg-ok', 'bg-warn', 'bg-err', 'bg-muted', 'bg-info',

@@ -24,6 +24,15 @@ export default function SessionPage() {
   const router = useRouter();
   const idParam = router.query.id;
   const id = Array.isArray(idParam) ? idParam[0] : idParam;
+  // An explicit file to open in the file pane, e.g. from the `open_file` MCP tool.
+  const fileParam = router.query.file;
+  const explicitFile = Array.isArray(fileParam) ? fileParam[0] : fileParam;
+  const lineParam = router.query.line;
+  const explicitLine = Array.isArray(lineParam) ? lineParam[0] : lineParam;
+  // Per-request token: re-opening the same file bumps this so the effect re-fires
+  // and reveals the file pane again (even if the user had switched back to Chat).
+  const tokenParam = router.query.t;
+  const explicitToken = Array.isArray(tokenParam) ? tokenParam[0] : tokenParam;
   const [conv, setConv] = useState<Conversation | null>(null);
   // Peers this conversation has delegated to — drives the live "a peer is
   // working" banner so you can watch them without leaving the root session.
@@ -125,6 +134,10 @@ export default function SessionPage() {
     if (!lastFileKey || typeof localStorage === 'undefined') return;
     if (lastFileHydratedFor.current === lastFileKey) return;
     lastFileHydratedFor.current = lastFileKey;
+    // An explicit ?file= (e.g. from open_file) wins over the remembered file —
+    // the effect below opens it. Mark this directory hydrated (so the persist
+    // effect runs) but don't restore or flip the pane out from under it.
+    if (explicitFile) return;
     let stored: string | null = null;
     try { stored = localStorage.getItem(`agentsflow:dir:${lastFileKey}:lastFile`); } catch { /* ignore */ }
     setOpenFile(stored || null);
@@ -132,7 +145,24 @@ export default function SessionPage() {
     // back to CHAT. (A remembered file that was since deleted surfaces as an
     // error inside the editor, which is friendlier than silently hiding it.)
     if (!stored && rightPane === 'file') setRightPane('chat');
-  }, [lastFileKey, rightPane, setRightPane]);
+  }, [lastFileKey, rightPane, setRightPane, explicitFile]);
+
+  // Open the file named in the URL and reveal the file pane. Routed here by the
+  // `open_file` MCP tool when the file lives in this conversation's directory, so
+  // the user can read it and toggle straight back to the chat.
+  //
+  // This runs once per open REQUEST (keyed on the per-request token), not on
+  // every render — otherwise it would keep forcing `rightPane` back to 'file' and
+  // clicking Chat could never stick. The deps are all stable URL strings (and
+  // `setRightPane` is memoized by useUIState), so it only re-fires when a new
+  // request actually arrives — including re-opening the same file.
+  useEffect(() => {
+    if (!explicitFile) return;
+    setOpenFile(explicitFile);
+    const ln = Number(explicitLine);
+    setGotoLine(Number.isFinite(ln) && ln > 0 ? { line: ln, nonce: Date.now() } : null);
+    setRightPane('file');
+  }, [explicitFile, explicitLine, explicitToken, setRightPane]);
 
   // Persist the last-opened file per peer. Skip until the restore above has run
   // for this directory so the initial null never clobbers the stored path.

@@ -27,7 +27,9 @@ export function useBackNavKeys(goBack: () => void): string | null {
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'ArrowLeft' && (e.metaKey || e.altKey)) {
+      // !e.shiftKey: ⇧⌘← / ⇧⌥← are left for text selection, so holding Shift
+      // never navigates back to the start screen (even via the double-press).
+      if (e.key === 'ArrowLeft' && (e.metaKey || e.altKey) && !e.shiftKey) {
         const target = e.target as HTMLElement | null;
         const inMarkdownEditor = !!target?.closest?.('.blocknote-host');
         if (inMarkdownEditor) {
@@ -73,7 +75,7 @@ export function useBackNavKeys(goBack: () => void): string | null {
 export function BackNavHint({ hint }: { hint: string | null }) {
   if (!hint) return null;
   return (
-    <div className="fixed bottom-5 left-1/2 -translate-x-1/2 z-50 pointer-events-none flex items-center gap-1.5 rounded-full border border-border bg-panel2/95 px-3 py-1.5 text-xs text-text shadow-lg backdrop-blur-sm">
+    <div className="fixed bottom-4 left-1/2 -translate-x-1/2 z-50 pointer-events-none flex items-center gap-1.5 rounded-full border border-border bg-panel2/95 px-3 py-1.5 text-xs text-text shadow-lg backdrop-blur-sm">
       <kbd className="font-mono text-text/90">{hint}</kbd>
       <span className="text-muted">again to go back</span>
     </div>

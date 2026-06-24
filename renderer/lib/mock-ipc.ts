@@ -344,6 +344,8 @@ export function createMockApi(): AgentsFlowApi {
     onTerminalData: (cb) => { listeners.termData.add(cb); return () => listeners.termData.delete(cb); },
     onTerminalExit: (cb) => { listeners.termExit.add(cb); return () => listeners.termExit.delete(cb); },
     onConversationsUpdated: (cb) => { listeners.convs.add(cb); return () => listeners.convs.delete(cb); },
+    // No real bridge in the browser mock — nothing ever asks to open a file.
+    onOpenFile: () => () => undefined,
 
     gitStatus: async (): Promise<GitStatusResult> => ({
       isRepo: true,

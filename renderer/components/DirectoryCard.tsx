@@ -43,7 +43,7 @@ export default function DirectoryCard({ dir, selected, historyCount, onSelect, o
           <div className="font-medium text-text truncate">{dir.displayName}</div>
           <div className="text-xs text-muted truncate font-mono mt-0.5">{dir.path}</div>
         </div>
-        <div className="shrink-0 flex items-center gap-1">
+        <div className="shrink-0 flex flex-col items-center gap-1">
           <div className="relative" ref={menuRef}>
             <button
               onClick={(e) => { e.stopPropagation(); setMenuOpen((v) => !v); }}
@@ -67,13 +67,6 @@ export default function DirectoryCard({ dir, selected, historyCount, onSelect, o
                 </button>
                 <button
                   role="menuitem"
-                  className="w-full text-left px-3 py-1.5 text-sm text-text hover:bg-panel"
-                  onClick={() => { setMenuOpen(false); onPreview(); }}
-                >
-                  Files preview
-                </button>
-                <button
-                  role="menuitem"
                   className="w-full text-left px-3 py-1.5 text-sm text-err hover:bg-panel"
                   onClick={() => { setMenuOpen(false); onRemove(); }}
                 >
@@ -82,6 +75,17 @@ export default function DirectoryCard({ dir, selected, historyCount, onSelect, o
               </div>
             )}
           </div>
+          <button
+            onClick={(e) => { e.stopPropagation(); onPreview(); }}
+            className="text-muted hover:text-accent hover:bg-accent/10 p-1 rounded border border-transparent hover:border-accent/40 transition-colors"
+            title="Open files preview"
+            aria-label="Open files preview"
+          >
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <line x1="5" y1="12" x2="19" y2="12" />
+              <polyline points="12 5 19 12 12 19" />
+            </svg>
+          </button>
         </div>
       </div>
     </div>

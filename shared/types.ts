@@ -75,6 +75,18 @@ export interface SpawnResult {
   daemonShort: string;
 }
 
+// Payload broadcast to the renderer when a file should be opened in the app's
+// file view. `filePath` is absolute. When `conversationId` is set, the file
+// belongs to that conversation's directory, so the renderer opens it inside that
+// session's file pane (which keeps the Chat/File toggle) instead of the
+// standalone directory Preview page.
+export interface OpenFileNavPayload {
+  directoryId: string;
+  conversationId?: string;
+  filePath: string;
+  line?: number;
+}
+
 // ---- Peers Flow MCP server (peer awareness + delegation) -------------------
 
 export interface McpToolSummary {
@@ -143,6 +155,11 @@ export interface AgentsFlowApi {
   onTerminalExit: (cb: (channelId: string) => void) => () => void;
 
   onConversationsUpdated: (cb: (conversations: Conversation[]) => void) => () => void;
+
+  // Fired when something (e.g. the `open_file` MCP tool) asks the app to bring a
+  // file up in its file view. The renderer responds by navigating to that
+  // directory's Preview page and opening the file.
+  onOpenFile: (cb: (payload: OpenFileNavPayload) => void) => () => void;
 
   listDividers: () => Promise<PinnedDivider[]>;
   addDivider: (afterRef: PinnedItemRef | null) => Promise<PinnedDivider>;

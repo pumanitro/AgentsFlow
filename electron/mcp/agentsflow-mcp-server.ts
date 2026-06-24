@@ -36,6 +36,9 @@ const DELEGATIONS_DIR =
   process.env.PEERSFLOW_DELEGATIONS_DIR || path.join(os.tmpdir(), 'peersflow-delegations');
 const BRIDGE_SOCK = process.env.PEERSFLOW_BRIDGE_SOCK || '';
 const ROOT_CONVERSATION_ID = process.env.PEERSFLOW_ROOT_CONVERSATION_ID || '';
+// The directory this session is rooted in — the default target for `open_file`
+// when the caller doesn't name a peer explicitly.
+const ROOT_DIR = process.env.PEERSFLOW_ROOT_DIR || '';
 const CLAUDE_BIN = process.env.CLAUDE_BIN || 'claude';
 // Depth in the delegation chain. The session that owns this server is depth 0;
 // any session IT delegates to runs at depth 1 and is NOT given this MCP server
@@ -82,6 +85,73 @@ function toolListPeers(): Record<string, unknown> {
   return textContent(renderRegistryMarkdown(reg));
 }
 
+interface OpenFileArgs {
+  file?: unknown;
+  directory?: unknown;
+  line?: unknown;
+}
+
+/**
+ * Ask the Peers Flow app to open a file in its file view ("Preview" mode). This
+ * only works inside the running app — the bridge socket is how we reach it; a
+ * headless `claude -p` run (no bridge) gets a clear failure instead.
+ */
+async function toolOpenFile(rawArgs: OpenFileArgs): Promise<Record<string, unknown>> {
+  const file = typeof rawArgs.file === 'string' ? rawArgs.file.trim() : '';
+  // Default the target to the directory this session is rooted in.
+  const directoryToken =
+    typeof rawArgs.directory === 'string' && rawArgs.directory.trim()
+      ? rawArgs.directory.trim()
+      : ROOT_DIR;
+  const line =
+    typeof rawArgs.line === 'number' && rawArgs.line > 0 ? Math.floor(rawArgs.line) : null;
+
+  if (!file) {
+    return textContent(
+      JSON.stringify({ status: 'failure', error: '`file` is required (the path of the file to open).' }, null, 2),
+      true,
+    );
+  }
+  if (!BRIDGE_SOCK) {
+    return textContent(
+      JSON.stringify(
+        {
+          status: 'failure',
+          error:
+            'Opening files requires the Peers Flow app to be running — this session has no app bridge (e.g. it is a headless run).',
+        },
+        null,
+        2,
+      ),
+      true,
+    );
+  }
+
+  const envelope = await bridgeRequest(
+    {
+      type: 'open_file',
+      id: `${Date.now()}-${process.pid}`,
+      rootConversationId: ROOT_CONVERSATION_ID,
+      directory: directoryToken,
+      file,
+      line,
+    },
+    20_000,
+  );
+
+  if (!envelope) {
+    return textContent(
+      JSON.stringify(
+        { status: 'failure', error: 'Peers Flow did not respond (bridge unavailable or timed out).' },
+        null,
+        2,
+      ),
+      true,
+    );
+  }
+  return textContent(JSON.stringify(envelope, null, 2), envelope.status === 'failure');
+}
+
 function resolveDirectory(token: string, dirs: TrackedDirectory[]): TrackedDirectory | null {
   const t = token.trim();
   const lower = t.toLowerCase();
@@ -102,16 +172,13 @@ interface DelegateArgs {
 }
 
 /**
- * Ask the Peers Flow app (over the bridge socket) to spawn a *tracked,
- * watchable* peer session and run the goal to completion. Resolves to the
- * result envelope, or `null` if the bridge is unavailable / errors — in which
- * case the caller falls back to a headless `claude -p`.
+ * Send one newline-delimited request to the Peers Flow app over the bridge
+ * socket and resolve with the reply's `envelope`, or `null` if the bridge is
+ * unavailable / errors / times out. Shared by every bridge-backed tool.
  */
-function runBridgeDelegate(
-  directory: string,
-  goal: string,
-  deliverable: string,
-  timeoutMs: number,
+function bridgeRequest(
+  req: Record<string, unknown>,
+  guardMs: number,
 ): Promise<Record<string, unknown> | null> {
   return new Promise((resolve) => {
     const sock = net.connect(BRIDGE_SOCK);
@@ -123,17 +190,7 @@ function runBridgeDelegate(
       try { sock.end(); } catch { /* ignore */ }
       resolve(val);
     };
-    const req = {
-      type: 'delegate',
-      id: `${Date.now()}-${process.pid}`,
-      rootConversationId: ROOT_CONVERSATION_ID,
-      directory,
-      goal,
-      deliverable,
-      timeoutMs,
-    };
-    // Allow the full delegation timeout plus headroom for spawn + result harvest.
-    const guard = setTimeout(() => finish(null), timeoutMs + 60_000);
+    const guard = setTimeout(() => finish(null), guardMs);
     sock.setEncoding('utf8');
     sock.on('connect', () => { sock.write(`${JSON.stringify(req)}\n`); });
     sock.on('data', (chunk: string) => {
@@ -151,6 +208,33 @@ function runBridgeDelegate(
     sock.on('error', (e) => { clearTimeout(guard); log('bridge connect error', (e as Error).message); finish(null); });
     sock.on('close', () => { clearTimeout(guard); finish(null); });
   });
+}
+
+/**
+ * Ask the Peers Flow app (over the bridge socket) to spawn a *tracked,
+ * watchable* peer session and run the goal to completion. Resolves to the
+ * result envelope, or `null` if the bridge is unavailable / errors — in which
+ * case the caller falls back to a headless `claude -p`.
+ */
+function runBridgeDelegate(
+  directory: string,
+  goal: string,
+  deliverable: string,
+  timeoutMs: number,
+): Promise<Record<string, unknown> | null> {
+  return bridgeRequest(
+    {
+      type: 'delegate',
+      id: `${Date.now()}-${process.pid}`,
+      rootConversationId: ROOT_CONVERSATION_ID,
+      directory,
+      goal,
+      deliverable,
+      timeoutMs,
+    },
+    // Allow the full delegation timeout plus headroom for spawn + result harvest.
+    timeoutMs + 60_000,
+  );
 }
 
 function spawnDelegate(
@@ -378,6 +462,10 @@ async function handleToolsCall(id: JsonRpcId, params: Record<string, unknown>): 
     }
     if (name === 'delegate') {
       sendResult(id, await toolDelegate(args as DelegateArgs));
+      return;
+    }
+    if (name === 'open_file') {
+      sendResult(id, await toolOpenFile(args as OpenFileArgs));
       return;
     }
     sendError(id, -32602, `Unknown tool: ${name}`);
