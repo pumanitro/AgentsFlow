@@ -1,6 +1,8 @@
 import { BrowserWindow } from 'electron';
 import * as os from 'os';
+import * as fs from 'fs';
 import * as path from 'path';
+import { execFileSync } from 'child_process';
 import type { IPty } from 'node-pty';
 import { withUtf8Locale } from './locale';
 
@@ -50,18 +52,76 @@ const resumeSessions = new Map<string, ResumeSession>();
 const resumeChannelToSessionId = new Map<string, string>();
 
 // ---------- PTY capacity guard ----------
-// node-pty's native spawn (PtyFork) throws a C++ exception when the OS can't
-// allocate a pseudo-terminal — e.g. macOS exhausts its system-wide cap
-// (`kern.tty.ptmx_max`, 511 by default). That throw crosses the native/V8
-// boundary and is *uncatchable* by the JS try/catch around spawn(): it reaches
-// std::terminate → abort(), taking the whole app down with SIGABRT. So we must
-// refuse to spawn *before* node-pty does, while the count is still safely under
-// the OS limit. The ceiling sits well below 511 to leave headroom for other
-// apps sharing the same /dev/ptmx budget (the user's terminal tabs, etc.).
+// node-pty's native spawn (PtyFork) throws a C++ exception when forkpty() fails
+// — most commonly because the OS can't allocate a pseudo-terminal, i.e. macOS
+// has hit its system-wide cap (`kern.tty.ptmx_max`, 511 by default). That throw
+// crosses the native/V8 boundary and is *uncatchable* by the JS try/catch
+// around spawn(): it reaches std::terminate → abort(), taking the whole app
+// down with SIGABRT. So we must refuse to spawn *before* node-pty does, while
+// the OS still has a pty to give us.
+//
+// Two ceilings, because there are two distinct ways to run out:
+//
+//  1. Our own handle count (MAX_LIVE_PTYS). A simple self-limit so a runaway in
+//     this app alone can't monopolise the budget.
+//
+//  2. The *system-wide* live-pty count. This is the one that actually bit us:
+//     `kern.tty.ptmx_max` is shared across EVERY process on the machine — our
+//     terminals, the user's iTerm2 tabs, other Electron apps — so the app can
+//     sit comfortably under its own ceiling while the system as a whole runs
+//     dry, and the next forkpty() aborts. We read the live count straight from
+//     devfs: every allocated unix98 pty has a `/dev/ttysNNN` slave node, so a
+//     single readdir of /dev (~0.1ms, no subprocess, consumes no fds — which
+//     matters precisely when fds/ptys are scarce) gives an accurate, slightly
+//     conservative count. We refuse once within SYSTEM_PTY_MARGIN of the cap.
 const MAX_LIVE_PTYS = Number(process.env.AGENTSFLOW_MAX_PTYS) || 64;
+const SYSTEM_PTY_MARGIN = Number(process.env.AGENTSFLOW_PTY_MARGIN) || 60;
+const SYSTEM_PTY_CACHE_MS = 1000;
+
+// kern.tty.ptmx_max, read once at startup. Defaults to the macOS default (511)
+// if sysctl is unavailable (e.g. non-macOS), so the guard degrades safely.
+const PTMX_MAX = (() => {
+  try {
+    const n = Number(execFileSync('sysctl', ['-n', 'kern.tty.ptmx_max'], { encoding: 'utf8' }).trim());
+    return Number.isFinite(n) && n > 0 ? n : 511;
+  } catch {
+    return 511;
+  }
+})();
 
 function livePtyCount(): number {
   return claudeChannels.size + resumeSessions.size + shells.size;
+}
+
+// Live system-wide unix98 pty count, via devfs slave nodes (`/dev/ttysNNN`).
+// Cached briefly so a burst of spawns doesn't readdir on every call. Returns 0
+// if /dev can't be read (non-macOS, sandbox), which disables only this check
+// and leaves the own-count guard in force.
+const TTYS_SLAVE_RE = /^ttys\d{3,}$/;
+let cachedSystemPtys = 0;
+let cachedSystemPtysAt = 0;
+function systemPtyCount(): number {
+  const now = Date.now();
+  if (cachedSystemPtysAt && now - cachedSystemPtysAt < SYSTEM_PTY_CACHE_MS) return cachedSystemPtys;
+  let count = 0;
+  try {
+    for (const name of fs.readdirSync('/dev')) {
+      if (TTYS_SLAVE_RE.test(name)) count++;
+    }
+  } catch {
+    count = 0;
+  }
+  cachedSystemPtys = count;
+  cachedSystemPtysAt = now;
+  return count;
+}
+
+function refusePty(win: BrowserWindow, channelId: string, message: string): false {
+  if (!win.isDestroyed()) {
+    win.webContents.send('terminal:data', channelId, `\r\n\x1b[31m${message}\x1b[0m\r\n`);
+    win.webContents.send('terminal:exit', channelId);
+  }
+  return false;
 }
 
 // True if another PTY may be spawned. On false, emits a graceful error to the
@@ -69,13 +129,16 @@ function livePtyCount(): number {
 // instead of the app aborting.
 function ensurePtyCapacity(win: BrowserWindow, channelId: string, label: string): boolean {
   const live = livePtyCount();
-  if (live < MAX_LIVE_PTYS) return true;
-  console.error(`[agentsflow][pty] refusing to spawn ${label}: PTY ceiling reached`, { live, max: MAX_LIVE_PTYS });
-  if (!win.isDestroyed()) {
-    win.webContents.send('terminal:data', channelId, `\r\n\x1b[31m[${label} spawn refused] too many open terminals (${live}/${MAX_LIVE_PTYS}). Close some sessions or shells, then retry.\x1b[0m\r\n`);
-    win.webContents.send('terminal:exit', channelId);
+  if (live >= MAX_LIVE_PTYS) {
+    console.error(`[agentsflow][pty] refusing to spawn ${label}: app PTY ceiling reached`, { live, max: MAX_LIVE_PTYS });
+    return refusePty(win, channelId, `[${label} spawn refused] too many open terminals in this app (${live}/${MAX_LIVE_PTYS}). Close some sessions or shells, then retry.`);
   }
-  return false;
+  const sys = systemPtyCount();
+  if (sys > 0 && sys > PTMX_MAX - SYSTEM_PTY_MARGIN) {
+    console.error(`[agentsflow][pty] refusing to spawn ${label}: system PTY budget nearly exhausted`, { systemPtys: sys, ptmxMax: PTMX_MAX, margin: SYSTEM_PTY_MARGIN });
+    return refusePty(win, channelId, `[${label} spawn refused] the system is almost out of pseudo-terminals (${sys}/${PTMX_MAX} in use across all apps). Close some terminals here or in other apps, then retry.`);
+  }
+  return true;
 }
 
 // ---------- Idle-PTY reaper ----------
