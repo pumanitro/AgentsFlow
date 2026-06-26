@@ -2,7 +2,7 @@ import { BrowserWindow } from 'electron';
 import * as os from 'os';
 import * as fs from 'fs';
 import * as path from 'path';
-import { execFileSync } from 'child_process';
+import { execFileSync, spawnSync } from 'child_process';
 import type { IPty } from 'node-pty';
 import { withUtf8Locale } from './locale';
 
@@ -36,7 +36,7 @@ const env = () => withUtf8Locale({
   TERM: 'xterm-256color',
 } as Record<string, string>);
 
-interface ClaudeChannel { id: string; pty: IPty; win: BrowserWindow; }
+interface ClaudeChannel { id: string; pty: IPty; win: BrowserWindow; sessionId: string; }
 const claudeChannels = new Map<string, ClaudeChannel>();
 
 interface ResumeSession {
@@ -116,6 +116,36 @@ function systemPtyCount(): number {
   return count;
 }
 
+// Final, resource-agnostic gate: can the OS create a child process *right now*?
+// node-pty's native spawn does openpty() + fork(). In practice it aborts us not
+// at the pty cap (the checks above) but one step deeper: fork() returning EAGAIN
+// when the per-user process/thread table is full, or open("/dev/ptmx") returning
+// EMFILE when *our own* fd table is full. Both modes are invisible to a count of
+// ptys — the crash that motivated this guard happened with only a handful of our
+// own PTYs live — and a forkpty() failure is an *uncatchable* native throw that
+// SIGABRTs the whole app. So before handing control to node-pty, we probe the
+// very same kernel operation with a throwaway child we can actually observe:
+// child_process surfaces EAGAIN/EMFILE/ENFILE/ENOMEM as an ordinary `{ error }`
+// to branch on instead of crashing. If the probe is starved, forkpty() would be
+// too. (Caveat: Node uses posix_spawn while forkpty uses fork(), so a pure
+// fork-only ENOMEM could slip past — but the dominant EAGAIN/EMFILE cases, which
+// both share, are exactly the ones that were aborting us.)
+const FORK_PROBE_BIN = '/usr/bin/true';
+const FORK_STARVED_ERRNOS = new Set(['EAGAIN', 'EMFILE', 'ENFILE', 'ENOMEM']);
+function forkStarvedErrno(): string | null {
+  try {
+    const r = spawnSync(FORK_PROBE_BIN, [], { stdio: 'ignore', timeout: 2000 });
+    const code = (r.error as NodeJS.ErrnoException | undefined)?.code;
+    // ENOENT etc. (probe binary absent, e.g. non-macOS) → can't tell; don't block.
+    return code && FORK_STARVED_ERRNOS.has(code) ? code : null;
+  } catch {
+    // spawnSync only throws on bad arguments, never on spawn failure. An
+    // unexpected throw means the probe itself is broken — fail open so we never
+    // refuse a legitimate spawn on the probe's account.
+    return null;
+  }
+}
+
 function refusePty(win: BrowserWindow, channelId: string, message: string): false {
   if (!win.isDestroyed()) {
     win.webContents.send('terminal:data', channelId, `\r\n\x1b[31m${message}\x1b[0m\r\n`);
@@ -137,6 +167,11 @@ function ensurePtyCapacity(win: BrowserWindow, channelId: string, label: string)
   if (sys > 0 && sys > PTMX_MAX - SYSTEM_PTY_MARGIN) {
     console.error(`[agentsflow][pty] refusing to spawn ${label}: system PTY budget nearly exhausted`, { systemPtys: sys, ptmxMax: PTMX_MAX, margin: SYSTEM_PTY_MARGIN });
     return refusePty(win, channelId, `[${label} spawn refused] the system is almost out of pseudo-terminals (${sys}/${PTMX_MAX} in use across all apps). Close some terminals here or in other apps, then retry.`);
+  }
+  const starved = forkStarvedErrno();
+  if (starved) {
+    console.error(`[agentsflow][pty] refusing to spawn ${label}: OS cannot start a new process right now`, { errno: starved });
+    return refusePty(win, channelId, `[${label} spawn refused] the system is temporarily out of resources to start a new process (${starved}). This usually clears on its own — close some sessions or other apps, then retry.`);
   }
   return true;
 }
@@ -220,7 +255,7 @@ export function attach(opts: {
   }
   console.log('[agentsflow][pty] spawn ok', { pid: pty.pid });
 
-  const ch: ClaudeChannel = { id: opts.channelId, pty, win: opts.win };
+  const ch: ClaudeChannel = { id: opts.channelId, pty, win: opts.win, sessionId: opts.sessionId };
   claudeChannels.set(opts.channelId, ch);
 
   pty.onData((data) => {
@@ -443,6 +478,18 @@ export function attachShell(opts: {
 
 export function listShellIds(): string[] {
   return Array.from(shells.keys());
+}
+
+// True if a Claude session is currently being watched in the app — either an
+// `attach` viewer or a live `resume` session. The daemon reaper uses this to
+// avoid stopping a daemon the user is actively looking at.
+export function hasLiveViewer(sessionId: string): boolean {
+  if (!sessionId) return false;
+  if (resumeSessions.has(sessionId)) return true;
+  for (const ch of claudeChannels.values()) {
+    if (ch.sessionId === sessionId) return true;
+  }
+  return false;
 }
 
 export function killShell(shellId: string): void {

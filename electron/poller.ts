@@ -2,7 +2,8 @@ import { BrowserWindow } from 'electron';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { listAgentsResult, readJobState, type ClaudeAgentJsonRow } from './claude-cli';
+import { listAgentsResult, readJobState, stopAgent, type ClaudeAgentJsonRow } from './claude-cli';
+import { hasLiveViewer } from './pty-manager';
 import { store } from './store';
 import { Conversation } from '../shared/types';
 import { effectiveState, deriveDescription } from './derive-state';
@@ -43,6 +44,49 @@ function markTerminalIfMissing(c: Conversation): Conversation | null {
 
 function jobStatePath(daemonShort: string): string {
   return path.join(os.homedir(), '.claude', 'jobs', daemonShort, 'state.json');
+}
+
+// ---------- Background-daemon reaper ----------
+// A finished `claude --bg` daemon sometimes lingers as a live process instead of
+// exiting — and every peer-aware one also holds an `agentsflow-mcp-server` child.
+// Left alone these stragglers accumulate over a long session and across app
+// restarts, draining the OS process/PTY budget until node-pty's forkpty() fails
+// and aborts the whole app (SIGABRT). The reaper stops a *live* daemon only when
+// its conversation has sat in a terminal state past a grace period, is NOT
+// pinned, and is NOT being watched. `claude stop` ends the daemon, which closes
+// its mcp-server child's stdin so that exits too. The transcript stays on disk,
+// so the conversation is still fully resumable — we free the process, not the
+// data. Pinned / active / starting / blocked / viewed sessions are never touched.
+const REAP_GRACE_MS = Number(process.env.AGENTSFLOW_DAEMON_REAP_GRACE_MS) || 15 * 60 * 1000;
+const MAX_REAPS_PER_TICK = 4;
+let reapInFlight = false;
+
+async function reapStaleDaemons(convs: Conversation[], liveRows: ClaudeAgentJsonRow[]): Promise<void> {
+  if (reapInFlight || liveRows.length === 0) return;
+  reapInFlight = true;
+  try {
+    const now = Date.now();
+    let reaped = 0;
+    for (const c of convs) {
+      if (reaped >= MAX_REAPS_PER_TICK) break;
+      if (!c.daemonShort || c.pinned) continue;
+      if (!TERMINAL_STATES.has((c.state || '').toLowerCase())) continue;
+      // Only reap a daemon that's actually still running.
+      const row = liveRows.find((r) => r.sessionId.startsWith(c.daemonShort));
+      if (!row) continue;
+      if (hasLiveViewer(c.sessionId || row.sessionId)) continue;
+      // Require the daemon to have been quiet (terminal) for a while — its
+      // state.json mtime is when it last did anything.
+      let finishedAt = 0;
+      try { finishedAt = fs.statSync(jobStatePath(c.daemonShort)).mtimeMs; } catch { /* no file */ }
+      if (finishedAt && now - finishedAt < REAP_GRACE_MS) continue;
+      reaped++;
+      console.log('[agentsflow][reaper] stopping lingering daemon', { short: c.daemonShort, state: c.state, title: c.title });
+      try { await stopAgent(c.daemonShort); } catch { /* best-effort; next tick retries */ }
+    }
+  } finally {
+    reapInFlight = false;
+  }
 }
 
 function schedulePush(): void {
@@ -194,6 +238,11 @@ async function fallbackTick(): Promise<void> {
     store.setConversations(updated);
     schedulePush();
   }
+
+  // Reap finished-but-still-running daemons (and their mcp-server children).
+  // Fire-and-forget so it never delays state reconciliation; it self-guards
+  // against overlapping runs and caps how many it stops per tick.
+  void reapStaleDaemons(updated, rows);
 }
 
 const FAST_TICK_MS = 3000;

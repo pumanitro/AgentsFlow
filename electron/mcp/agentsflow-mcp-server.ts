@@ -237,6 +237,13 @@ function runBridgeDelegate(
   );
 }
 
+// Live `claude -p` delegate children spawned by the headless fallback. Tracked
+// so that when this server shuts down (claude closed our stdin, or we were
+// signalled) we tear the whole subtree down instead of orphaning a `claude -p`
+// (and its own descendants) — a prime source of leaked processes that pile up
+// toward the OS fork/pty limit over a long session.
+const activeDelegateChildren = new Set<ReturnType<typeof spawn>>();
+
 function spawnDelegate(
   dir: TrackedDirectory,
   prompt: string,
@@ -256,6 +263,7 @@ function spawnDelegate(
 
     const args = ['-p', prompt, '--output-format', 'json', '--permission-mode', 'bypassPermissions'];
     const child = spawn(CLAUDE_BIN, args, { cwd: dir.path, env, stdio: ['ignore', 'pipe', 'pipe'] });
+    activeDelegateChildren.add(child);
     const outChunks: Buffer[] = [];
     const errChunks: Buffer[] = [];
     child.stdout!.on('data', (d: Buffer) => outChunks.push(d));
@@ -267,6 +275,7 @@ function spawnDelegate(
     }, timeoutMs);
     const finish = (code: number) => {
       clearTimeout(timer);
+      activeDelegateChildren.delete(child);
       resolve({
         code,
         stdout: Buffer.concat(outChunks).toString('utf8'),
@@ -277,6 +286,7 @@ function spawnDelegate(
     child.on('close', (code) => finish(code ?? -1));
     child.on('error', (e) => {
       clearTimeout(timer);
+      activeDelegateChildren.delete(child);
       resolve({ code: -1, stdout: '', stderr: String(e), timedOut });
     });
   });
@@ -533,8 +543,17 @@ process.stdin.on('data', (chunk: string) => {
     void handle(req);
   }
 });
-process.stdin.on('end', () => process.exit(0));
-process.on('SIGTERM', () => process.exit(0));
-process.on('SIGINT', () => process.exit(0));
+// Kill any in-flight delegate children before we go, so we never leave an
+// orphaned `claude -p` subtree behind when claude tears this server down.
+function shutdown(): never {
+  for (const child of activeDelegateChildren) {
+    try { child.kill('SIGTERM'); } catch { /* already gone */ }
+  }
+  activeDelegateChildren.clear();
+  process.exit(0);
+}
+process.stdin.on('end', shutdown);
+process.on('SIGTERM', shutdown);
+process.on('SIGINT', shutdown);
 
 log(`started · store=${STORE_PATH || '(none)'} · depth=${DEPTH}`);
