@@ -3,9 +3,15 @@ import * as path from 'path';
 import * as fs from 'fs';
 import { v4 as uuid } from 'uuid';
 import serve from 'electron-serve';
+import { installCrashLogging } from './logger';
 
 const APP_NAME = 'Peers Flow';
 app.setName(APP_NAME);
+
+// Earliest possible: mirror console.* to a log file and install last-resort
+// uncaughtException/unhandledRejection/process-gone handlers, so any future
+// incident leaves a trace on disk instead of only an OS-level .ips report.
+installCrashLogging();
 
 // Resolve icon for both dev (running from source) and packaged builds.
 // __dirname in dev is dist/electron/electron, in packaged builds it lives under app.asar.

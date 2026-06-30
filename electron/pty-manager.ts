@@ -17,6 +17,41 @@ function getPty(): typeof import('node-pty') {
 
 const CLAUDE_BIN = process.env.CLAUDE_BIN || 'claude';
 
+// ---------- node-pty callback safety ----------
+// node-pty invokes our onData/onExit callbacks from a *native* N-API
+// ThreadSafeFunction. If our JS callback throws, node-addon-api re-throws the
+// exception as a C++ exception out of that native callback, which node-pty does
+// not catch — it reaches std::terminate() → abort() and SIGABRTs the whole app.
+// This is uncatchable by process.on('uncaughtException') because it terminates
+// in native code, not the JS event loop. (Observed crash: an "Object has been
+// destroyed" throw from webContents.send inside onExit during window teardown.)
+// So every pty callback body MUST be wrapped so nothing can escape into native.
+function guardCb<A extends unknown[]>(label: string, fn: (...args: A) => void): (...args: A) => void {
+  return (...args: A) => {
+    try {
+      fn(...args);
+    } catch (err) {
+      // Swallow + log: throwing here would abort the process. Never re-throw.
+      console.error(`[agentsflow][pty] ${label} callback threw (suppressed to avoid native abort)`, err);
+    }
+  };
+}
+
+// webContents can be destroyed independently of its BrowserWindow (reload,
+// navigation, teardown), and win.isDestroyed() is racy against the send that
+// follows it. Check both layers and never let a send throw — this is the
+// specific call that was aborting the app from inside pty onExit.
+function safeSend(win: BrowserWindow, channel: string, ...args: unknown[]): void {
+  try {
+    if (!win || win.isDestroyed()) return;
+    const wc = win.webContents;
+    if (!wc || wc.isDestroyed()) return;
+    wc.send(channel, ...args);
+  } catch (err) {
+    console.error('[agentsflow][pty] webContents.send failed', { channel }, err);
+  }
+}
+
 // ---------- Claude attaches ----------
 // Two flavors, with deliberately different lifecycles:
 //
@@ -147,10 +182,8 @@ function forkStarvedErrno(): string | null {
 }
 
 function refusePty(win: BrowserWindow, channelId: string, message: string): false {
-  if (!win.isDestroyed()) {
-    win.webContents.send('terminal:data', channelId, `\r\n\x1b[31m${message}\x1b[0m\r\n`);
-    win.webContents.send('terminal:exit', channelId);
-  }
+  safeSend(win, 'terminal:data', channelId, `\r\n\x1b[31m${message}\x1b[0m\r\n`);
+  safeSend(win, 'terminal:exit', channelId);
   return false;
 }
 
@@ -247,10 +280,8 @@ export function attach(opts: {
     });
   } catch (err) {
     console.error('[agentsflow][pty] spawn failed', err);
-    if (!opts.win.isDestroyed()) {
-      opts.win.webContents.send('terminal:data', opts.channelId, `\r\n\x1b[31m[pty spawn failed] ${(err as Error)?.message ?? err}\x1b[0m\r\n`);
-      opts.win.webContents.send('terminal:exit', opts.channelId);
-    }
+    safeSend(opts.win, 'terminal:data', opts.channelId, `\r\n\x1b[31m[pty spawn failed] ${(err as Error)?.message ?? err}\x1b[0m\r\n`);
+    safeSend(opts.win, 'terminal:exit', opts.channelId);
     return '';
   }
   console.log('[agentsflow][pty] spawn ok', { pid: pty.pid });
@@ -258,13 +289,13 @@ export function attach(opts: {
   const ch: ClaudeChannel = { id: opts.channelId, pty, win: opts.win, sessionId: opts.sessionId };
   claudeChannels.set(opts.channelId, ch);
 
-  pty.onData((data) => {
-    if (!ch.win.isDestroyed()) ch.win.webContents.send('terminal:data', opts.channelId, data);
-  });
-  pty.onExit(() => {
-    if (!ch.win.isDestroyed()) ch.win.webContents.send('terminal:exit', opts.channelId);
+  pty.onData(guardCb('attach onData', (data) => {
+    safeSend(ch.win, 'terminal:data', opts.channelId, data);
+  }));
+  pty.onExit(guardCb('attach onExit', () => {
+    safeSend(ch.win, 'terminal:exit', opts.channelId);
     claudeChannels.delete(opts.channelId);
-  });
+  }));
   return '';
 }
 
@@ -300,10 +331,8 @@ function attachResume(opts: {
       });
     } catch (err) {
       console.error('[agentsflow][pty] resume spawn failed', err);
-      if (!opts.win.isDestroyed()) {
-        opts.win.webContents.send('terminal:data', opts.channelId, `\r\n\x1b[31m[pty spawn failed] ${(err as Error)?.message ?? err}\x1b[0m\r\n`);
-        opts.win.webContents.send('terminal:exit', opts.channelId);
-      }
+      safeSend(opts.win, 'terminal:data', opts.channelId, `\r\n\x1b[31m[pty spawn failed] ${(err as Error)?.message ?? err}\x1b[0m\r\n`);
+      safeSend(opts.win, 'terminal:exit', opts.channelId);
       return '';
     }
     console.log('[agentsflow][pty] resume spawn ok', { sessionId: opts.sessionId, pid: pty.pid });
@@ -320,25 +349,25 @@ function attachResume(opts: {
     resumeSessions.set(opts.sessionId, newSess);
     sess = newSess;
 
-    pty.onData((data) => {
+    pty.onData(guardCb('resume onData', (data) => {
       const s = resumeSessions.get(opts.sessionId);
       if (!s) return;
       s.lastDataAt = Date.now();
       appendBuffer(s, data);
       for (const sub of s.subscribers.values()) {
-        if (!sub.win.isDestroyed()) sub.win.webContents.send('terminal:data', sub.channelId, data);
+        safeSend(sub.win, 'terminal:data', sub.channelId, data);
       }
-    });
-    pty.onExit((e) => {
+    }));
+    pty.onExit(guardCb('resume onExit', (e) => {
       console.log('[agentsflow][pty] resume onExit', { sessionId: opts.sessionId, exitCode: e.exitCode, signal: e.signal });
       const s = resumeSessions.get(opts.sessionId);
       if (!s) return;
       for (const sub of s.subscribers.values()) {
-        if (!sub.win.isDestroyed()) sub.win.webContents.send('terminal:exit', sub.channelId);
+        safeSend(sub.win, 'terminal:exit', sub.channelId);
         resumeChannelToSessionId.delete(sub.channelId);
       }
       resumeSessions.delete(opts.sessionId);
-    });
+    }));
   } else {
     // Re-attaching to a running resume session — resize to the new viewer's
     // geometry, which also nudges Claude to redraw the current screen.
@@ -415,10 +444,8 @@ export function attachShell(opts: {
       });
     } catch (err) {
       console.error('[agentsflow][pty] shell spawn failed', err);
-      if (!opts.win.isDestroyed()) {
-        opts.win.webContents.send('terminal:data', opts.channelId, `\r\n\x1b[31m[shell spawn failed] ${(err as Error)?.message ?? err}\x1b[0m\r\n`);
-        opts.win.webContents.send('terminal:exit', opts.channelId);
-      }
+      safeSend(opts.win, 'terminal:data', opts.channelId, `\r\n\x1b[31m[shell spawn failed] ${(err as Error)?.message ?? err}\x1b[0m\r\n`);
+      safeSend(opts.win, 'terminal:exit', opts.channelId);
       return '';
     }
     console.log('[agentsflow][pty] shell spawn ok', { shellId: opts.shellId, pid: pty.pid });
@@ -436,27 +463,25 @@ export function attachShell(opts: {
     shells.set(opts.shellId, newShell);
     shell = newShell;
 
-    pty.onData((data) => {
+    pty.onData(guardCb('shell onData', (data) => {
       const s = shells.get(opts.shellId);
       if (!s) return;
       s.lastDataAt = Date.now();
       appendBuffer(s, data);
       for (const sub of s.subscribers.values()) {
-        if (!sub.win.isDestroyed()) {
-          sub.win.webContents.send('terminal:data', sub.channelId, data);
-        }
+        safeSend(sub.win, 'terminal:data', sub.channelId, data);
       }
-    });
-    pty.onExit((e) => {
+    }));
+    pty.onExit(guardCb('shell onExit', (e) => {
       console.log('[agentsflow][pty] shell onExit', { shellId: opts.shellId, exitCode: e.exitCode, signal: e.signal });
       const s = shells.get(opts.shellId);
       if (!s) return;
       for (const sub of s.subscribers.values()) {
-        if (!sub.win.isDestroyed()) sub.win.webContents.send('terminal:exit', sub.channelId);
+        safeSend(sub.win, 'terminal:exit', sub.channelId);
         shellChannelToShellId.delete(sub.channelId);
       }
       shells.delete(opts.shellId);
-    });
+    }));
   } else {
     // Re-attaching to an existing shell — resize PTY to the new viewer's geometry.
     try {
