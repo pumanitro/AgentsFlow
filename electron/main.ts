@@ -610,26 +610,39 @@ ipcMain.handle('term:attach', async (_e, conversationId: string, cols: number, r
   const channelId = uuid();
   const attachId = conv.daemonShort || conv.sessionId.slice(0, 8);
 
-  // Decide between `claude attach` (view a live daemon) and `claude --resume`
-  // (load the transcript and continue it). We attach ONLY to a live daemon whose
-  // run hasn't finished — i.e. one that's still working or waiting for input, so
-  // attaching gives you a session you can actually watch or answer.
+  // Decide between `claude attach` (connect to a resident daemon) and
+  // `claude --resume` (load a cold transcript from disk and continue it). The
+  // deciding factor is RESIDENCY, not the turn-state.
   //
-  // For a FINISHED conversation (done/failed) we resume even when a daemon still
-  // lingers in the process table. `claude attach` to a completed daemon just
-  // replays its final screen and immediately exits; the renderer would see that
-  // exit as the chat closing the instant it opened — which read as "I open a
-  // peer and it bounces back to the home screen." Resuming instead reopens the
-  // conversation interactively so you can keep going. A cold session (no live
-  // daemon at all) also resumes, as before.
-  const finished = FINISHED_STATES.has((conv.state || '').toLowerCase());
+  // A `--bg` background agent stays resident in `claude agents` after its turn
+  // ends — listed with a live pid and a turn-state of `working`, `blocked`, or
+  // `done`/idle. For ANY such resident agent:
+  //   • `claude --resume <id>` is REFUSED ("…is currently running as a
+  //     background agent (bg). Use `claude agents` … or add --fork-session…") and
+  //     exits at once, so the chat closes the instant it opens — exactly the
+  //     "choose path" bug: a done/idle bg agent that could never be reopened.
+  //   • `claude attach <id>` connects to the live daemon and stays interactive
+  //     whether it's working, blocked, or idle/done — so you can watch it or send
+  //     the next turn.
+  // So we attach whenever the session is still resident, regardless of turn
+  // state. (An earlier guard tried to `--resume` finished-but-resident agents to
+  // avoid an attach that "replays and exits"; but that replay-and-exit only
+  // happens for a daemon that has actually left the process table, not for a
+  // resident idle agent — which attach holds open. That guard caused this bug.)
+  //
+  // Only a truly cold session — one no longer listed by `claude agents` — is
+  // resumed, loading its transcript and continuing it in the original cwd.
+  // `hasLiveDaemon` fails open to `true` (attach) when the agents list itself
+  // errors: a `--resume` of a live session forks its transcript, whereas an
+  // attach that finds no daemon just replays and exits, after which the renderer
+  // shows Reopen/Back rather than bouncing home.
   const live = await hasLiveDaemon(attachId);
   let replay = '';
-  if (live && !finished) {
+  if (live) {
     console.log('[agentsflow] spawning pty for claude attach', { attachId, sessionId: conv.sessionId, channelId, state: conv.state });
     replay = pty.attach({ channelId, sessionId: attachId, cols, rows, win, mode: 'attach' });
   } else {
-    console.log('[agentsflow] using --resume', { sessionId: conv.sessionId, cwd: conv.directoryPath, channelId, live, finished, state: conv.state });
+    console.log('[agentsflow] using --resume', { sessionId: conv.sessionId, cwd: conv.directoryPath, channelId, live, state: conv.state });
     replay = pty.attach({ channelId, sessionId: conv.sessionId, cols, rows, win, mode: 'resume', cwd: conv.directoryPath });
   }
   return { channelId, replay };
