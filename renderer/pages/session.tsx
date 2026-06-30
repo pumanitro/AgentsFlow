@@ -39,6 +39,17 @@ export default function SessionPage() {
   const [children, setChildren] = useState<Conversation[]>([]);
   const [rightPane, setRightPane] = useUIState('rightPane');
   const [openFile, setOpenFile] = useState<string | null>(null);
+  // The chat terminal exited. This fires both for a real session end AND for a
+  // fast-fail attach — e.g. `claude attach` to a finished/lingering daemon that
+  // just replays and exits, a spawn the capacity guard refused, or a daemon the
+  // reaper stopped mid-attach. We used to call goBack() here, which teleported
+  // the user to the home list the instant they opened a peer ("opens the chat,
+  // then a moment later bounces to home"). Stay on the page instead and let them
+  // Reopen (re-attach / resume) or go Back deliberately — matching the app's
+  // explicit ⌘←/Back navigation model.
+  const [chatExited, setChatExited] = useState(false);
+  // Bumped by Reopen to force a fresh Terminal mount (and a new attach).
+  const [chatGen, setChatGen] = useState(0);
   // 1-based line to jump to when a file is opened from search. The nonce makes
   // re-opening the *same* file at the same line still trigger the jump.
   const [gotoLine, setGotoLine] = useState<{ line: number; nonce: number } | null>(null);
@@ -178,6 +189,9 @@ export default function SessionPage() {
 
   useEffect(() => {
     if (!id) return;
+    // New conversation in view → clear any prior "chat ended" notice so the
+    // fresh terminal mounts instead of showing the stale Reopen panel.
+    setChatExited(false);
     const apply = (cs: Conversation[]) => {
       setConv(cs.find((c) => c.id === id) ?? null);
       setChildren(cs.filter((c) => c.delegatedByConversationId === id));
@@ -314,9 +328,29 @@ export default function SessionPage() {
           {/* Both panes stay mounted; toggling uses visibility so xterm size doesn't reset */}
           <div className={`absolute inset-0 ${rightPane === 'chat' ? 'visible' : 'invisible'}`}>
             {conv?.sessionId ? (
-              <PaneErrorBoundary label="Terminal">
-                <Terminal conversationId={String(id)} onExit={goBack} autoFocus={rightPane === 'chat'} />
-              </PaneErrorBoundary>
+              chatExited ? (
+                <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 px-6 text-center">
+                  <div className="text-sm text-text">The chat terminal closed.</div>
+                  <div className="text-xs text-muted max-w-sm">
+                    The session ended or couldn’t attach (a finished agent just replays and exits).
+                    Reopen to reconnect — a finished session resumes where it left off — or go back to the list.
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={() => { setChatExited(false); setChatGen((g) => g + 1); }}
+                      className="px-3 py-1 text-[11px] uppercase tracking-wider rounded-md bg-accent text-bg font-semibold hover:opacity-90"
+                    >Reopen</button>
+                    <button
+                      onClick={goBack}
+                      className="px-3 py-1 text-[11px] uppercase tracking-wider rounded-md border border-border bg-panel text-muted hover:text-text hover:bg-panel2"
+                    >← Back</button>
+                  </div>
+                </div>
+              ) : (
+                <PaneErrorBoundary key={chatGen} label="Terminal">
+                  <Terminal key={chatGen} conversationId={String(id)} onExit={() => setChatExited(true)} autoFocus={rightPane === 'chat'} />
+                </PaneErrorBoundary>
+              )
             ) : (
               <div className="absolute inset-0 flex items-center justify-center text-muted text-sm">
                 {conv ? 'Session not ready yet…' : 'Loading…'}

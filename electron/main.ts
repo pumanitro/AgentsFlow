@@ -333,7 +333,9 @@ ipcMain.handle('convs:spawn', async (_e, req: SpawnRequest): Promise<{ conversat
 
 // ----- Delegation bridge: the MCP server asks main to spawn a tracked peer ----
 
-const DELEGATION_TERMINAL_STATES = new Set(['done', 'completed', 'failed', 'error']);
+// Conversation states that mean the agent has finished its run. Used both to
+// resolve a delegated peer's result and to decide attach-vs-resume below.
+const FINISHED_STATES = new Set(['done', 'completed', 'failed', 'error']);
 
 /**
  * Polls a delegated conversation until the poller drives it to a terminal state,
@@ -359,7 +361,7 @@ async function waitForDelegationCompletion(
     const r = (job?.output?.result || '').trim();
     if (r) lastResult = r;
     const st = (conv.state || '').toLowerCase();
-    if (Date.now() - start > minRunMs && DELEGATION_TERMINAL_STATES.has(st)) {
+    if (Date.now() - start > minRunMs && FINISHED_STATES.has(st)) {
       const failed = st === 'failed' || st === 'error';
       const result = lastResult || (conv.description || '').trim();
       return {
@@ -608,17 +610,26 @@ ipcMain.handle('term:attach', async (_e, conversationId: string, cols: number, r
   const channelId = uuid();
   const attachId = conv.daemonShort || conv.sessionId.slice(0, 8);
 
-  // If a live daemon exists for this session, attach to it. Otherwise this is
-  // a "cold" session (e.g. one restored from a saved transcript that no longer
-  // has a running daemon) — fall back to `claude --resume <sid>` in the
-  // session's original cwd, which loads the transcript and continues it.
+  // Decide between `claude attach` (view a live daemon) and `claude --resume`
+  // (load the transcript and continue it). We attach ONLY to a live daemon whose
+  // run hasn't finished — i.e. one that's still working or waiting for input, so
+  // attaching gives you a session you can actually watch or answer.
+  //
+  // For a FINISHED conversation (done/failed) we resume even when a daemon still
+  // lingers in the process table. `claude attach` to a completed daemon just
+  // replays its final screen and immediately exits; the renderer would see that
+  // exit as the chat closing the instant it opened — which read as "I open a
+  // peer and it bounces back to the home screen." Resuming instead reopens the
+  // conversation interactively so you can keep going. A cold session (no live
+  // daemon at all) also resumes, as before.
+  const finished = FINISHED_STATES.has((conv.state || '').toLowerCase());
   const live = await hasLiveDaemon(attachId);
   let replay = '';
-  if (live) {
-    console.log('[agentsflow] spawning pty for claude attach', { attachId, sessionId: conv.sessionId, channelId });
+  if (live && !finished) {
+    console.log('[agentsflow] spawning pty for claude attach', { attachId, sessionId: conv.sessionId, channelId, state: conv.state });
     replay = pty.attach({ channelId, sessionId: attachId, cols, rows, win, mode: 'attach' });
   } else {
-    console.log('[agentsflow] no live daemon — using --resume', { sessionId: conv.sessionId, cwd: conv.directoryPath, channelId });
+    console.log('[agentsflow] using --resume', { sessionId: conv.sessionId, cwd: conv.directoryPath, channelId, live, finished, state: conv.state });
     replay = pty.attach({ channelId, sessionId: conv.sessionId, cols, rows, win, mode: 'resume', cwd: conv.directoryPath });
   }
   return { channelId, replay };
