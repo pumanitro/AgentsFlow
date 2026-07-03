@@ -42,6 +42,7 @@ export default function Home() {
   // element — root OR peer — shows the orange selection at a time.
   const [selectedChildId, setSelectedChildId] = useState<string | null>(null);
   const [view, setView] = useUIState('view');
+  const [peerQuery, setPeerQuery] = useState('');
   const [menuOpen, setMenuOpen] = useState(false);
   const [pendingRenameDividerId, setPendingRenameDividerId] = useState<string | null>(null);
   // A freshly added task opens its inline editor as soon as its row lands.
@@ -119,6 +120,17 @@ export default function Home() {
       return ax < bx ? 1 : ax > bx ? -1 : 0; // descending — newest first
     });
   }, [dirs, convsByDir]);
+
+  // Sidebar search — matches the last path segment (the folder's real name on
+  // disk), case-insensitive, so typing "flow" finds ~/Desktop/AgentsFlow even
+  // if its display name differs.
+  const filteredDirs = useMemo(() => {
+    const q = peerQuery.trim().toLowerCase();
+    if (!q) return sortedDirs;
+    return sortedDirs.filter((d) =>
+      (d.path.split('/').filter(Boolean).pop() ?? d.path).toLowerCase().includes(q),
+    );
+  }, [sortedDirs, peerQuery]);
 
   // Delegated peer sessions, grouped under the root conversation that spawned
   // them, so they can be rendered as nested child rows.
@@ -619,11 +631,58 @@ export default function Home() {
         </div>
       </header>
 
-      <main className="flex-1 overflow-y-auto">
+      <main className="flex-1 overflow-hidden">
         {view === 'stats' ? (
-          <StatsView dirs={dirs} convs={convs} />
+          <div className="h-full overflow-y-auto">
+            <StatsView dirs={dirs} convs={convs} />
+          </div>
         ) : (
-        <>
+        // Two independently scrolling panes: the Tracked Peers picker as a
+        // compact left sidebar, conversations + history on the right.
+        <div className="h-full flex">
+        <aside className="w-72 shrink-0 border-r border-border overflow-y-auto px-3 py-4">
+          <h2 className="text-xs uppercase tracking-wider text-muted mb-2">Tracked Peers</h2>
+          <input
+            value={peerQuery}
+            onChange={(e) => setPeerQuery(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Escape') {
+                e.preventDefault();
+                setPeerQuery('');
+                (e.target as HTMLInputElement).blur();
+              }
+            }}
+            placeholder="Search peers…"
+            aria-label="Search tracked peers by folder name"
+            className="w-full mb-2 bg-panel border border-border rounded-md px-2.5 py-1.5 text-sm text-text outline-none focus:border-accent placeholder:text-muted/70"
+          />
+          <button
+            onClick={handleAddDirectory}
+            className="w-full rounded-md border-2 border-dashed border-border bg-transparent hover:border-accent hover:bg-panel/40 transition-colors px-2.5 py-1.5 text-left mb-2"
+          >
+            <div className="text-sm font-medium text-text">+ Add directory</div>
+            <div className="text-[11px] text-muted">track a new peer</div>
+          </button>
+          <div className="flex flex-col gap-1.5">
+            {filteredDirs.length === 0 && peerQuery.trim() !== '' && (
+              <div className="text-xs text-muted px-1 py-1.5">No peers match “{peerQuery.trim()}”.</div>
+            )}
+            {filteredDirs.map((d) => (
+              <DirectoryCard
+                key={d.id}
+                dir={d}
+                selected={d.id === selectedDirId}
+                historyCount={convsByDir.get(d.id)?.length ?? 0}
+                onSelect={() => setSelectedDirId(d.id)}
+                onViewHistory={() => setHistoryDirId(d.id)}
+                onPreview={() => router.push({ pathname: '/preview', query: { dir: d.id } })}
+                onRemove={() => handleRemoveDirectory(d)}
+              />
+            ))}
+          </div>
+        </aside>
+
+        <div className="flex-1 min-w-0 overflow-y-auto pb-4">
         <section className="px-4 pt-4">
           <div className="flex items-center justify-between mb-2">
             <h2 className="text-xs uppercase tracking-wider text-muted">Pinned conversations</h2>
@@ -634,8 +693,14 @@ export default function Home() {
                 className="text-[11px] text-muted hover:text-accent hover:border-accent border border-border bg-panel hover:bg-panel2 rounded px-2 py-0.5 disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:text-muted disabled:hover:border-border disabled:hover:bg-panel"
                 title={selectedDir
                   ? `Add a task for ${selectedDir.displayName} below the focused row`
-                  : 'Select a peer below first — tasks are scoped to a peer'}
-              >+ Add task</button>
+                  : 'Select a peer on the left first — tasks are scoped to a peer'}
+              >
+                {/* Name the receiving peer right on the button — the scope is
+                    otherwise invisible until the row lands. */}
+                {selectedDir
+                  ? <>+ Add task for <span className="text-accent font-medium">{selectedDir.displayName}</span></>
+                  : '+ Add task'}
+              </button>
               <button
                 onClick={handleAddDivider}
                 className="text-[11px] text-muted hover:text-accent hover:border-accent border border-border bg-panel hover:bg-panel2 rounded px-2 py-0.5"
@@ -649,11 +714,10 @@ export default function Home() {
             onDragLeave={handleListDragLeave}
             onDrop={handleDrop}
           >
-            <div className="grid grid-cols-[16px_200px_minmax(0,1fr)_minmax(0,1fr)_auto] gap-3 px-4 py-2 text-[10px] uppercase tracking-wider text-muted border-b border-border">
+            <div className="grid grid-cols-[16px_200px_minmax(0,1fr)_auto] gap-3 px-4 py-2 text-[10px] uppercase tracking-wider text-muted border-b border-border">
               <div></div>
               <div>Peer</div>
               <div>Title</div>
-              <div>Description</div>
               <div></div>
             </div>
             {pinnedItems.length === 0 ? (
@@ -769,31 +833,8 @@ export default function Home() {
           }}
         />
 
-        <section className="px-4 pt-6 pb-4">
-          <h2 className="text-xs uppercase tracking-wider text-muted mb-2">Tracked Peers</h2>
-          <div className="grid grid-cols-2 lg:grid-cols-3 gap-3">
-            {sortedDirs.map((d) => (
-              <DirectoryCard
-                key={d.id}
-                dir={d}
-                selected={d.id === selectedDirId}
-                historyCount={convsByDir.get(d.id)?.length ?? 0}
-                onSelect={() => setSelectedDirId(d.id)}
-                onViewHistory={() => setHistoryDirId(d.id)}
-                onPreview={() => router.push({ pathname: '/preview', query: { dir: d.id } })}
-                onRemove={() => handleRemoveDirectory(d)}
-              />
-            ))}
-            <button
-              onClick={handleAddDirectory}
-              className="rounded-lg border-2 border-dashed border-border bg-transparent hover:border-accent hover:bg-panel/40 transition-colors px-4 py-3 text-left"
-            >
-              <div className="font-medium text-text">+ Add directory</div>
-              <div className="text-xs text-muted mt-0.5">track a new peer</div>
-            </button>
-          </div>
-        </section>
-        </>
+        </div>
+        </div>
         )}
       </main>
 

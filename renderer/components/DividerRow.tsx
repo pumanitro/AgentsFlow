@@ -68,7 +68,7 @@ export default function DividerRow({
       onDragStart={onDragStart}
       onDragEnd={onDragEnd}
       onClick={onFocus}
-      className={`group flex items-center gap-3 px-4 py-2 border-l-2 ${focused ? 'border-l-accent bg-panel2' : `border-l-transparent ${suppressHover ? '' : 'hover:bg-panel2/60'}`} border-b border-b-border ${editing ? 'cursor-default' : 'cursor-grab active:cursor-grabbing select-none'}`}
+      className={`group flex items-center gap-3 px-4 py-1.5 border-l-2 ${focused ? 'border-l-accent bg-panel2' : `border-l-transparent bg-bg/50 ${suppressHover ? '' : 'hover:bg-panel2/60'}`} border-b border-b-border ${editing ? 'cursor-default' : 'cursor-grab active:cursor-grabbing select-none'}`}
       title={editing ? undefined : 'Drag to reorder · Shift+↑/↓'}
     >
       <span className="text-muted/70 shrink-0" aria-hidden>
@@ -76,7 +76,7 @@ export default function DividerRow({
       </span>
 
       <div className="flex-1 min-w-0 flex items-center gap-2">
-        <div className="h-px flex-1 bg-border/60" />
+        <div className="h-px flex-1 bg-border" />
         {editing ? (
           <input
             ref={inputRef}
@@ -96,13 +96,13 @@ export default function DividerRow({
             type="button"
             onDoubleClick={(e) => { e.stopPropagation(); setEditing(true); }}
             onClick={(e) => e.stopPropagation()}
-            className="shrink-0 text-[11px] uppercase tracking-wider font-semibold text-text/90 px-2 py-0.5 rounded hover:bg-bg/40 select-text"
+            className="shrink-0 text-[11px] uppercase tracking-wider font-semibold text-text/90 px-2.5 py-0.5 rounded-full border border-border bg-panel hover:border-accent/60 select-text"
             title="Double-click to rename"
           >
-            {divider.title || <span className="text-muted italic normal-case font-normal">— separator —</span>}
+            {divider.title || <span className="text-muted italic normal-case font-normal">separator</span>}
           </button>
         )}
-        <div className="h-px flex-1 bg-border/60" />
+        <div className="h-px flex-1 bg-border" />
       </div>
 
       <div className="flex items-center gap-1 shrink-0 opacity-60 group-hover:opacity-100">

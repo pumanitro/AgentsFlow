@@ -29,21 +29,25 @@ export default function DirectoryCard({ dir, selected, historyCount, onSelect, o
     };
   }, [menuOpen]);
 
+  // The full path is redundant noise in a narrow sidebar — collapse the home
+  // prefix; the tooltip keeps the exact path.
+  const shortPath = dir.path.replace(/^\/Users\/[^/]+/, '~');
+
   return (
     <div
       onClick={onSelect}
-      className={`group relative text-left rounded-lg border px-4 py-3 transition-colors cursor-pointer ${
+      className={`group relative text-left rounded-md border px-2.5 py-1.5 transition-colors cursor-pointer ${
         selected
           ? 'border-accent bg-panel2 ring-1 ring-accent/40'
           : 'border-border bg-panel hover:bg-panel2 hover:border-border'
       }`}
     >
-      <div className="flex items-start justify-between gap-2">
-        <div className="min-w-0">
-          <div className="font-medium text-text truncate">{dir.displayName}</div>
-          <div className="text-xs text-muted truncate font-mono mt-0.5">{dir.path}</div>
+      <div className="flex items-center justify-between gap-1.5">
+        <div className="min-w-0 flex-1">
+          <div className="text-sm font-medium text-text truncate">{dir.displayName}</div>
+          <div className="text-[11px] text-muted truncate font-mono" title={dir.path}>{shortPath}</div>
         </div>
-        <div className="shrink-0 flex flex-col items-center gap-1">
+        <div className="shrink-0 flex items-center gap-0.5 opacity-60 group-hover:opacity-100">
           <div className="relative" ref={menuRef}>
             <button
               onClick={(e) => { e.stopPropagation(); setMenuOpen((v) => !v); }}

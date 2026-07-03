@@ -77,7 +77,7 @@ export default function TodoRow({ todo, peerName, focused, suppressHover, justAd
       onDragStart={onDragStart}
       onDragEnd={onDragEnd}
       onClick={onFocus}
-      className={`group grid grid-cols-[16px_200px_minmax(0,1fr)_minmax(0,1fr)_auto] items-center gap-3 px-4 py-2.5 border-l-2 ${focused ? 'border-l-accent bg-panel2' : `border-l-transparent ${suppressHover ? '' : 'hover:bg-panel2'}`} border-b border-b-border cursor-default ${justAdded ? 'row-just-added' : ''}`}
+      className={`group grid grid-cols-[16px_200px_minmax(0,1fr)_auto] items-center gap-3 px-4 py-2.5 border-l-2 ${focused ? 'border-l-accent bg-panel2' : `border-l-transparent ${suppressHover ? '' : 'hover:bg-panel2'}`} border-b border-b-border cursor-default ${justAdded ? 'row-just-added' : ''}`}
       title="Task · drag to reorder"
     >
       <span
@@ -102,9 +102,7 @@ export default function TodoRow({ todo, peerName, focused, suppressHover, justAd
         <div className="truncate text-text font-medium">{peerName}</div>
       </div>
 
-      {/* One text field spanning the Title AND Description columns — tasks have
-          no title/description split, which also visually sets them apart. */}
-      <div className="col-span-2 min-w-0 flex items-center gap-2">
+      <div className="min-w-0 flex items-center gap-2">
         {editing ? (
           <input
             ref={inputRef}

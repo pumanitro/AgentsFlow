@@ -77,8 +77,10 @@ export default function PinnedRow({ conv, onAttach, onSaveTitle, onMarkDone, foc
       onDragStart={onDragStart}
       onDragEnd={onDragEnd}
       onClick={handleRowClick}
-      className={`group grid grid-cols-[16px_200px_minmax(0,1fr)_minmax(0,1fr)_auto] items-center gap-3 px-4 py-2.5 border-l-2 ${bare ? 'border-l-transparent' : (focused ? 'border-l-accent bg-panel2' : `border-l-transparent ${suppressHover ? '' : 'hover:bg-panel2'}`)} ${hideBottomBorder ? '' : 'border-b border-b-border'} cursor-pointer ${ready ? '' : 'opacity-80'} ${justAdded ? 'row-just-added' : ''}`}
-      title={ready ? 'Open terminal · drag to reorder' : 'Session is still starting…'}
+      className={`group grid grid-cols-[16px_200px_minmax(0,1fr)_auto] items-center gap-3 px-4 py-2.5 border-l-2 ${bare ? 'border-l-transparent' : (focused ? 'border-l-accent bg-panel2' : `border-l-transparent ${suppressHover ? '' : 'hover:bg-panel2'}`)} ${hideBottomBorder ? '' : 'border-b border-b-border'} cursor-pointer ${ready ? '' : 'opacity-80'} ${justAdded ? 'row-just-added' : ''}`}
+      title={ready
+        ? (conv.description ? `${conv.description}\n\nOpen terminal · drag to reorder` : 'Open terminal · drag to reorder')
+        : 'Session is still starting…'}
     >
       <span
         className="text-muted/60 group-hover:text-muted opacity-50 group-hover:opacity-100 cursor-grab active:cursor-grabbing shrink-0"
@@ -135,11 +137,8 @@ export default function PinnedRow({ conv, onAttach, onSaveTitle, onMarkDone, foc
         )}
       </div>
 
-      <div className="min-w-0 truncate text-sm text-text/85" title={conv.description}>
-        {ready ? (conv.description || <span className="text-muted italic">—</span>) : <span className="text-muted italic">starting…</span>}
-      </div>
-
       <div className="flex items-center gap-1">
+        {!ready && <span className="shrink-0 text-xs text-muted italic mr-1">starting…</span>}
         <button
           onClick={(e) => { e.stopPropagation(); onMarkDone(); }}
           className="text-xs text-muted hover:text-ok hover:bg-ok/10 px-2 py-1 rounded border border-transparent hover:border-ok/40 flex items-center gap-1 opacity-70 group-hover:opacity-100"
