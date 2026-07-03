@@ -1,16 +1,26 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Conversation, TrackedDirectory } from '../../shared/types';
+import { Conversation, PinnedTodo, TrackedDirectory } from '../../shared/types';
 import { statusDotClass } from '../lib/status';
 
 interface Props {
   conversations: Conversation[];
+  // Done tasks appear in the same timeline as finished conversations.
+  todos: PinnedTodo[];
   // The currently-tracked peers, already in the order the Tracked Peers list
   // shows them — the peer filter chips mirror this set and order exactly.
   dirs: TrackedDirectory[];
   onAttach: (c: Conversation) => void;
   onTogglePin: (c: Conversation) => void;
   onRemove: (c: Conversation) => void;
+  // Undo a done task (back into the pinned list) / delete it forever.
+  onRestoreTodo: (t: PinnedTodo) => void;
+  onRemoveTodo: (t: PinnedTodo) => void;
 }
+
+// One row of the merged timeline: a finished conversation or a done task.
+type HistoryEntry =
+  | { kind: 'conversation'; ts: number; directoryId: string; conv: Conversation }
+  | { kind: 'todo'; ts: number; directoryId: string; todo: PinnedTodo };
 
 // How many rows to reveal per infinite-scroll page. The full (already-loaded)
 // history is kept in memory, but we only ever render this many at a time and
@@ -65,7 +75,7 @@ function bucketOf(ts: number, now: number): string {
   );
 }
 
-export default function HistoryTimeline({ conversations, dirs, onAttach, onTogglePin, onRemove }: Props) {
+export default function HistoryTimeline({ conversations, todos, dirs, onAttach, onTogglePin, onRemove, onRestoreTodo, onRemoveTodo }: Props) {
   const [open, setOpen] = useState(false);
   const [visibleCount, setVisibleCount] = useState(PAGE);
   // Peers selected in the filter. Empty = no filter, i.e. show every peer.
@@ -79,16 +89,28 @@ export default function HistoryTimeline({ conversations, dirs, onAttach, onToggl
     return m;
   }, [dirs]);
 
-  // Newest-first list of everything that's been marked done (unpinned).
-  const history = useMemo(
-    () => conversations.filter((c) => !c.pinned).sort((a, b) => doneTs(b) - doneTs(a)),
-    [conversations],
-  );
+  // Newest-first list of everything that's been marked done: unpinned
+  // conversations merged with done tasks, on one timeline.
+  const history = useMemo<HistoryEntry[]>(() => {
+    const entries: HistoryEntry[] = [
+      ...conversations
+        .filter((c) => !c.pinned)
+        .map((c): HistoryEntry => ({ kind: 'conversation', ts: doneTs(c), directoryId: c.directoryId, conv: c })),
+      ...todos
+        .filter((t) => t.done)
+        .map((t): HistoryEntry => {
+          const iso = t.doneAt || t.createdAt;
+          const ts = new Date(iso).getTime();
+          return { kind: 'todo', ts: Number.isNaN(ts) ? 0 : ts, directoryId: t.directoryId, todo: t };
+        }),
+    ];
+    return entries.sort((a, b) => b.ts - a.ts);
+  }, [conversations, todos]);
 
   // How many history entries each peer (keyed by directoryId) contributes.
   const countByDir = useMemo(() => {
     const m = new Map<string, number>();
-    for (const c of history) m.set(c.directoryId, (m.get(c.directoryId) ?? 0) + 1);
+    for (const e of history) m.set(e.directoryId, (m.get(e.directoryId) ?? 0) + 1);
     return m;
   }, [history]);
 
@@ -108,7 +130,7 @@ export default function HistoryTimeline({ conversations, dirs, onAttach, onToggl
 
   // History narrowed to the selected peers. An empty selection means "all".
   const filtered = useMemo(
-    () => (selectedDirIds.size === 0 ? history : history.filter((c) => selectedDirIds.has(c.directoryId))),
+    () => (selectedDirIds.size === 0 ? history : history.filter((e) => selectedDirIds.has(e.directoryId))),
     [history, selectedDirIds],
   );
 
@@ -217,7 +239,7 @@ export default function HistoryTimeline({ conversations, dirs, onAttach, onToggl
         >
           {history.length === 0 ? (
             <div className="px-4 py-8 text-center text-sm text-muted">
-              Nothing here yet. Conversations you mark done move into history.
+              Nothing here yet. Conversations and tasks you mark done move into history.
             </div>
           ) : filtered.length === 0 ? (
             <div className="px-4 py-8 text-center text-sm text-muted">
@@ -225,19 +247,67 @@ export default function HistoryTimeline({ conversations, dirs, onAttach, onToggl
             </div>
           ) : (
             <>
-              {visible.map((c) => {
-                const ts = doneTs(c);
+              {visible.map((e) => {
+                const ts = e.ts;
                 const bucket = bucketOf(ts, now);
                 const showHeader = bucket !== lastBucket;
                 lastBucket = bucket;
-                const dirName = dirNameById.get(c.directoryId);
-                return (
-                  <div key={c.id}>
-                    {showHeader && (
-                      <div className="sticky top-0 z-10 px-4 py-1.5 text-[10px] uppercase tracking-wider text-subtle bg-panel border-b border-border">
-                        {bucket}
+                const dirName = dirNameById.get(e.directoryId);
+                const header = showHeader && (
+                  <div className="sticky top-0 z-10 px-4 py-1.5 text-[10px] uppercase tracking-wider text-subtle bg-panel border-b border-border">
+                    {bucket}
+                  </div>
+                );
+                if (e.kind === 'todo') {
+                  const t = e.todo;
+                  return (
+                    <div key={`todo:${t.id}`}>
+                      {header}
+                      <div className="group grid grid-cols-[auto_auto_minmax(0,1fr)_auto] items-start gap-3 px-4 py-2.5 border-b border-border hover:bg-panel2">
+                        {/* Checked square where conversations show their status
+                            dot — same marker as in the pinned list. */}
+                        <span className="inline-flex items-center justify-center w-2.5 h-2.5 rounded-[3px] border border-ok/70 text-ok mt-1.5" aria-hidden>
+                          <svg width="7" height="7" viewBox="0 0 16 16" fill="currentColor"><path d="M6.5 11.207L3.146 7.854l.708-.708L6.5 9.793l5.646-5.647.708.708L6.5 11.207z"/></svg>
+                        </span>
+                        <div className="w-24 shrink-0 min-w-0">
+                          {dirName && (
+                            <div className="truncate text-[10px] uppercase tracking-wider text-subtle">
+                              {dirName}
+                            </div>
+                          )}
+                          <div className="text-[11px] text-muted tabular-nums mt-0.5">
+                            {timeOfDay(ts)}
+                          </div>
+                        </div>
+                        <div className="min-w-0">
+                          <div className="truncate text-sm font-medium text-text">
+                            {t.text || <span className="text-muted italic">untitled</span>}
+                          </div>
+                          <div className="truncate text-xs text-muted mt-0.5 italic">task</div>
+                        </div>
+                        <div className="flex items-center gap-1">
+                          <button
+                            onClick={() => onRestoreTodo(t)}
+                            className="text-xs px-2 py-1 rounded text-muted hover:text-accent hover:bg-panel flex items-center gap-1"
+                            title="Restore to the pinned list (marks it not done)"
+                          >
+                            <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M8 3a5 5 0 100 10 5 5 0 000-10zM2 8a6 6 0 1112 0A6 6 0 012 8zm7-3v3h2v1H8V5h1z" /></svg>
+                            Restore
+                          </button>
+                          <button
+                            onClick={() => onRemoveTodo(t)}
+                            className="text-xs px-2 py-1 rounded text-muted hover:text-err hover:bg-panel"
+                            title="Remove forever"
+                          >✕</button>
+                        </div>
                       </div>
-                    )}
+                    </div>
+                  );
+                }
+                const c = e.conv;
+                return (
+                  <div key={`conv:${c.id}`}>
+                    {header}
                     <div className="group grid grid-cols-[auto_auto_minmax(0,1fr)_auto] items-start gap-3 px-4 py-2.5 border-b border-border hover:bg-panel2">
                       <span className={`inline-block w-2 h-2 rounded-full mt-1.5 ${statusDotClass(c)}`} />
                       <div className="w-24 shrink-0 min-w-0">

@@ -17,7 +17,6 @@ import * as path from 'path';
 // not throwing across the native boundary.
 
 let installed = false;
-let stream: fs.WriteStream | null = null;
 let logFilePath = '';
 
 function resolveLogDir(): string {
@@ -53,11 +52,20 @@ function fmt(args: unknown[]): string {
 }
 
 function writeLine(level: string, args: unknown[]): void {
-  if (!stream) return;
+  if (!logFilePath) return;
   try {
-    stream.write(`${new Date().toISOString()} [${level}] ${fmt(args)}\n`);
+    // Synchronous append — NOT an async WriteStream. The stream buffered writes
+    // and silently dropped the last lines when the process exited fast (a quit,
+    // a signal-driven teardown, a force-exit) — which is exactly when the
+    // before-quit / [signal] / [fatal] / [stall] lines matter most. (Observed:
+    // a clean quit whose `before-quit` never reached disk, making a normal
+    // restart look like a traceless crash.) appendFileSync guarantees the line
+    // is on disk before we return, so the log can be trusted to explain an exit.
+    // Volume here is control-plane only (a few lines/sec), so the per-call cost
+    // is irrelevant.
+    fs.appendFileSync(logFilePath, `${new Date().toISOString()} [${level}] ${fmt(args)}\n`);
   } catch {
-    /* a broken log stream must never take down the app */
+    /* a broken log file must never take down the app */
   }
 }
 
@@ -74,11 +82,6 @@ export function installCrashLogging(): void {
   const dir = resolveLogDir();
   if (dir) {
     logFilePath = path.join(dir, 'main.log');
-    try {
-      stream = fs.createWriteStream(logFilePath, { flags: 'a' });
-    } catch {
-      stream = null;
-    }
   }
 
   // Mirror console.* to the file while preserving the original terminal output.
@@ -119,4 +122,52 @@ export function installCrashLogging(): void {
   app.on('child-process-gone', (_e, details) => {
     console.error('[agentsflow][fatal] child-process-gone', details);
   });
+
+  // ---------- Main-thread stall detector ----------
+  // The failure mode that left NO trace at all (no .ips, no JS error): the main
+  // process froze for ~43s — UI unresponsive — and was force-quit. A blocked
+  // event loop can't log *while* it's blocked, but it CAN log once it recovers:
+  // a fixed-interval timer that fires late by more than the threshold means the
+  // loop was wedged for that long. This is the single most useful breadcrumb for
+  // diagnosing a freeze-then-force-quit after the fact. (If the loop never
+  // recovers and the process is killed, the absence of this line — combined with
+  // the lifecycle/signal lines below — still narrows the cause.)
+  const LOOP_TICK_MS = 2000;
+  const LOOP_STALL_THRESHOLD_MS = 4000;
+  let lastTick = Date.now();
+  const loopMon = setInterval(() => {
+    const now = Date.now();
+    const stall = now - lastTick - LOOP_TICK_MS;
+    if (stall > LOOP_STALL_THRESHOLD_MS) {
+      console.error(`[agentsflow][stall] main event loop blocked for ~${Math.round(stall)}ms — the UI was frozen`);
+    }
+    lastTick = now;
+  }, LOOP_TICK_MS);
+  loopMon.unref?.();
+
+  // ---------- Termination attribution ----------
+  // A plain Cmd+Q and an external SIGKILL both leave the log silent today, so a
+  // "crash" report can't be classified after the fact. Log the app lifecycle and
+  // catchable signals so the NEXT incident is attributable: a clean quit shows
+  // `before-quit`/`quit`; a `npm run dev` / Ctrl+C teardown shows the signal;
+  // and a hard SIGKILL/jetsam shows none of these (→ look for an .ips, then OS
+  // memory pressure). SIGKILL can't be caught — its signature is this silence.
+  app.on('before-quit', () => console.log('[agentsflow][lifecycle] before-quit'));
+  app.on('will-quit', () => console.log('[agentsflow][lifecycle] will-quit'));
+  app.on('quit', (_e, code) => console.log(`[agentsflow][lifecycle] quit code=${code}`));
+
+  for (const sig of ['SIGTERM', 'SIGINT', 'SIGHUP'] as const) {
+    process.on(sig, () => {
+      // Installing a handler suppresses Node's default terminate-on-signal, so we
+      // must exit ourselves. Run the app's normal teardown (before-quit → quit),
+      // with a hard backstop in case quit can't proceed (e.g. loop still wedged).
+      console.error(`[agentsflow][signal] received ${sig} — shutting down`);
+      try {
+        app.quit();
+      } catch {
+        /* ignore */
+      }
+      setTimeout(() => process.exit(0), 1500).unref?.();
+    });
+  }
 }

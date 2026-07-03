@@ -3,6 +3,7 @@ import { useRouter } from 'next/router';
 import PinnedRow from '../components/PinnedRow';
 import DelegatedChildRow from '../components/DelegatedChildRow';
 import DividerRow from '../components/DividerRow';
+import TodoRow from '../components/TodoRow';
 import DirectoryCard from '../components/DirectoryCard';
 import SpawnBar from '../components/SpawnBar';
 import HistoryModal from '../components/HistoryModal';
@@ -12,11 +13,12 @@ import McpModal from '../components/McpModal';
 import StatsView from '../components/StatsView';
 import { api } from '../lib/ipc';
 import { useUIState } from '../lib/ui-state';
-import { Conversation, PinnedDivider, PinnedItemRef, TrackedDirectory } from '../../shared/types';
+import { Conversation, PinnedDivider, PinnedItemRef, PinnedTodo, TrackedDirectory } from '../../shared/types';
 
 type PinnedItem =
   | { kind: 'conversation'; id: string; ref: PinnedItemRef; conv: Conversation }
-  | { kind: 'divider'; id: string; ref: PinnedItemRef; divider: PinnedDivider };
+  | { kind: 'divider'; id: string; ref: PinnedItemRef; divider: PinnedDivider }
+  | { kind: 'todo'; id: string; ref: PinnedItemRef; todo: PinnedTodo };
 
 function refKey(r: PinnedItemRef): string {
   return `${r.kind}:${r.id}`;
@@ -27,6 +29,7 @@ export default function Home() {
   const [dirs, setDirs] = useState<TrackedDirectory[]>([]);
   const [convs, setConvs] = useState<Conversation[]>([]);
   const [dividers, setDividers] = useState<PinnedDivider[]>([]);
+  const [todos, setTodos] = useState<PinnedTodo[]>([]);
   const [pinnedOrder, setPinnedOrder] = useState<PinnedItemRef[]>([]);
   const [selectedDirId, setSelectedDirId] = useUIState('selectedDirId');
   const [focusedIdx, setFocusedIdx] = useState<number>(-1);
@@ -41,11 +44,14 @@ export default function Home() {
   const [view, setView] = useUIState('view');
   const [menuOpen, setMenuOpen] = useState(false);
   const [pendingRenameDividerId, setPendingRenameDividerId] = useState<string | null>(null);
+  // A freshly added task opens its inline editor as soon as its row lands.
+  const [pendingEditTodoId, setPendingEditTodoId] = useState<string | null>(null);
   const awaitingNewConvRef = useRef<Set<string> | null>(null);
-  // After a task is finished its row vanishes; this records which neighbour to
+  // After a row is finished it vanishes; this records which neighbour to
   // re-focus once the list has actually dropped the finished row, so focus
-  // never gets parked on a separator. { doneId, targetId } — see markDone.
-  const pendingDoneRef = useRef<{ doneId: string; targetId: string } | null>(null);
+  // never gets parked on a separator. Keys are refKey() strings so the same
+  // mechanism serves conversations and tasks — see markDone.
+  const pendingDoneRef = useRef<{ doneKey: string; targetKey: string } | null>(null);
   const [pendingFocusConvId, setPendingFocusConvId] = useState<string | null>(null);
   const [dragKey, setDragKey] = useState<string | null>(null);
   const [dropTargetIdx, setDropTargetIdx] = useState<number | null>(null);
@@ -55,15 +61,20 @@ export default function Home() {
   const [justAddedConvId, setJustAddedConvId] = useState<string | null>(null);
 
   const refreshAll = async () => {
-    const [d, c, dv, po] = await Promise.all([
+    // The todos calls are optional-chained: in dev the renderer hot-reloads
+    // ahead of the Electron main, so a not-yet-restarted preload may predate
+    // the todos API — degrade to "no tasks" instead of blanking the page.
+    const [d, c, dv, td, po] = await Promise.all([
       api().listDirectories(),
       api().listConversations(),
       api().listDividers(),
+      api().listTodos?.() ?? Promise.resolve([]),
       api().listPinnedOrder(),
     ]);
     setDirs(d);
     setConvs(c);
     setDividers(dv);
+    setTodos(td);
     setPinnedOrder(po);
   };
 
@@ -72,8 +83,9 @@ export default function Home() {
   useEffect(() => {
     const offC = api().onConversationsUpdated((next) => setConvs(next));
     const offD = api().onDividersUpdated((next) => setDividers(next));
+    const offT = api().onTodosUpdated?.((next) => setTodos(next)) ?? (() => undefined);
     const offO = api().onPinnedOrderUpdated((next) => setPinnedOrder(next));
-    return () => { offC(); offD(); offO(); };
+    return () => { offC(); offD(); offT(); offO(); };
   }, []);
 
   const selectedDir = useMemo(() => dirs.find((d) => d.id === selectedDirId) ?? null, [dirs, selectedDirId]);
@@ -122,9 +134,18 @@ export default function Home() {
     return map;
   }, [convs]);
 
+  // Peer display names for rows that only carry a directoryId (tasks). Falls
+  // back to the raw id-less placeholder when the peer is no longer tracked.
+  const dirNameById = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const d of dirs) m.set(d.id, d.displayName);
+    return m;
+  }, [dirs]);
+
   const pinnedItems = useMemo<PinnedItem[]>(() => {
     const convById = new Map(convs.filter((c) => c.pinned).map((c) => [c.id, c]));
     const divById = new Map(dividers.map((d) => [d.id, d]));
+    const todoById = new Map(todos.filter((t) => !t.done).map((t) => [t.id, t]));
     const out: PinnedItem[] = [];
     const used = new Set<string>();
     for (const ref of pinnedOrder) {
@@ -133,6 +154,9 @@ export default function Home() {
       if (ref.kind === 'conversation') {
         const c = convById.get(ref.id);
         if (c) { out.push({ kind: 'conversation', id: c.id, ref, conv: c }); used.add(key); }
+      } else if (ref.kind === 'todo') {
+        const t = todoById.get(ref.id);
+        if (t) { out.push({ kind: 'todo', id: t.id, ref, todo: t }); used.add(key); }
       } else {
         const d = divById.get(ref.id);
         if (d) { out.push({ kind: 'divider', id: d.id, ref, divider: d }); used.add(key); }
@@ -144,8 +168,15 @@ export default function Home() {
         out.push({ kind: 'conversation', id: c.id, ref: { kind: 'conversation', id: c.id }, conv: c });
       }
     }
+    // Same defensive append for active tasks (covers the tick between the
+    // todos:updated and pinnedOrder:updated broadcasts after adding one).
+    for (const t of todoById.values()) {
+      if (!used.has(`todo:${t.id}`)) {
+        out.push({ kind: 'todo', id: t.id, ref: { kind: 'todo', id: t.id }, todo: t });
+      }
+    }
     return out;
-  }, [convs, dividers, pinnedOrder]);
+  }, [convs, dividers, todos, pinnedOrder]);
 
   // Flat list of keyboard-selectable rows: each pinned item, with its delegated
   // peers interleaved right after their parent. Lets ⌘+↑/↓ step into sub-peers.
@@ -249,6 +280,9 @@ export default function Home() {
             const item = pinnedItems[focusedIdx];
             if (item.kind === 'conversation' && item.conv.sessionId) {
               router.push({ pathname: '/session', query: { id: item.id } });
+            } else if (item.kind === 'todo') {
+              // Nothing to open — a task has no session; edit it instead.
+              setPendingEditTodoId(item.id);
             }
           }
           return;
@@ -337,14 +371,14 @@ export default function Home() {
     }
   }, [pendingFocusConvId, pinnedItems, pinnedOrder]);
 
-  // Re-aim focus after a task is finished. We wait until the finished row has
+  // Re-aim focus after a row is finished. We wait until the finished row has
   // actually left pinnedItems so the target's index is resolved against the
   // post-removal list (never a stale one), then land on the chosen neighbour.
   useEffect(() => {
     const pending = pendingDoneRef.current;
     if (!pending) return;
-    if (pinnedItems.some((it) => it.kind === 'conversation' && it.id === pending.doneId)) return;
-    const idx = pinnedItems.findIndex((it) => it.kind === 'conversation' && it.id === pending.targetId);
+    if (pinnedItems.some((it) => refKey(it.ref) === pending.doneKey)) return;
+    const idx = pinnedItems.findIndex((it) => refKey(it.ref) === pending.targetKey);
     pendingDoneRef.current = null;
     if (idx >= 0) { setFocusedIdx(idx); setSelectedChildId(null); }
   }, [pinnedItems]);
@@ -367,25 +401,31 @@ export default function Home() {
     router.push({ pathname: '/session', query: { id: c.id } });
   };
 
-  // Finish a task: unpin its conversation and move focus to a sensible
-  // neighbour. We prefer the nearest real conversation BEFORE the finished one
-  // (the user's "step back up the list"), then fall back to the nearest one
-  // AFTER it. Separators are skipped on both passes, so finishing the last item
-  // in a separator-bounded group lands focus on the previous item, not the
-  // separator. Only when nothing else remains does focus fall back (via the
-  // bounds check) to whatever's left.
+  // Finish a row — unpin its conversation or mark its task done — and move
+  // focus to a sensible neighbour. We prefer the nearest real row BEFORE the
+  // finished one (the user's "step back up the list"), then fall back to the
+  // nearest one AFTER it. Separators are skipped on both passes, so finishing
+  // the last item in a separator-bounded group lands focus on the previous
+  // item, not the separator. Only when nothing else remains does focus fall
+  // back (via the bounds check) to whatever's left.
   const markDone = (idx: number) => {
     const item = pinnedItems[idx];
-    if (!item || item.kind !== 'conversation') return;
+    if (!item || item.kind === 'divider') return;
     let target: PinnedItem | undefined;
     for (let j = idx - 1; j >= 0 && !target; j--) {
-      if (pinnedItems[j].kind === 'conversation') target = pinnedItems[j];
+      if (pinnedItems[j].kind !== 'divider') target = pinnedItems[j];
     }
     for (let j = idx + 1; j < pinnedItems.length && !target; j++) {
-      if (pinnedItems[j].kind === 'conversation') target = pinnedItems[j];
+      if (pinnedItems[j].kind !== 'divider') target = pinnedItems[j];
     }
-    pendingDoneRef.current = target ? { doneId: item.id, targetId: target.id } : null;
-    api().setConversationPinned(item.id, false).then(refreshAll);
+    pendingDoneRef.current = target
+      ? { doneKey: refKey(item.ref), targetKey: refKey(target.ref) }
+      : null;
+    if (item.kind === 'conversation') {
+      api().setConversationPinned(item.id, false).then(refreshAll);
+    } else {
+      api().setTodoDone(item.id, true).then(refreshAll);
+    }
   };
 
   const handleAddDivider = async () => {
@@ -403,6 +443,25 @@ export default function Home() {
     const idx = pinnedItems.findIndex((it) => it.kind === 'divider' && it.id === pendingRenameDividerId);
     if (idx >= 0) setFocusedIdx(idx);
   }, [pendingRenameDividerId, pinnedItems]);
+
+  // Add a task scoped to the peer currently selected in the spawn bar. It
+  // lands right below the focused row (staying in its section), else at the
+  // end of the first section — same placement as a fresh spawn.
+  const handleAddTodo = async () => {
+    if (!selectedDir) return;
+    const afterRef = focusedIdx >= 0 && focusedIdx < pinnedItems.length
+      ? pinnedItems[focusedIdx].ref
+      : null;
+    const todo = await api().addTodo(selectedDir.id, afterRef);
+    setPendingEditTodoId(todo.id);
+  };
+
+  // Focus the newly created task once it lands, so its editor opens in place.
+  useEffect(() => {
+    if (!pendingEditTodoId) return;
+    const idx = pinnedItems.findIndex((it) => it.kind === 'todo' && it.id === pendingEditTodoId);
+    if (idx >= 0) { setFocusedIdx(idx); setSelectedChildId(null); }
+  }, [pendingEditTodoId, pinnedItems]);
 
   const handleDragStart = (key: string) => (e: React.DragEvent) => {
     setDragKey(key);
@@ -568,11 +627,21 @@ export default function Home() {
         <section className="px-4 pt-4">
           <div className="flex items-center justify-between mb-2">
             <h2 className="text-xs uppercase tracking-wider text-muted">Pinned conversations</h2>
-            <button
-              onClick={handleAddDivider}
-              className="text-[11px] text-muted hover:text-accent hover:border-accent border border-border bg-panel hover:bg-panel2 rounded px-2 py-0.5"
-              title="Insert a labeled separator above the focused row"
-            >+ Add separator</button>
+            <div className="flex items-center gap-1.5">
+              <button
+                onClick={handleAddTodo}
+                disabled={!selectedDir}
+                className="text-[11px] text-muted hover:text-accent hover:border-accent border border-border bg-panel hover:bg-panel2 rounded px-2 py-0.5 disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:text-muted disabled:hover:border-border disabled:hover:bg-panel"
+                title={selectedDir
+                  ? `Add a task for ${selectedDir.displayName} below the focused row`
+                  : 'Select a peer below first — tasks are scoped to a peer'}
+              >+ Add task</button>
+              <button
+                onClick={handleAddDivider}
+                className="text-[11px] text-muted hover:text-accent hover:border-accent border border-border bg-panel hover:bg-panel2 rounded px-2 py-0.5"
+                title="Insert a labeled separator above the focused row"
+              >+ Add separator</button>
+            </div>
           </div>
           <div
             className="rounded-lg border border-border bg-panel/50 overflow-hidden"
@@ -643,6 +712,23 @@ export default function Home() {
                           </div>
                         )}
                       </div>
+                    ) : item.kind === 'todo' ? (
+                      <TodoRow
+                        todo={item.todo}
+                        peerName={dirNameById.get(item.todo.directoryId) ?? '?'}
+                        focused={focused && !selectedChildId}
+                        suppressHover={keyboardNavActive}
+                        startInEdit={pendingEditTodoId === item.id}
+                        onEditHandled={() => setPendingEditTodoId(null)}
+                        onFocus={() => { setFocusedIdx(i); setSelectedChildId(null); }}
+                        onSaveText={(t) => api().updateTodoText(item.id, t).then(refreshAll)}
+                        onToggleDone={() => markDone(i)}
+                        onRemove={() => api().removeTodo(item.id).then(refreshAll)}
+                        onEditingChange={(ed) => setEditingKey((cur) => (ed ? key : cur === key ? null : cur))}
+                        draggable={editingKey !== key}
+                        onDragStart={handleDragStart(key)}
+                        onDragEnd={handleDragEnd}
+                      />
                     ) : (
                       <DividerRow
                         divider={item.divider}
@@ -668,12 +754,18 @@ export default function Home() {
 
         <HistoryTimeline
           conversations={convs}
+          todos={todos}
           dirs={sortedDirs}
           onAttach={(c) => attach(c)}
           onTogglePin={(c) => api().setConversationPinned(c.id, !c.pinned).then(refreshAll)}
           onRemove={(c) => {
             if (!window.confirm(`Stop and remove "${c.title || 'this conversation'}" permanently?`)) return;
             api().removeAgent(c.id).then(refreshAll);
+          }}
+          onRestoreTodo={(t) => api().setTodoDone(t.id, false).then(refreshAll)}
+          onRemoveTodo={(t) => {
+            if (!window.confirm(`Remove the task "${t.text || 'untitled'}" permanently?`)) return;
+            api().removeTodo(t.id).then(refreshAll);
           }}
         />
 

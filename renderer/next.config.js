@@ -22,4 +22,11 @@ module.exports = {
   // Pin assets to the absolute electron-serve origin so they resolve from any route.
   assetPrefix: isExport ? 'app://-' : undefined,
   reactStrictMode: true,
+  // The renderer imports runtime code from ../shared (e.g. fork-title.ts).
+  // Next only transpiles TypeScript inside its own root by default, so a value
+  // import from outside it fails with "Module parse failed: Unexpected token"
+  // — type-only imports (shared/types.ts) never hit this because they're
+  // erased before webpack. externalDir extends the SWC transform to files
+  // outside the renderer directory.
+  experimental: { externalDir: true },
 };

@@ -1,4 +1,5 @@
-import type { AgentsFlowApi, Conversation, PinnedDivider, PinnedItemRef, TrackedDirectory, SpawnRequest, GitStatusResult, FileEntry, SearchOptions, SearchResult, SearchMatchLine } from '../../shared/types';
+import type { AgentsFlowApi, Conversation, PinnedDivider, PinnedItemRef, PinnedTodo, TrackedDirectory, SpawnRequest, GitStatusResult, FileEntry, SearchOptions, SearchResult, SearchMatchLine } from '../../shared/types';
+import { forkTitle } from '../../shared/fork-title';
 
 const STORE_KEY = 'agentsflow:mock:v3';
 
@@ -6,6 +7,7 @@ interface MockShape {
   directories: TrackedDirectory[];
   conversations: Conversation[];
   dividers: PinnedDivider[];
+  todos: PinnedTodo[];
   pinnedOrder: PinnedItemRef[];
 }
 
@@ -22,6 +24,7 @@ function load(): MockShape {
         directories: parsed.directories ?? [],
         conversations: parsed.conversations ?? [],
         dividers: parsed.dividers ?? [],
+        todos: parsed.todos ?? [],
         pinnedOrder: parsed.pinnedOrder ?? [],
       };
     }
@@ -34,6 +37,7 @@ function load(): MockShape {
     ],
     conversations: [],
     dividers: [],
+    todos: [],
     pinnedOrder: [],
   };
 }
@@ -45,6 +49,7 @@ function save(state: MockShape) {
 const listeners = {
   convs: new Set<(c: Conversation[]) => void>(),
   dividers: new Set<(d: PinnedDivider[]) => void>(),
+  todos: new Set<(t: PinnedTodo[]) => void>(),
   pinnedOrder: new Set<(o: PinnedItemRef[]) => void>(),
   termData: new Set<(id: string, data: string) => void>(),
   termExit: new Set<(id: string) => void>(),
@@ -56,6 +61,9 @@ function fire(state: MockShape) {
 function fireDividers(state: MockShape) {
   listeners.dividers.forEach((cb) => cb(state.dividers));
 }
+function fireTodos(state: MockShape) {
+  listeners.todos.forEach((cb) => cb(state.todos));
+}
 function fireOrder(state: MockShape) {
   listeners.pinnedOrder.forEach((cb) => cb(state.pinnedOrder));
 }
@@ -66,6 +74,22 @@ function dropRef(state: MockShape, ref: PinnedItemRef) {
 function prependRef(state: MockShape, ref: PinnedItemRef) {
   dropRef(state, ref);
   state.pinnedOrder = [ref, ...state.pinnedOrder];
+}
+// Mirrors store.ts / pinned-order.ts: a fork lands directly below its source,
+// staying in the source's section. Falls back to end-of-first-section when the
+// anchor isn't in the list.
+function insertRefAfter(state: MockShape, ref: PinnedItemRef, anchor: PinnedItemRef) {
+  dropRef(state, ref);
+  const anchorIdx = state.pinnedOrder.findIndex((r) => r.kind === anchor.kind && r.id === anchor.id);
+  if (anchorIdx < 0) {
+    insertRefAtEndOfFirstSection(state, ref);
+    return;
+  }
+  state.pinnedOrder = [
+    ...state.pinnedOrder.slice(0, anchorIdx + 1),
+    ref,
+    ...state.pinnedOrder.slice(anchorIdx + 1),
+  ];
 }
 // Mirrors store.ts / pinned-order.ts: a freshly-spawned conv lands at the bottom
 // of the first section — the group headed by the first divider, just before the
@@ -214,6 +238,30 @@ export function createMockApi(): AgentsFlowApi {
 
       return { conversationId: id, sessionId, daemonShort: conv.daemonShort };
     },
+    forkConversation: async (conversationId: string) => {
+      const src = state.conversations.find((c) => c.id === conversationId);
+      if (!src) throw new Error('conversation not found');
+      const id = uuid();
+      const fork: Conversation = {
+        ...src,
+        id,
+        sessionId: uuid() + '-' + uuid(),
+        daemonShort: '',
+        title: forkTitle(src.title || src.description),
+        description: 'forked copy — open the chat to continue',
+        pinned: true,
+        state: 'idle',
+        status: 'idle',
+        createdAt: new Date().toISOString(),
+        forkFromSessionId: src.sessionId,
+      };
+      state.conversations = [fork, ...state.conversations];
+      insertRefAfter(state, { kind: 'conversation', id }, { kind: 'conversation', id: src.id });
+      save(state);
+      fire(state);
+      fireOrder(state);
+      return { conversationId: id };
+    },
     updateConversationTitle: async (id, title) => {
       state.conversations = state.conversations.map((c) => (c.id === id ? { ...c, title } : c));
       save(state);
@@ -294,10 +342,56 @@ export function createMockApi(): AgentsFlowApi {
       fireDividers(state);
       fireOrder(state);
     },
+    listTodos: async () => state.todos,
+    addTodo: async (directoryId, afterRef) => {
+      const todo: PinnedTodo = {
+        id: uuid(),
+        directoryId,
+        text: '',
+        createdAt: new Date().toISOString(),
+        done: false,
+      };
+      state.todos = [todo, ...state.todos];
+      const ref: PinnedItemRef = { kind: 'todo', id: todo.id };
+      if (afterRef) insertRefAfter(state, ref, afterRef);
+      else insertRefAtEndOfFirstSection(state, ref);
+      save(state);
+      fireTodos(state);
+      fireOrder(state);
+      return todo;
+    },
+    updateTodoText: async (id, text) => {
+      state.todos = state.todos.map((t) => (t.id === id ? { ...t, text } : t));
+      save(state);
+      fireTodos(state);
+    },
+    setTodoDone: async (id, done) => {
+      const prev = state.todos.find((t) => t.id === id);
+      state.todos = state.todos.map((t) =>
+        t.id === id ? { ...t, done, doneAt: done ? new Date().toISOString() : undefined } : t,
+      );
+      if (prev && prev.done !== done) {
+        if (done) dropRef(state, { kind: 'todo', id });
+        else prependRef(state, { kind: 'todo', id });
+      }
+      save(state);
+      fireTodos(state);
+      fireOrder(state);
+    },
+    removeTodo: async (id) => {
+      state.todos = state.todos.filter((t) => t.id !== id);
+      dropRef(state, { kind: 'todo', id });
+      save(state);
+      fireTodos(state);
+      fireOrder(state);
+    },
+    onTodosUpdated: (cb) => { listeners.todos.add(cb); return () => listeners.todos.delete(cb); },
+
     listPinnedOrder: async () => state.pinnedOrder,
     reorderPinned: async (orderedRefs) => {
       const convIds = new Set(state.conversations.filter((c) => c.pinned).map((c) => c.id));
       const divIds = new Set(state.dividers.map((d) => d.id));
+      const todoIds = new Set(state.todos.filter((t) => !t.done).map((t) => t.id));
       const seen = new Set<string>();
       const next: PinnedItemRef[] = [];
       for (const r of orderedRefs) {
@@ -306,6 +400,7 @@ export function createMockApi(): AgentsFlowApi {
         if (seen.has(key)) continue;
         if (r.kind === 'conversation' && convIds.has(r.id)) { next.push(r); seen.add(key); }
         else if (r.kind === 'divider' && divIds.has(r.id)) { next.push(r); seen.add(key); }
+        else if (r.kind === 'todo' && todoIds.has(r.id)) { next.push(r); seen.add(key); }
       }
       state.pinnedOrder = next;
       save(state);

@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer, IpcRendererEvent } from 'electron';
-import type { AgentsFlowApi, Conversation, OpenFileNavPayload, PinnedDivider, PinnedItemRef, SpawnRequest } from '../shared/types';
+import type { AgentsFlowApi, Conversation, OpenFileNavPayload, PinnedDivider, PinnedItemRef, PinnedTodo, SpawnRequest } from '../shared/types';
 
 const api: AgentsFlowApi = {
   listDirectories: () => ipcRenderer.invoke('dirs:list'),
@@ -12,6 +12,7 @@ const api: AgentsFlowApi = {
 
   listConversations: () => ipcRenderer.invoke('convs:list'),
   spawnAgent: (req: SpawnRequest) => ipcRenderer.invoke('convs:spawn', req),
+  forkConversation: (conversationId) => ipcRenderer.invoke('convs:fork', conversationId),
   updateConversationTitle: (id, title) =>
     ipcRenderer.invoke('convs:updateTitle', id, title),
   setConversationPinned: (id, pinned) => ipcRenderer.invoke('convs:setPinned', id, pinned),
@@ -64,6 +65,17 @@ const api: AgentsFlowApi = {
     const listener = (_e: IpcRendererEvent, order: PinnedItemRef[]) => cb(order);
     ipcRenderer.on('pinnedOrder:updated', listener);
     return () => ipcRenderer.removeListener('pinnedOrder:updated', listener);
+  },
+
+  listTodos: () => ipcRenderer.invoke('todos:list'),
+  addTodo: (directoryId, afterRef) => ipcRenderer.invoke('todos:add', directoryId, afterRef),
+  updateTodoText: (id, text) => ipcRenderer.invoke('todos:updateText', id, text),
+  setTodoDone: (id, done) => ipcRenderer.invoke('todos:setDone', id, done),
+  removeTodo: (id) => ipcRenderer.invoke('todos:remove', id),
+  onTodosUpdated: (cb) => {
+    const listener = (_e: IpcRendererEvent, todos: PinnedTodo[]) => cb(todos);
+    ipcRenderer.on('todos:updated', listener);
+    return () => ipcRenderer.removeListener('todos:updated', listener);
   },
 
   gitStatus: (dirPath) => ipcRenderer.invoke('git:status', dirPath),

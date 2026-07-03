@@ -1,12 +1,14 @@
 import { describe, it } from 'node:test';
 import * as assert from 'node:assert/strict';
-import { placePinnedRefAtEndOfFirstSection } from './pinned-order';
+import { placePinnedRefAfter, placePinnedRefAtEndOfFirstSection } from './pinned-order';
+import { forkTitle } from '../shared/fork-title';
 import type { PinnedItemRef } from '../shared/types';
 
 const conv = (id: string): PinnedItemRef => ({ kind: 'conversation', id });
 const div = (id: string): PinnedItemRef => ({ kind: 'divider', id });
+const todo = (id: string): PinnedItemRef => ({ kind: 'todo', id });
 const ids = (order: PinnedItemRef[]): string[] =>
-  order.map((r) => `${r.kind === 'divider' ? 'D' : ''}${r.id}`);
+  order.map((r) => `${r.kind === 'divider' ? 'D' : r.kind === 'todo' ? 'T' : ''}${r.id}`);
 
 describe('placePinnedRefAtEndOfFirstSection', () => {
   it('appends to the very end when there are no dividers', () => {
@@ -66,5 +68,71 @@ describe('placePinnedRefAtEndOfFirstSection', () => {
     const snapshot = ids(order);
     placePinnedRefAtEndOfFirstSection(order, conv('new'));
     assert.deepEqual(ids(order), snapshot);
+  });
+});
+
+describe('placePinnedRefAfter', () => {
+  it('lands directly below the anchor, inside its section', () => {
+    const order = [div('1'), conv('a'), conv('b'), div('2'), conv('c')];
+    const next = placePinnedRefAfter(order, conv('fork'), conv('a'));
+    assert.deepEqual(ids(next), ['D1', 'a', 'fork', 'b', 'D2', 'c']);
+  });
+
+  it('works when the anchor is the last item of the list', () => {
+    const order = [div('1'), conv('a')];
+    const next = placePinnedRefAfter(order, conv('fork'), conv('a'));
+    assert.deepEqual(ids(next), ['D1', 'a', 'fork']);
+  });
+
+  it('moves an existing ref rather than duplicating it', () => {
+    const order = [conv('fork'), div('1'), conv('a'), conv('b')];
+    const next = placePinnedRefAfter(order, conv('fork'), conv('b'));
+    assert.deepEqual(ids(next), ['D1', 'a', 'b', 'fork']);
+    assert.equal(next.filter((r) => r.id === 'fork').length, 1);
+  });
+
+  it('falls back to the end of the first section when the anchor is absent', () => {
+    const order = [div('1'), conv('a'), div('2'), conv('c')];
+    const next = placePinnedRefAfter(order, conv('fork'), conv('ghost'));
+    assert.deepEqual(ids(next), ['D1', 'a', 'fork', 'D2', 'c']);
+  });
+
+  it('does not mutate the input array', () => {
+    const order = [div('1'), conv('a')];
+    const snapshot = ids(order);
+    placePinnedRefAfter(order, conv('fork'), conv('a'));
+    assert.deepEqual(ids(order), snapshot);
+  });
+
+  it('places a todo below its anchor and never collides with a same-id conversation', () => {
+    // Same id under different kinds must be treated as distinct refs.
+    const order = [div('1'), conv('x'), conv('b')];
+    const next = placePinnedRefAfter(order, todo('x'), conv('b'));
+    assert.deepEqual(ids(next), ['D1', 'x', 'b', 'Tx']);
+  });
+
+  it('sections work for todos like for conversations', () => {
+    const order = [div('1'), conv('a'), div('2'), conv('c')];
+    const next = placePinnedRefAtEndOfFirstSection(order, todo('t'));
+    assert.deepEqual(ids(next), ['D1', 'a', 'Tt', 'D2', 'c']);
+  });
+});
+
+describe('forkTitle', () => {
+  it('prefixes a plain title with V2', () => {
+    assert.equal(forkTitle('Fix the parser'), 'V2 · Fix the parser');
+  });
+
+  it('bumps the version on re-fork instead of stacking prefixes', () => {
+    assert.equal(forkTitle('V2 · Fix the parser'), 'V3 · Fix the parser');
+    assert.equal(forkTitle('V9 · Fix the parser'), 'V10 · Fix the parser');
+  });
+
+  it('handles an empty source title', () => {
+    assert.equal(forkTitle(''), 'V2 · forked chat');
+  });
+
+  it('caps the result at 80 chars', () => {
+    assert.ok(forkTitle('x'.repeat(200)).length <= 80);
   });
 });

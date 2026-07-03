@@ -32,6 +32,13 @@ export interface Conversation {
   // UI can nest it under its parent and the root's session view can show a live
   // "a peer is working" banner. Undefined for normal user-spawned conversations.
   delegatedByConversationId?: string;
+  // Set when this conversation is a fork of another session. `sessionId` is
+  // pre-assigned at fork time (passed to the CLI via `--session-id`), but the
+  // transcript only materializes on first attach, which runs
+  // `claude --resume <forkFromSessionId> --fork-session`. The field stays set —
+  // attach routing checks the transcript file on disk to decide whether the
+  // fork still needs to be performed, so a failed fork just retries.
+  forkFromSessionId?: string;
 }
 
 export interface PinnedDivider {
@@ -40,9 +47,27 @@ export interface PinnedDivider {
   createdAt: string;
 }
 
+// A plain task row in the pinned list — scoped to a peer but with no agent
+// session behind it. Lives alongside conversations/dividers in `pinnedOrder`;
+// marking it done removes it from the list and surfaces it in History (the
+// same lifecycle as unpinning a conversation), from where it can be restored.
+export interface PinnedTodo {
+  id: string;
+  // The peer this task belongs to (TrackedDirectory.id).
+  directoryId: string;
+  // Single text field — todos have no title/description split.
+  text: string;
+  createdAt: string;
+  done: boolean;
+  // When it was last marked done; mirrors Conversation.unpinnedAt and drives
+  // the History timeline bucket. Cleared again on undo/restore.
+  doneAt?: string;
+}
+
 export type PinnedItemRef =
   | { kind: 'conversation'; id: string }
-  | { kind: 'divider'; id: string };
+  | { kind: 'divider'; id: string }
+  | { kind: 'todo'; id: string };
 
 // A slash command / skill discoverable under a `.claude` directory. Surfaced
 // in the Spawn bar's autocomplete when the prompt starts with "/".
@@ -139,6 +164,10 @@ export interface AgentsFlowApi {
 
   listConversations: () => Promise<Conversation[]>;
   spawnAgent: (req: SpawnRequest) => Promise<SpawnResult>;
+  // Branches a copy of an existing conversation's session (`--fork-session`):
+  // full history, new session id, independent from the original — the escape
+  // hatch when the original is stuck (e.g. held by a crash-looping bg daemon).
+  forkConversation: (conversationId: string) => Promise<{ conversationId: string }>;
   updateConversationTitle: (id: string, title: string) => Promise<void>;
   setConversationPinned: (id: string, pinned: boolean) => Promise<void>;
   stopAgent: (id: string) => Promise<void>;
@@ -169,6 +198,17 @@ export interface AgentsFlowApi {
   reorderPinned: (orderedRefs: PinnedItemRef[]) => Promise<void>;
   onDividersUpdated: (cb: (dividers: PinnedDivider[]) => void) => () => void;
   onPinnedOrderUpdated: (cb: (order: PinnedItemRef[]) => void) => () => void;
+
+  // Peer-scoped todo rows in the pinned list. `addTodo` inserts after
+  // `afterRef` when given (mirrors addDivider), else at the end of the first
+  // section (mirrors a fresh spawn). `setTodoDone` moves it out of/back into
+  // the pinned list, like un/re-pinning a conversation.
+  listTodos: () => Promise<PinnedTodo[]>;
+  addTodo: (directoryId: string, afterRef: PinnedItemRef | null) => Promise<PinnedTodo>;
+  updateTodoText: (id: string, text: string) => Promise<void>;
+  setTodoDone: (id: string, done: boolean) => Promise<void>;
+  removeTodo: (id: string) => Promise<void>;
+  onTodosUpdated: (cb: (todos: PinnedTodo[]) => void) => () => void;
 
   gitStatus: (dirPath: string) => Promise<GitStatusResult>;
   listFiles: (dirPath: string) => Promise<FileEntry[]>;

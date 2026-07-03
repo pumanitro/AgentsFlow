@@ -42,3 +42,20 @@ export function placePinnedRefAtEndOfFirstSection(
 
   return [...without.slice(0, insertAt), ref, ...without.slice(insertAt)];
 }
+
+/**
+ * Place `ref` immediately AFTER `anchor`, keeping it in the anchor's section —
+ * e.g. a forked chat lands directly below its source. Any pre-existing copy of
+ * `ref` is removed first, so this doubles as a move. When the anchor isn't in
+ * the list, falls back to the end of the first section.
+ */
+export function placePinnedRefAfter(
+  order: PinnedItemRef[],
+  ref: PinnedItemRef,
+  anchor: PinnedItemRef,
+): PinnedItemRef[] {
+  const without = order.filter((r) => !sameRef(r, ref));
+  const anchorIdx = without.findIndex((r) => sameRef(r, anchor));
+  if (anchorIdx < 0) return placePinnedRefAtEndOfFirstSection(order, ref);
+  return [...without.slice(0, anchorIdx + 1), ref, ...without.slice(anchorIdx + 1)];
+}

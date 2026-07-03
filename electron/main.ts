@@ -29,6 +29,7 @@ function resolveIconPath(): string | null {
 const ICON_PATH = resolveIconPath();
 
 import { store } from './store';
+import { forkTitle } from '../shared/fork-title';
 import { computeDisplayName, recomputeAllDisplayNames } from './naming';
 import {
   dispatchBackground,
@@ -48,7 +49,7 @@ import * as fileWatcher from './file-watcher';
 import { gitStatus, listFiles } from './git';
 import { searchInFiles } from './search';
 import { deleteAttachmentFiles, pastedImagesRoot, prunePastedImages, sweepOrphanAttachments, todayDateSlug } from './attachments';
-import { Conversation, FileEntry, PinnedDivider, PinnedItemRef, SlashCommand, SpawnRequest, TrackedDirectory } from '../shared/types';
+import { Conversation, FileEntry, PinnedDivider, PinnedItemRef, PinnedTodo, SlashCommand, SpawnRequest, TrackedDirectory } from '../shared/types';
 
 const isDev = process.env.NODE_ENV === 'development';
 const loadURL = isDev ? null : serve({ directory: path.join(__dirname, '..', '..', '..', 'renderer', 'out') });
@@ -110,6 +111,10 @@ function createWindow() {
     loadURL!(win);
   }
   mainWindow = win;
+  // Renderer-side stalls are observable from the main process even when the
+  // renderer itself is wedged — pure diagnosis signal for a freeze report.
+  win.webContents.on('unresponsive', () => console.error('[agentsflow][stall] renderer unresponsive'));
+  win.webContents.on('responsive', () => console.log('[agentsflow][stall] renderer responsive again'));
   win.on('closed', () => {
     if (mainWindow === win) mainWindow = null;
   });
@@ -183,6 +188,11 @@ function broadcastDividers(): void {
 function broadcastPinnedOrder(): void {
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.webContents.send('pinnedOrder:updated', store.getPinnedOrder());
+  }
+}
+function broadcastTodos(): void {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('todos:updated', store.getTodos());
   }
 }
 
@@ -335,6 +345,45 @@ ipcMain.handle('convs:spawn', async (_e, req: SpawnRequest): Promise<{ conversat
   const prompt = req.prompt.trim();
   if (!prompt) throw new Error('prompt required');
   return spawnConversation({ dir, prompt, attachments: req.attachments, pinned: true, peerAware: true });
+});
+
+// Branch a copy of an existing conversation's session. The fork gets its own
+// conversation entry and a pre-assigned session id; the transcript itself is
+// materialized lazily on the fork's first attach, which runs
+// `claude --resume <source> --fork-session --session-id <new>`. Forking is the
+// escape hatch when the original can neither be attached nor resumed — e.g. a
+// bg daemon stuck in a crash-respawn loop: `--fork-session` branches the
+// transcript without needing the resident session at all.
+ipcMain.handle('convs:fork', async (_e, conversationId: string): Promise<{ conversationId: string }> => {
+  const src = store.getConversations().find((c) => c.id === conversationId);
+  if (!src) throw new Error(`conversation ${conversationId} not found`);
+  if (!src.sessionId) throw new Error('source session has no sessionId yet — nothing to fork');
+  const fork: Conversation = {
+    id: uuid(),
+    sessionId: uuid(),
+    daemonShort: '',
+    sessionName: '',
+    directoryId: src.directoryId,
+    directoryPath: src.directoryPath,
+    displayName: src.displayName,
+    title: forkTitle(src.title || src.description),
+    description: 'forked copy — open the chat to continue',
+    pinned: true,
+    attachments: [],
+    state: 'idle',
+    status: 'idle',
+    intent: src.intent,
+    createdAt: new Date().toISOString(),
+    lastPrompt: src.lastPrompt,
+    forkFromSessionId: src.sessionId,
+  };
+  // The fork lands directly below its source in the pinned list, so versions
+  // of the same task stay visually grouped in their section.
+  store.addConversation(fork, { afterConversationId: src.id });
+  broadcastConversations();
+  broadcastPinnedOrder();
+  console.log('[agentsflow] forked conversation', { from: src.id, fromSession: src.sessionId, to: fork.id, toSession: fork.sessionId });
+  return { conversationId: fork.id };
 });
 
 // ----- Delegation bridge: the MCP server asks main to spawn a tracked peer ----
@@ -593,12 +642,54 @@ ipcMain.handle('dividers:remove', (_e, id: string) => {
   broadcastPinnedOrder();
 });
 
+ipcMain.handle('todos:list', () => store.getTodos());
+
+ipcMain.handle('todos:add', (_e, directoryId: string, afterRef: PinnedItemRef | null): PinnedTodo => {
+  const todo: PinnedTodo = {
+    id: uuid(),
+    directoryId,
+    text: '',
+    createdAt: new Date().toISOString(),
+    done: false,
+  };
+  store.addTodo(todo, afterRef ?? null);
+  broadcastTodos();
+  broadcastPinnedOrder();
+  return todo;
+});
+
+ipcMain.handle('todos:updateText', (_e, id: string, text: string) => {
+  store.updateTodo(id, { text });
+  broadcastTodos();
+});
+
+ipcMain.handle('todos:setDone', (_e, id: string, done: boolean) => {
+  store.updateTodo(id, { done });
+  broadcastTodos();
+  broadcastPinnedOrder();
+});
+
+ipcMain.handle('todos:remove', (_e, id: string) => {
+  store.removeTodo(id);
+  broadcastTodos();
+  broadcastPinnedOrder();
+});
+
 ipcMain.handle('pinned:list', () => store.getPinnedOrder());
 
 ipcMain.handle('pinned:reorder', (_e, orderedRefs: PinnedItemRef[]) => {
   store.setPinnedOrder(Array.isArray(orderedRefs) ? orderedRefs : []);
   broadcastPinnedOrder();
 });
+
+// Absolute path of a session's transcript on disk. Claude Code stores them
+// under ~/.claude/projects/<munged-cwd>/<sessionId>.jsonl, where the cwd is
+// munged by replacing every non-alphanumeric character with '-'
+// (e.g. /Users/x/Desktop/App → -Users-x-Desktop-App).
+function transcriptPath(cwd: string, sessionId: string): string {
+  const munged = cwd.replace(/[^a-zA-Z0-9]/g, '-');
+  return path.join(app.getPath('home'), '.claude', 'projects', munged, `${sessionId}.jsonl`);
+}
 
 ipcMain.handle('term:attach', async (_e, conversationId: string, cols: number, rows: number) => {
   console.log('[agentsflow] term:attach received', { conversationId, cols, rows });
@@ -615,6 +706,29 @@ ipcMain.handle('term:attach', async (_e, conversationId: string, cols: number, r
   if (!win) throw new Error('no window');
   const channelId = uuid();
   const attachId = conv.daemonShort || conv.sessionId.slice(0, 8);
+
+  // An in-app `claude --resume` PTY already runs this session → re-subscribe
+  // to it. This must be checked BEFORE daemon residency: our own resume child
+  // registers itself in `claude agents` as an "interactive" session, so the
+  // residency check below would misroute the re-attach into a `claude attach`
+  // viewer of our own child instead of the PTY we already hold.
+  if (pty.hasResumeSession(conv.sessionId)) {
+    console.log('[agentsflow] re-attaching live in-app resume pty', { sessionId: conv.sessionId, channelId });
+    const replay = await pty.attach({ channelId, sessionId: conv.sessionId, cols, rows, win, mode: 'resume', cwd: conv.directoryPath });
+    return { channelId, replay };
+  }
+
+  // Pending fork: this conversation has a pre-assigned session id whose
+  // transcript doesn't exist yet — materialize it by branching the source
+  // session (`--fork-session` works even when the source is resident or
+  // crash-looping, which a plain `--resume` refuses). Routed by disk state
+  // rather than a one-shot flag, so a fork that failed to boot simply retries
+  // on the next attach; once the transcript exists, normal routing takes over.
+  if (conv.forkFromSessionId && !fs.existsSync(transcriptPath(conv.directoryPath, conv.sessionId))) {
+    console.log('[agentsflow] forking session on first attach', { forkFrom: conv.forkFromSessionId, sessionId: conv.sessionId, channelId });
+    const replay = await pty.attach({ channelId, sessionId: conv.sessionId, cols, rows, win, mode: 'resume', cwd: conv.directoryPath, forkFrom: conv.forkFromSessionId });
+    return { channelId, replay };
+  }
 
   // Decide between `claude attach` (connect to a resident daemon) and
   // `claude --resume` (load a cold transcript from disk and continue it). The
@@ -646,15 +760,15 @@ ipcMain.handle('term:attach', async (_e, conversationId: string, cols: number, r
   let replay = '';
   if (live) {
     console.log('[agentsflow] spawning pty for claude attach', { attachId, sessionId: conv.sessionId, channelId, state: conv.state });
-    replay = pty.attach({ channelId, sessionId: attachId, cols, rows, win, mode: 'attach' });
+    replay = await pty.attach({ channelId, sessionId: attachId, cols, rows, win, mode: 'attach' });
   } else {
     console.log('[agentsflow] using --resume', { sessionId: conv.sessionId, cwd: conv.directoryPath, channelId, live, state: conv.state });
-    replay = pty.attach({ channelId, sessionId: conv.sessionId, cols, rows, win, mode: 'resume', cwd: conv.directoryPath });
+    replay = await pty.attach({ channelId, sessionId: conv.sessionId, cols, rows, win, mode: 'resume', cwd: conv.directoryPath });
   }
   return { channelId, replay };
 });
 
-ipcMain.handle('term:attachShell', (_e, shellId: string, cwd: string, cols: number, rows: number) => {
+ipcMain.handle('term:attachShell', async (_e, shellId: string, cwd: string, cols: number, rows: number) => {
   console.log('[agentsflow] term:attachShell received', { shellId, cwd, cols, rows });
   if (!shellId || typeof shellId !== 'string') throw new Error('shellId required');
   if (!cwd || typeof cwd !== 'string') throw new Error('cwd required');
@@ -662,7 +776,7 @@ ipcMain.handle('term:attachShell', (_e, shellId: string, cwd: string, cols: numb
   const win = mainWindow ?? BrowserWindow.fromWebContents(_e.sender);
   if (!win) throw new Error('no window');
   const channelId = uuid();
-  const replay = pty.attachShell({ shellId, channelId, cwd, cols, rows, win });
+  const replay = await pty.attachShell({ shellId, channelId, cwd, cols, rows, win });
   return { channelId, replay };
 });
 

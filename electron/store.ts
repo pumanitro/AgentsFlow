@@ -2,13 +2,14 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { app } from 'electron';
-import { Conversation, PinnedDivider, PinnedItemRef, TrackedDirectory } from '../shared/types';
-import { placePinnedRefAtEndOfFirstSection } from './pinned-order';
+import { Conversation, PinnedDivider, PinnedItemRef, PinnedTodo, TrackedDirectory } from '../shared/types';
+import { placePinnedRefAfter, placePinnedRefAtEndOfFirstSection } from './pinned-order';
 
 interface StoreShape {
   directories: TrackedDirectory[];
   conversations: Conversation[];
   dividers: PinnedDivider[];
+  todos: PinnedTodo[];
   pinnedOrder: PinnedItemRef[];
 }
 
@@ -94,13 +95,29 @@ function sanitizeDividers(raw: any): PinnedDivider[] {
     }));
 }
 
+function sanitizeTodos(raw: any): PinnedTodo[] {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .filter((t) => t && typeof t.id === 'string')
+    .map((t) => ({
+      id: t.id,
+      directoryId: typeof t.directoryId === 'string' ? t.directoryId : '',
+      text: typeof t.text === 'string' ? t.text : '',
+      createdAt: typeof t.createdAt === 'string' ? t.createdAt : new Date().toISOString(),
+      done: t.done === true,
+      doneAt: typeof t.doneAt === 'string' ? t.doneAt : undefined,
+    }));
+}
+
 function sanitizePinnedOrder(
   raw: any,
   conversations: Conversation[],
   dividers: PinnedDivider[],
+  todos: PinnedTodo[],
 ): PinnedItemRef[] {
   const convIds = new Set(conversations.filter((c) => c.pinned).map((c) => c.id));
   const divIds = new Set(dividers.map((d) => d.id));
+  const todoIds = new Set(todos.filter((t) => !t.done).map((t) => t.id));
   const seen = new Set<string>();
   const out: PinnedItemRef[] = [];
   if (Array.isArray(raw)) {
@@ -113,6 +130,9 @@ function sanitizePinnedOrder(
         seen.add(key);
       } else if (r.kind === 'divider' && divIds.has(r.id)) {
         out.push({ kind: 'divider', id: r.id });
+        seen.add(key);
+      } else if (r.kind === 'todo' && todoIds.has(r.id)) {
+        out.push({ kind: 'todo', id: r.id });
         seen.add(key);
       }
     }
@@ -128,7 +148,12 @@ function sanitizePinnedOrder(
     .filter((d) => !seen.has(`divider:${d.id}`))
     .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
     .map((d) => ({ kind: 'divider' as const, id: d.id }));
-  return [...missingDividers, ...missing, ...out];
+  // Any active todo not in the order goes to the top too, newest first.
+  const missingTodos = todos
+    .filter((t) => !t.done && !seen.has(`todo:${t.id}`))
+    .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+    .map((t) => ({ kind: 'todo' as const, id: t.id }));
+  return [...missingDividers, ...missingTodos, ...missing, ...out];
 }
 
 function load(): StoreShape {
@@ -139,15 +164,17 @@ function load(): StoreShape {
     const parsed = JSON.parse(raw) as Partial<StoreShape>;
     const conversations = (parsed.conversations ?? []).map(migrateConversation);
     const dividers = sanitizeDividers(parsed.dividers);
-    const pinnedOrder = sanitizePinnedOrder(parsed.pinnedOrder, conversations, dividers);
+    const todos = sanitizeTodos(parsed.todos);
+    const pinnedOrder = sanitizePinnedOrder(parsed.pinnedOrder, conversations, dividers, todos);
     cache = {
       directories: parsed.directories ?? [],
       conversations,
       dividers,
+      todos,
       pinnedOrder,
     };
   } catch {
-    cache = { directories: [], conversations: [], dividers: [], pinnedOrder: [] };
+    cache = { directories: [], conversations: [], dividers: [], todos: [], pinnedOrder: [] };
   }
   return cache;
 }
@@ -184,10 +211,17 @@ export const store = {
     load().conversations = convs;
     save();
   },
-  addConversation(c: Conversation): void {
+  addConversation(c: Conversation, opts?: { afterConversationId?: string }): void {
     const s = load();
     s.conversations = [c, ...s.conversations.filter((x) => x.id !== c.id)];
-    if (c.pinned) s.pinnedOrder = placePinnedRefAtEndOfFirstSection(s.pinnedOrder, { kind: 'conversation', id: c.id });
+    if (c.pinned) {
+      const ref: PinnedItemRef = { kind: 'conversation', id: c.id };
+      // Anchored placement (e.g. a fork lands directly below its source, in the
+      // same section); default is the end of the first section.
+      s.pinnedOrder = opts?.afterConversationId
+        ? placePinnedRefAfter(s.pinnedOrder, ref, { kind: 'conversation', id: opts.afterConversationId })
+        : placePinnedRefAtEndOfFirstSection(s.pinnedOrder, ref);
+    }
     save();
   },
   updateConversation(id: string, patch: Partial<Conversation>): Conversation | null {
@@ -275,12 +309,55 @@ export const store = {
     save();
   },
 
+  getTodos(): PinnedTodo[] {
+    return load().todos;
+  },
+  addTodo(todo: PinnedTodo, afterRef: PinnedItemRef | null): PinnedTodo {
+    const s = load();
+    s.todos = [todo, ...s.todos.filter((t) => t.id !== todo.id)];
+    const ref: PinnedItemRef = { kind: 'todo', id: todo.id };
+    if (!todo.done) {
+      s.pinnedOrder = afterRef
+        ? placePinnedRefAfter(s.pinnedOrder, ref, afterRef)
+        : placePinnedRefAtEndOfFirstSection(s.pinnedOrder, ref);
+    }
+    save();
+    return todo;
+  },
+  updateTodo(id: string, patch: Partial<PinnedTodo>): PinnedTodo | null {
+    const s = load();
+    const idx = s.todos.findIndex((t) => t.id === id);
+    if (idx === -1) return null;
+    const prev = s.todos[idx];
+    const next = { ...prev, ...patch };
+    s.todos[idx] = next;
+    if (patch.done !== undefined && patch.done !== prev.done) {
+      if (patch.done) {
+        // Done means finished — stamp the moment (drives the History timeline)
+        // and drop the row from the pinned list, like unpinning a conversation.
+        next.doneAt = new Date().toISOString();
+        dropPinnedRef(s, { kind: 'todo', id });
+      } else {
+        next.doneAt = undefined;
+        prependPinnedRef(s, { kind: 'todo', id });
+      }
+    }
+    save();
+    return next;
+  },
+  removeTodo(id: string): void {
+    const s = load();
+    s.todos = s.todos.filter((t) => t.id !== id);
+    dropPinnedRef(s, { kind: 'todo', id });
+    save();
+  },
+
   getPinnedOrder(): PinnedItemRef[] {
     return load().pinnedOrder;
   },
   setPinnedOrder(order: PinnedItemRef[]): PinnedItemRef[] {
     const s = load();
-    s.pinnedOrder = sanitizePinnedOrder(order, s.conversations, s.dividers);
+    s.pinnedOrder = sanitizePinnedOrder(order, s.conversations, s.dividers, s.todos);
     save();
     return s.pinnedOrder;
   },

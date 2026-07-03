@@ -2,9 +2,12 @@ import { BrowserWindow } from 'electron';
 import * as os from 'os';
 import * as fs from 'fs';
 import * as path from 'path';
-import { execFileSync, spawnSync } from 'child_process';
+import { execFile, execFileSync } from 'child_process';
+import { promisify } from 'util';
 import type { IPty } from 'node-pty';
 import { withUtf8Locale } from './locale';
+
+const execFileAsync = promisify(execFile);
 
 let ptyMod: typeof import('node-pty') | null = null;
 function getPty(): typeof import('node-pty') {
@@ -165,19 +168,28 @@ function systemPtyCount(): number {
 // too. (Caveat: Node uses posix_spawn while forkpty uses fork(), so a pure
 // fork-only ENOMEM could slip past — but the dominant EAGAIN/EMFILE cases, which
 // both share, are exactly the ones that were aborting us.)
+//
+// CRITICAL: this probe is *async* (execFile, not spawnSync). The synchronous
+// version blocked the Electron main thread for the entire fork()+wait of a child
+// — up to the 2s timeout — on EVERY pty spawn. During the agent re-attach burst
+// (several `claude attach` PTYs spawned back-to-back on residency), those
+// synchronous probes stacked up and froze the UI for tens of seconds, ending in
+// a force-quit (a hang with no .ips and no JS trace). Awaiting an async probe
+// keeps the event loop pumping while the throwaway child runs, so the window
+// stays responsive no matter how many spawns are queued.
 const FORK_PROBE_BIN = '/usr/bin/true';
 const FORK_STARVED_ERRNOS = new Set(['EAGAIN', 'EMFILE', 'ENFILE', 'ENOMEM']);
-function forkStarvedErrno(): string | null {
+async function forkStarvedErrno(): Promise<string | null> {
   try {
-    const r = spawnSync(FORK_PROBE_BIN, [], { stdio: 'ignore', timeout: 2000 });
-    const code = (r.error as NodeJS.ErrnoException | undefined)?.code;
-    // ENOENT etc. (probe binary absent, e.g. non-macOS) → can't tell; don't block.
-    return code && FORK_STARVED_ERRNOS.has(code) ? code : null;
-  } catch {
-    // spawnSync only throws on bad arguments, never on spawn failure. An
-    // unexpected throw means the probe itself is broken — fail open so we never
-    // refuse a legitimate spawn on the probe's account.
+    await execFileAsync(FORK_PROBE_BIN, [], { timeout: 2000 });
     return null;
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException | undefined)?.code;
+    // A real fork starvation surfaces as EAGAIN/EMFILE/ENFILE/ENOMEM. Anything
+    // else — ENOENT (probe binary absent, e.g. non-macOS), ETIMEDOUT (the probe
+    // child outran its budget), a non-zero exit — means "can't tell": fail open
+    // so we never refuse a legitimate spawn on the probe's account.
+    return code && FORK_STARVED_ERRNOS.has(code) ? code : null;
   }
 }
 
@@ -189,8 +201,9 @@ function refusePty(win: BrowserWindow, channelId: string, message: string): fals
 
 // True if another PTY may be spawned. On false, emits a graceful error to the
 // channel (mirroring the spawn-failure path) so the renderer surfaces it
-// instead of the app aborting.
-function ensurePtyCapacity(win: BrowserWindow, channelId: string, label: string): boolean {
+// instead of the app aborting. Async because the fork probe must not block the
+// main thread (see forkStarvedErrno) — callers await it before node-pty spawn.
+async function ensurePtyCapacity(win: BrowserWindow, channelId: string, label: string): Promise<boolean> {
   const live = livePtyCount();
   if (live >= MAX_LIVE_PTYS) {
     console.error(`[agentsflow][pty] refusing to spawn ${label}: app PTY ceiling reached`, { live, max: MAX_LIVE_PTYS });
@@ -201,7 +214,7 @@ function ensurePtyCapacity(win: BrowserWindow, channelId: string, label: string)
     console.error(`[agentsflow][pty] refusing to spawn ${label}: system PTY budget nearly exhausted`, { systemPtys: sys, ptmxMax: PTMX_MAX, margin: SYSTEM_PTY_MARGIN });
     return refusePty(win, channelId, `[${label} spawn refused] the system is almost out of pseudo-terminals (${sys}/${PTMX_MAX} in use across all apps). Close some terminals here or in other apps, then retry.`);
   }
-  const starved = forkStarvedErrno();
+  const starved = await forkStarvedErrno();
   if (starved) {
     console.error(`[agentsflow][pty] refusing to spawn ${label}: OS cannot start a new process right now`, { errno: starved });
     return refusePty(win, channelId, `[${label} spawn refused] the system is temporarily out of resources to start a new process (${starved}). This usually clears on its own — close some sessions or other apps, then retry.`);
@@ -248,7 +261,7 @@ function reapIdlePtys(): void {
   }
 }
 
-export function attach(opts: {
+export async function attach(opts: {
   channelId: string;
   sessionId: string;
   cols: number;
@@ -260,7 +273,13 @@ export function attach(opts: {
   // Required when mode==='resume'; ignored otherwise. The directory the
   // session was originally run in, so Claude finds the right .claude project.
   cwd?: string;
-}): string {
+  // Fork mode (resume only): branch a copy of THIS session id instead of
+  // resuming `sessionId` itself. Spawns `--resume <forkFrom> --fork-session
+  // --session-id <sessionId>`, so the new transcript lands at the caller's
+  // pre-assigned `sessionId`. Forking sidesteps the CLI's residency guard —
+  // it works even when `forkFrom` is held by a live (or crash-looping) daemon.
+  forkFrom?: string;
+}): Promise<string> {
   startPtyReaper();
   const mode = opts.mode ?? 'attach';
   if (mode === 'resume') return attachResume(opts);
@@ -268,7 +287,7 @@ export function attach(opts: {
   const args = ['attach', opts.sessionId];
   const cwd = os.homedir();
   console.log('[agentsflow][pty] spawning', { bin: CLAUDE_BIN, args, cols: opts.cols, rows: opts.rows, cwd, mode });
-  if (!ensurePtyCapacity(opts.win, opts.channelId, 'pty')) return '';
+  if (!(await ensurePtyCapacity(opts.win, opts.channelId, 'pty'))) return '';
   let pty: IPty;
   try {
     pty = getPty().spawn(CLAUDE_BIN, args, {
@@ -302,24 +321,27 @@ export function attach(opts: {
 // Persistent, subscriber-based attach for `claude --resume`. Mirrors attachShell:
 // spawn once per sessionId, reuse on re-attach, and return a replay buffer so a
 // re-mounted terminal can reconstruct the screen. Returns '' on spawn failure.
-function attachResume(opts: {
+async function attachResume(opts: {
   channelId: string;
   sessionId: string;
   cols: number;
   rows: number;
   win: BrowserWindow;
   cwd?: string;
-}): string {
+  forkFrom?: string;
+}): Promise<string> {
   let sess = resumeSessions.get(opts.sessionId);
 
   if (!sess) {
     // Match dispatchBackground: resumed sessions don't inherit the original
     // session's permission mode, so re-assert bypassPermissions explicitly or
     // the user lands back in the default/auto mode after detach + reattach.
-    const args = ['--resume', opts.sessionId, '--permission-mode', 'bypassPermissions'];
+    const args = opts.forkFrom
+      ? ['--resume', opts.forkFrom, '--fork-session', '--session-id', opts.sessionId, '--permission-mode', 'bypassPermissions']
+      : ['--resume', opts.sessionId, '--permission-mode', 'bypassPermissions'];
     const cwd = opts.cwd || os.homedir();
     console.log('[agentsflow][pty] spawning resume', { bin: CLAUDE_BIN, args, cwd, cols: opts.cols, rows: opts.rows });
-    if (!ensurePtyCapacity(opts.win, opts.channelId, 'resume')) return '';
+    if (!(await ensurePtyCapacity(opts.win, opts.channelId, 'resume'))) return '';
     let pty: IPty;
     try {
       pty = getPty().spawn(CLAUDE_BIN, args, {
@@ -413,14 +435,14 @@ function appendBuffer(s: { buffer: string[]; bufferBytes: number }, data: string
   }
 }
 
-export function attachShell(opts: {
+export async function attachShell(opts: {
   shellId: string;
   channelId: string;
   cwd: string;
   cols: number;
   rows: number;
   win: BrowserWindow;
-}): string {
+}): Promise<string> {
   startPtyReaper();
   let shell = shells.get(opts.shellId);
 
@@ -432,7 +454,7 @@ export function attachShell(opts: {
       TERM: 'xterm-256color',
     } as Record<string, string>);
     console.log('[agentsflow][pty] spawning shell', { shellId: opts.shellId, shell: shellBin, cwd: opts.cwd, cols: opts.cols, rows: opts.rows });
-    if (!ensurePtyCapacity(opts.win, opts.channelId, 'shell')) return '';
+    if (!(await ensurePtyCapacity(opts.win, opts.channelId, 'shell'))) return '';
     let pty: IPty;
     try {
       pty = getPty().spawn(shellBin, ['-l'], {
@@ -503,6 +525,15 @@ export function attachShell(opts: {
 
 export function listShellIds(): string[] {
   return Array.from(shells.keys());
+}
+
+// True if this app already holds a live `claude --resume` PTY for the session.
+// term:attach checks this FIRST: an in-app resume registers itself in
+// `claude agents` as an "interactive" session, so consulting daemon residency
+// would misroute the re-attach to a `claude attach` viewer of our own child
+// instead of re-subscribing to the PTY we already own.
+export function hasResumeSession(sessionId: string): boolean {
+  return !!sessionId && resumeSessions.has(sessionId);
 }
 
 // True if a Claude session is currently being watched in the app — either an

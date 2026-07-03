@@ -206,6 +206,23 @@ export default function SessionPage() {
     router.push({ pathname: '/', query: id ? { focus: String(id) } : undefined });
   }, [router, id, conv]);
 
+  // Branch an independent copy of this chat (full history, new session) and
+  // open it. The escape hatch when the original session can't be reopened —
+  // e.g. it's held by a stuck background daemon that refuses attach/resume.
+  const [forking, setForking] = useState(false);
+  const forkChat = useCallback(async () => {
+    if (!conv?.sessionId || forking) return;
+    setForking(true);
+    try {
+      const { conversationId } = await api().forkConversation(conv.id);
+      router.push({ pathname: '/session', query: { id: conversationId } });
+    } catch (err) {
+      console.error('[agentsflow] fork failed', err);
+    } finally {
+      setForking(false);
+    }
+  }, [conv, forking, router]);
+
   const backHint = useBackNavKeys(goBack);
 
   if (!id) return null;
@@ -256,6 +273,13 @@ export default function SessionPage() {
             title={openFile ? 'Show file editor' : 'Click a file in the sidebar to open it'}
           >File</button>
         </div>
+        <button
+          onClick={forkChat}
+          disabled={!conv?.sessionId || forking}
+          style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
+          className="shrink-0 px-3 py-1 text-[11px] uppercase tracking-wider rounded-md border bg-panel text-muted border-border hover:text-text hover:bg-panel2 flex items-center gap-1 disabled:opacity-40 disabled:cursor-not-allowed"
+          title="Branch an independent copy of this chat (full history, new session) — use it when the original is stuck"
+        >{forking ? 'Forking…' : '⑂ Fork'}</button>
         <button
           onClick={addShell}
           style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
@@ -333,13 +357,19 @@ export default function SessionPage() {
                   <div className="text-sm text-text">The chat terminal closed.</div>
                   <div className="text-xs text-muted max-w-sm">
                     The session ended or couldn’t attach (a finished agent just replays and exits).
-                    Reopen to reconnect — a finished session resumes where it left off — or go back to the list.
+                    Reopen to reconnect — a finished session resumes where it left off. If it keeps
+                    failing, Fork branches an independent copy with the full history.
                   </div>
                   <div className="flex items-center gap-2">
                     <button
                       onClick={() => { setChatExited(false); setChatGen((g) => g + 1); }}
                       className="px-3 py-1 text-[11px] uppercase tracking-wider rounded-md bg-accent text-bg font-semibold hover:opacity-90"
                     >Reopen</button>
+                    <button
+                      onClick={forkChat}
+                      disabled={forking}
+                      className="px-3 py-1 text-[11px] uppercase tracking-wider rounded-md border border-border bg-panel text-accent hover:bg-panel2 disabled:opacity-40 disabled:cursor-not-allowed"
+                    >{forking ? 'Forking…' : '⑂ Fork'}</button>
                     <button
                       onClick={goBack}
                       className="px-3 py-1 text-[11px] uppercase tracking-wider rounded-md border border-border bg-panel text-muted hover:text-text hover:bg-panel2"
