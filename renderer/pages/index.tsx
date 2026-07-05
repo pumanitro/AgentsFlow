@@ -456,15 +456,15 @@ export default function Home() {
     if (idx >= 0) setFocusedIdx(idx);
   }, [pendingRenameDividerId, pinnedItems]);
 
-  // Add a task scoped to the peer currently selected in the spawn bar. It
-  // lands right below the focused row (staying in its section), else at the
-  // end of the first section — same placement as a fresh spawn.
-  const handleAddTodo = async () => {
-    if (!selectedDir) return;
+  // Add a task scoped to a specific peer — the "+" on that peer's sidebar card
+  // names the scope explicitly. It lands right below the focused row (staying
+  // in its section), else at the end of the first section — same placement as
+  // a fresh spawn.
+  const handleAddTodo = async (dir: TrackedDirectory) => {
     const afterRef = focusedIdx >= 0 && focusedIdx < pinnedItems.length
       ? pinnedItems[focusedIdx].ref
       : null;
-    const todo = await api().addTodo(selectedDir.id, afterRef);
+    const todo = await api().addTodo(dir.id, afterRef);
     setPendingEditTodoId(todo.id);
   };
 
@@ -674,6 +674,7 @@ export default function Home() {
                 selected={d.id === selectedDirId}
                 historyCount={convsByDir.get(d.id)?.length ?? 0}
                 onSelect={() => setSelectedDirId(d.id)}
+                onAddTask={() => handleAddTodo(d)}
                 onViewHistory={() => setHistoryDirId(d.id)}
                 onPreview={() => router.push({ pathname: '/preview', query: { dir: d.id } })}
                 onRemove={() => handleRemoveDirectory(d)}
@@ -687,20 +688,8 @@ export default function Home() {
           <div className="flex items-center justify-between mb-2">
             <h2 className="text-xs uppercase tracking-wider text-muted">Pinned conversations</h2>
             <div className="flex items-center gap-1.5">
-              <button
-                onClick={handleAddTodo}
-                disabled={!selectedDir}
-                className="text-[11px] text-muted hover:text-accent hover:border-accent border border-border bg-panel hover:bg-panel2 rounded px-2 py-0.5 disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:text-muted disabled:hover:border-border disabled:hover:bg-panel"
-                title={selectedDir
-                  ? `Add a task for ${selectedDir.displayName} below the focused row`
-                  : 'Select a peer on the left first — tasks are scoped to a peer'}
-              >
-                {/* Name the receiving peer right on the button — the scope is
-                    otherwise invisible until the row lands. */}
-                {selectedDir
-                  ? <>+ Add task for <span className="text-accent font-medium">{selectedDir.displayName}</span></>
-                  : '+ Add task'}
-              </button>
+              {/* Add task now lives on each peer's sidebar card (the "+"), so the
+                  scope is picked at the source instead of relying on selection. */}
               <button
                 onClick={handleAddDivider}
                 className="text-[11px] text-muted hover:text-accent hover:border-accent border border-border bg-panel hover:bg-panel2 rounded px-2 py-0.5"

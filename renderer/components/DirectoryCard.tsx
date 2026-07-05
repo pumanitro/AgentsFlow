@@ -6,12 +6,13 @@ interface Props {
   selected: boolean;
   historyCount: number;
   onSelect: () => void;
+  onAddTask: () => void;
   onViewHistory: () => void;
   onPreview: () => void;
   onRemove: () => void;
 }
 
-export default function DirectoryCard({ dir, selected, historyCount, onSelect, onViewHistory, onPreview, onRemove }: Props) {
+export default function DirectoryCard({ dir, selected, historyCount, onSelect, onAddTask, onViewHistory, onPreview, onRemove }: Props) {
   const [menuOpen, setMenuOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement | null>(null);
 
@@ -48,6 +49,17 @@ export default function DirectoryCard({ dir, selected, historyCount, onSelect, o
           <div className="text-[11px] text-muted truncate font-mono" title={dir.path}>{shortPath}</div>
         </div>
         <div className="shrink-0 flex items-center gap-0.5 opacity-60 group-hover:opacity-100">
+          <button
+            onClick={(e) => { e.stopPropagation(); onAddTask(); }}
+            className="text-muted hover:text-accent hover:bg-accent/10 p-1 rounded border border-transparent hover:border-accent/40 transition-colors"
+            title={`Add a task for ${dir.displayName}`}
+            aria-label={`Add a task for ${dir.displayName}`}
+          >
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <line x1="12" y1="5" x2="12" y2="19" />
+              <line x1="5" y1="12" x2="19" y2="12" />
+            </svg>
+          </button>
           <div className="relative" ref={menuRef}>
             <button
               onClick={(e) => { e.stopPropagation(); setMenuOpen((v) => !v); }}
