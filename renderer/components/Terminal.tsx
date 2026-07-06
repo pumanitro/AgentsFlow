@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { api } from '../lib/ipc';
 
 interface Props {
@@ -20,7 +20,6 @@ interface ScrollState {
 
 export default function Terminal({ conversationId, shellId, shellCwd, onExit, autoFocus = true }: Props) {
   const containerRef = useRef<HTMLDivElement | null>(null);
-  const trackRef = useRef<HTMLDivElement | null>(null);
   const cleanupRef = useRef<(() => void) | null>(null);
   const scrollToLineRef = useRef<((line: number) => void) | null>(null);
   const termFocusRef = useRef<() => void>(() => {});
@@ -308,74 +307,15 @@ export default function Terminal({ conversationId, shellId, shellCwd, onExit, au
     };
   }, [autoFocus, termGen]);
 
-  const totalScrollable = scroll.baseY;
-  const visibleHasOverflow = totalScrollable > 0;
-  const thumbHeightPct = visibleHasOverflow
-    ? Math.max(8, (scroll.rows / (scroll.rows + scroll.baseY)) * 100)
-    : 100;
-  const thumbTopPct = visibleHasOverflow
-    ? (scroll.viewportY / totalScrollable) * (100 - thumbHeightPct)
-    : 0;
-
-  const handleTrackClick = useCallback((e: React.MouseEvent) => {
-    if (!trackRef.current || !scrollToLineRef.current || !visibleHasOverflow) return;
-    if ((e.target as HTMLElement).dataset.scrollThumb) return;
-    const rect = trackRef.current.getBoundingClientRect();
-    const clickY = e.clientY - rect.top;
-    const ratio = Math.max(0, Math.min(1, clickY / rect.height));
-    scrollToLineRef.current(Math.round(ratio * totalScrollable));
-  }, [visibleHasOverflow, totalScrollable]);
-
-  const startThumbDrag = useCallback((e: React.MouseEvent) => {
-    if (!trackRef.current || !scrollToLineRef.current || !visibleHasOverflow) return;
-    e.preventDefault();
-    e.stopPropagation();
-    const track = trackRef.current;
-    const rect = track.getBoundingClientRect();
-    const startY = e.clientY;
-    const startViewportY = scroll.viewportY;
-    const thumbPx = (thumbHeightPct / 100) * rect.height;
-    const trackUsable = rect.height - thumbPx;
-    const onMove = (ev: MouseEvent) => {
-      const deltaY = ev.clientY - startY;
-      const deltaRatio = trackUsable > 0 ? deltaY / trackUsable : 0;
-      const next = Math.max(0, Math.min(totalScrollable, Math.round(startViewportY + deltaRatio * totalScrollable)));
-      scrollToLineRef.current?.(next);
-    };
-    const onUp = () => {
-      window.removeEventListener('mousemove', onMove);
-      window.removeEventListener('mouseup', onUp);
-    };
-    window.addEventListener('mousemove', onMove);
-    window.addEventListener('mouseup', onUp);
-  }, [visibleHasOverflow, totalScrollable, thumbHeightPct, scroll.viewportY]);
-
-  // In alt-buffer mode (Claude Code TUI), the host has no concept of scroll position —
-  // the app owns the screen. Hide the track entirely; use the History tab to read past turns.
-  const showTrack = !scroll.altBuffer && visibleHasOverflow;
-
+  // Scrollbar: rely solely on xterm's own native viewport scrollbar (the "left"
+  // bar sitting inside the terminal). We used to also render a custom overlay
+  // track as a flex sibling to its right, but since Claude Code renders inline
+  // in the normal buffer that produced two bars at once. The native scrollbar is
+  // real (bound to xterm's scrollback), works by wheel + drag, and is the single
+  // source of truth — so the overlay track is gone.
   return (
-    <div className="absolute inset-0 flex bg-bg">
-      <div ref={containerRef} className="flex-1 min-w-0 h-full relative" />
-      {showTrack && (
-        <div
-          ref={trackRef}
-          onClick={handleTrackClick}
-          className="w-3 shrink-0 h-full bg-panel relative cursor-pointer select-none border-l border-border"
-          title="Click or drag to scroll"
-        >
-          <div
-            data-scroll-thumb="1"
-            onMouseDown={startThumbDrag}
-            className="absolute left-[2px] right-[2px] rounded-md bg-[#6b7494] hover:bg-[#8a93b0] active:bg-[#8a93b0]"
-            style={{
-              top: `${thumbTopPct}%`,
-              height: `${thumbHeightPct}%`,
-              minHeight: '24px',
-            }}
-          />
-        </div>
-      )}
+    <div className="absolute inset-0 bg-bg">
+      <div ref={containerRef} className="absolute inset-0" />
     </div>
   );
 }
