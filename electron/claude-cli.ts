@@ -13,7 +13,17 @@ export interface ClaudeAgentJsonRow {
   startedAt: number;
   sessionId: string;
   name?: string;
+  // Live, real-time signals `claude agents --json` reports (CLI ≥ 2.1.x).
+  // `state` is the logical turn state (working | blocked | done | …), carried on
+  // background-daemon rows. `status` is the OS process's liveness
+  // (busy | idle | waiting) and only exists while a process is actually running
+  // — it is the real-time truth and beats a possibly-stale state.json (an
+  // interactive `--resume` keeps working but never rewrites its --bg daemon's
+  // state.json). `waitingFor` explains a `waiting` status, e.g. "permission
+  // prompt".
+  state?: string;
   status?: string;
+  waitingFor?: string;
 }
 
 export interface JobState {

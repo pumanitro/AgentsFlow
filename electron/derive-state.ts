@@ -1,4 +1,12 @@
-import type { JobState } from './claude-cli';
+import type { ClaudeAgentJsonRow, JobState } from './claude-cli';
+
+// The live fields a `claude agents --json` row carries for a running session.
+// `status` (busy | idle | waiting) reflects the OS process in real time;
+// `state` (working | blocked | done | …) is the logical turn state; `waitingFor`
+// explains a `waiting` status. All three come straight from the CLI's own view,
+// which stays live even after a session is re-opened via `claude --resume` and
+// its --bg daemon's state.json freezes on the previous turn.
+export type LiveAgentRow = Pick<ClaudeAgentJsonRow, 'state' | 'status' | 'waitingFor'>;
 
 function isBlocked(job: JobState): boolean {
   if ((job.tempo || '').toLowerCase() === 'blocked') return true;
@@ -16,6 +24,59 @@ export function effectiveState(job: JobState): string | undefined {
   if (isBlocked(job)) return 'blocked';
   if (tempo === 'active' || tasks > 0) return 'working';
   return job.state;
+}
+
+/**
+ * Reconcile a live `claude agents --json` row with the daemon's own state.json
+ * into a single effective state, preferring the CLI's real-time view.
+ *
+ * The live `status` is the most authoritative signal available: it only exists
+ * for an actually-running process and updates in real time, so it must override
+ * a stale state.json. This is the crux of the "green dot while still thinking"
+ * bug — a session re-opened via `claude --resume` keeps working (status "busy")
+ * but never rewrites its --bg daemon's state.json, leaving it frozen on the
+ * previous turn's "done".
+ *
+ * Without a live row (the state.json file-watcher path) callers should keep
+ * using `effectiveState(job)` directly — this is only for the poller's tick,
+ * which is the one place holding the live agents listing.
+ */
+export function reconcileLiveState(
+  row: LiveAgentRow | undefined,
+  job: JobState | null,
+): string | undefined {
+  const status = (row?.status || '').toLowerCase();
+  const rowState = (row?.state || '').toLowerCase();
+
+  // Real-time process status wins over any recorded logical state.
+  if (status === 'busy') return 'working';
+  if (status === 'waiting') return 'blocked'; // e.g. waitingFor: "permission prompt"
+
+  // A background daemon also reports a fresh logical `state` on its row.
+  if (rowState === 'working') return 'working';
+
+  // Otherwise defer to the daemon's own state.json (blocked-on-question
+  // detection, terminal states, …), then fall back to the row's logical state.
+  const eff = job ? effectiveState(job) : undefined;
+  return eff || rowState || undefined;
+}
+
+/**
+ * Live-aware description: when a re-opened session is working/blocked but its
+ * state.json is frozen on a past turn, the recorded detail/result is misleading,
+ * so surface the live status instead.
+ */
+export function deriveLiveDescription(
+  row: LiveAgentRow | undefined,
+  job: JobState | null,
+): string {
+  const status = (row?.status || '').toLowerCase();
+  if (status === 'busy') return 'working…';
+  if (status === 'waiting') {
+    const what = (row?.waitingFor || '').trim();
+    return what ? `waiting — ${what}` : 'waiting for your input';
+  }
+  return job ? deriveDescription(job) : '';
 }
 
 export function deriveDescription(job: JobState): string {

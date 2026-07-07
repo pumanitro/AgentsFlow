@@ -6,7 +6,7 @@ import { listAgentsResult, readJobState, stopAgent, type ClaudeAgentJsonRow } fr
 import { hasLiveViewer } from './pty-manager';
 import { store } from './store';
 import { Conversation } from '../shared/types';
-import { effectiveState, deriveDescription } from './derive-state';
+import { effectiveState, deriveDescription, reconcileLiveState, deriveLiveDescription } from './derive-state';
 
 let fallbackTimer: NodeJS.Timeout | null = null;
 const watchers = new Map<string, fs.FSWatcher>();
@@ -101,17 +101,24 @@ function schedulePush(): void {
   });
 }
 
-function applyJobToConversation(c: Conversation): { next: Conversation; changed: boolean } {
+// `liveRow` is the matching `claude agents --json` row when the poller's tick
+// has one. Its real-time `state`/`status`/`waitingFor` reconcile against — and
+// override — a possibly-stale state.json (see `reconcileLiveState`). The
+// file-watcher path has no row and falls back to the state.json alone.
+function applyJobToConversation(
+  c: Conversation,
+  liveRow?: ClaudeAgentJsonRow,
+): { next: Conversation; changed: boolean } {
   const job = readJobState(c.daemonShort);
-  if (!job) return { next: c, changed: false };
+  if (!job && !liveRow) return { next: c, changed: false };
 
   let changed = false;
   const next: Conversation = { ...c };
-  const eff = effectiveState(job);
+  const eff = liveRow ? reconcileLiveState(liveRow, job) : (job ? effectiveState(job) : undefined);
   if (eff && eff !== c.state) { next.state = eff; changed = true; }
-  const live = deriveDescription(job);
+  const live = liveRow ? deriveLiveDescription(liveRow, job) : (job ? deriveDescription(job) : '');
   if (live && live !== c.description) { next.description = live; changed = true; }
-  if (job.intent && job.intent !== c.intent) { next.intent = job.intent; changed = true; }
+  if (job?.intent && job.intent !== c.intent) { next.intent = job.intent; changed = true; }
 
   return { next, changed };
 }
@@ -206,12 +213,20 @@ async function fallbackTick(): Promise<void> {
     }
     if (row) {
       missCount.delete(c.id);
-      if (row.status && row.status !== c.status) { next = { ...next, status: row.status }; changed = true; }
+      // `status` mirrors the live row's real-time process status (busy/idle/
+      // waiting); normalize absent to '' so it never lingers stale.
+      const liveStatus = row.status || '';
+      if (liveStatus !== c.status) { next = { ...next, status: liveStatus }; changed = true; }
       if (row.sessionId && row.sessionId !== c.sessionId) { next = { ...next, sessionId: row.sessionId }; changed = true; }
-      // Daemon is present: trust state.json as before.
-      const merged = applyJobToConversation(next);
+      // Daemon is present: reconcile the live row against state.json — the row's
+      // real-time state/status wins over a frozen state.json (e.g. a session
+      // re-opened interactively via --resume still reporting "busy").
+      const merged = applyJobToConversation(next, row);
       if (merged.changed) { next = merged.next; changed = true; }
     } else if (c.daemonShort) {
+      // No live row → no live process → the real-time `status` is meaningless,
+      // so clear it (otherwise a stale "busy" would keep the dot blue forever).
+      if (c.status) { next = { ...next, status: '' }; changed = true; }
       // Conversation expects a daemon but listAgents (which succeeded) doesn't
       // see it. After MISS_THRESHOLD consecutive successful misses, transition
       // to a terminal state and stop replaying stale state.json content.

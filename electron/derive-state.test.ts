@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import * as assert from 'node:assert/strict';
-import { effectiveState, deriveDescription } from './derive-state';
+import { effectiveState, deriveDescription, reconcileLiveState, deriveLiveDescription } from './derive-state';
 import type { JobState } from './claude-cli';
 
 const base = (over: Partial<JobState> = {}): JobState => ({
@@ -141,5 +141,50 @@ describe('deriveDescription', () => {
     };
     assert.equal(effectiveState(job), 'blocked');
     assert.equal(deriveDescription(job), 'Which color do you prefer?');
+  });
+});
+
+describe('reconcileLiveState', () => {
+  it('regression: interactive --resume reports busy while state.json is frozen on "done"', () => {
+    // The exact "green dot while still thinking" bug (job 0a3ae346): the --bg
+    // daemon's state.json froze on the previous turn's terminal "done", but the
+    // re-opened interactive process is live and busy. The live row must win.
+    const job = base({ state: 'done', tempo: 'idle', detail: 'draft reply created' });
+    const row = { kind: 'interactive', status: 'busy' } as const;
+    assert.equal(reconcileLiveState(row, job), 'working');
+    assert.equal(deriveLiveDescription(row, job), 'working…');
+  });
+
+  it('maps status "waiting" to blocked (e.g. a permission prompt)', () => {
+    const job = base({ state: 'working' });
+    const row = { status: 'waiting', waitingFor: 'permission prompt' } as const;
+    assert.equal(reconcileLiveState(row, job), 'blocked');
+    assert.equal(deriveLiveDescription(row, job), 'waiting — permission prompt');
+  });
+
+  it('honors a live row state "working" even when state.json says done', () => {
+    // Background daemon rows carry their own logical `state`; it too is fresher
+    // than a state.json we might read a beat later.
+    const job = base({ state: 'done', tempo: 'idle' });
+    assert.equal(reconcileLiveState({ state: 'working', status: 'idle' }, job), 'working');
+  });
+
+  it('falls back to state.json when the row carries no decisive live signal', () => {
+    // A live-but-idle interactive session that has genuinely finished: no busy/
+    // waiting status and no row state → defer to the recorded terminal state.
+    const job = base({ state: 'done', tempo: 'idle' });
+    assert.equal(reconcileLiveState({ status: 'idle' }, job), 'done');
+    assert.equal(deriveLiveDescription({ status: 'idle' }, job), 'completed');
+  });
+
+  it('still surfaces a blocked-on-question daemon via the job when status is idle', () => {
+    const job = base({ state: 'working', block: { questions: [{ question: 'Pick one?' }] } });
+    assert.equal(reconcileLiveState({ state: 'blocked', status: 'idle' }, job), 'blocked');
+  });
+
+  it('handles a missing job (no state.json yet) using the row alone', () => {
+    assert.equal(reconcileLiveState({ status: 'busy' }, null), 'working');
+    assert.equal(reconcileLiveState({ state: 'working' }, null), 'working');
+    assert.equal(reconcileLiveState({ status: 'idle' }, null), undefined);
   });
 });
