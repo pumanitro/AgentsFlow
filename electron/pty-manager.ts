@@ -375,7 +375,7 @@ async function attachResume(opts: {
       const s = resumeSessions.get(opts.sessionId);
       if (!s) return;
       s.lastDataAt = Date.now();
-      appendBuffer(s, data);
+      appendBuffer(s, data, RESUME_BUFFER_MAX_BYTES);
       for (const sub of s.subscribers.values()) {
         safeSend(sub.win, 'terminal:data', sub.channelId, data);
       }
@@ -425,11 +425,24 @@ const shells = new Map<string, ShellState>();
 const shellChannelToShellId = new Map<string, string>();
 
 const SHELL_BUFFER_MAX_BYTES = 256 * 1024;
+// Resume sessions get a much larger replay cap than shells. On re-attach, xterm
+// is rebuilt entirely from this buffer (there's no fresh reprint like a cold
+// `claude --resume`), so the cap is the ceiling on how far back you can scroll.
+// A full Claude transcript reprint — ANSI colors, box-drawing, tool output,
+// in-place repaints — easily blows past 256 KB, which used to evict the top of
+// the conversation and leave the terminal unable to scroll to it. Resume ptys
+// are few and user-opened (unlike chatty shells), so the memory trade-off is
+// cheap. ~4 MB comfortably holds a reprint within xterm's 10 000-line window.
+const RESUME_BUFFER_MAX_BYTES = Number(process.env.AGENTSFLOW_RESUME_BUFFER_MAX_BYTES) || 4 * 1024 * 1024;
 
-function appendBuffer(s: { buffer: string[]; bufferBytes: number }, data: string) {
+function appendBuffer(
+  s: { buffer: string[]; bufferBytes: number },
+  data: string,
+  maxBytes: number = SHELL_BUFFER_MAX_BYTES,
+) {
   s.buffer.push(data);
   s.bufferBytes += data.length;
-  while (s.bufferBytes > SHELL_BUFFER_MAX_BYTES && s.buffer.length > 1) {
+  while (s.bufferBytes > maxBytes && s.buffer.length > 1) {
     const removed = s.buffer.shift()!;
     s.bufferBytes -= removed.length;
   }
