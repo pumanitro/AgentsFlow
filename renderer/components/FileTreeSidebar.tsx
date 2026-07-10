@@ -5,14 +5,36 @@ import { FileEntry, GitEntryStatus, GitStatusResult } from '../../shared/types';
 import SearchModal from './SearchModal';
 import NotesPanel from './NotesPanel';
 import {
+  TreeFile,
   TreeNode,
   buildTree,
   collectDirPaths,
+  countFiles,
+  filterTree,
   flattenSingleChildDirs,
   isImageFile,
   TreeView,
   useExpanded,
 } from './file-tree';
+
+// Build a predicate that matches a tree file against the user's filter query.
+// The query is treated as a case-insensitive regex; if it isn't valid regex
+// (e.g. a half-typed "foo(") we fall back to a plain substring match so the
+// bar stays usable while typing. Matched against both the basename and the
+// full relative path so "components/Terminal" and "\.tsx$" both work.
+function buildNameMatcher(query: string): (node: TreeFile) => boolean {
+  let re: RegExp | null = null;
+  try {
+    re = new RegExp(query, 'i');
+  } catch {
+    re = null;
+  }
+  const lower = query.toLowerCase();
+  return (node) => {
+    if (re) return re.test(node.name) || re.test(node.path);
+    return node.name.toLowerCase().includes(lower) || node.path.toLowerCase().includes(lower);
+  };
+}
 
 interface Props {
   dirPath: string;
@@ -65,6 +87,10 @@ export default function FileTreeSidebar({ dirPath, conversationId, onFileOpen, o
   const setExpandedFiles = filesStore.setState;
   const [loading, setLoading] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
+  // Filename filter: a regex typed into the bar above the tree that prunes it
+  // to matching files. Distinct from the magnifier (Find-in-files / content
+  // search) — this one never leaves the sidebar.
+  const [filter, setFilter] = useState('');
 
   // Shift+F opens Find-in-Files. We suppress the plain combo while the user is
   // typing into a text field (inputs, the file editor, or the terminal's hidden
@@ -190,6 +216,26 @@ export default function FileTreeSidebar({ dirPath, conversationId, onFileOpen, o
 
   const expanded = mode === 'changes' ? expandedChanges : expandedFiles;
   const setExpanded = mode === 'changes' ? setExpandedChanges : setExpandedFiles;
+
+  const filterQuery = filter.trim();
+  const filteredTree = useMemo(() => {
+    if (!filterQuery || !tree) return tree;
+    return filterTree(tree, buildNameMatcher(filterQuery));
+  }, [tree, filterQuery]);
+  const matchCount = filterQuery && filteredTree ? countFiles(filteredTree) : null;
+
+  // While a filter is active we show everything expanded so matches are
+  // visible, but keep it in a separate set so the user's persisted expand
+  // state (and their manual collapses within the filtered view) aren't lost.
+  // Re-expands whenever the query changes.
+  const [filterExpanded, setFilterExpanded] = useState<Set<string>>(new Set());
+  useEffect(() => {
+    if (filterQuery && filteredTree) setFilterExpanded(new Set(collectDirPaths(filteredTree)));
+  }, [filterQuery, filteredTree]);
+
+  const displayTree = filterQuery ? filteredTree : tree;
+  const displayExpanded = filterQuery ? filterExpanded : expanded;
+  const displaySetExpanded = filterQuery ? setFilterExpanded : setExpanded;
 
   const toggleExpandAll = () => {
     if (!tree) return;
@@ -445,6 +491,38 @@ export default function FileTreeSidebar({ dirPath, conversationId, onFileOpen, o
       {summary && (
         <div className="shrink-0 px-3 py-1.5 text-[11px] text-muted border-b border-border">{summary}</div>
       )}
+      <div className="shrink-0 px-2 py-1.5 border-b border-border">
+        <div className="flex items-center gap-1.5 rounded-md border border-border bg-panel2 px-2 py-1 focus-within:border-accent">
+          <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" className="text-muted shrink-0" aria-hidden>
+            <circle cx="7" cy="7" r="4.5" />
+            <path d="M10.5 10.5 L14 14" strokeLinecap="round" />
+          </svg>
+          <input
+            value={filter}
+            onChange={(e) => setFilter(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Escape') { setFilter(''); e.currentTarget.blur(); }
+            }}
+            placeholder="Filter files by name (regex)…"
+            spellCheck={false}
+            autoCapitalize="off"
+            autoCorrect="off"
+            className="flex-1 min-w-0 bg-transparent text-[12px] text-text placeholder:text-muted outline-none"
+            aria-label="Filter files by name"
+          />
+          {filterQuery && (
+            <>
+              <span className="text-[10px] text-muted tabular-nums shrink-0" title={`${matchCount} match${matchCount === 1 ? '' : 'es'}`}>{matchCount}</span>
+              <button
+                onClick={() => setFilter('')}
+                className="text-muted hover:text-text shrink-0 leading-none text-[14px]"
+                title="Clear filter"
+                aria-label="Clear filter"
+              >×</button>
+            </>
+          )}
+        </div>
+      </div>
       <div className="flex-1 overflow-y-auto py-1 text-text/90">
         {typeof api().gitStatus !== 'function' && (
           <div className="px-3 py-4 text-xs text-muted italic">
@@ -454,15 +532,16 @@ export default function FileTreeSidebar({ dirPath, conversationId, onFileOpen, o
         {mode === 'changes' && status && !status.isRepo && typeof api().gitStatus === 'function' && (
           <div className="px-3 py-4 text-xs text-muted italic">Not a git repository.</div>
         )}
-        {tree && (
+        {displayTree && (
           <TreeView
-            root={tree}
-            expanded={expanded}
-            setExpanded={setExpanded}
+            root={displayTree}
+            expanded={displayExpanded}
+            setExpanded={displaySetExpanded}
             dirPath={dirPath}
             onFileOpen={onFileOpen}
             openedFilePath={openedFilePath}
             onContextMenu={openContextMenu}
+            emptyLabel={filterQuery ? `No files match /${filterQuery}/` : undefined}
           />
         )}
       </div>

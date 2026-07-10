@@ -101,6 +101,39 @@ export function collectDirPaths(root: TreeDir): string[] {
   return out;
 }
 
+// Prune the tree to just the files matching `predicate`, keeping the ancestor
+// directories needed to reach them. Used by the sidebar's filename filter.
+// Directory node metadata (changedCount/totalCount) is copied as-is; callers
+// that need accurate filtered totals should use countFiles on the result.
+export function filterTree(root: TreeDir, predicate: (node: TreeFile) => boolean): TreeDir {
+  const rec = (n: TreeDir): TreeDir | null => {
+    const kept: TreeNode[] = [];
+    for (const c of n.children) {
+      if (c.kind === 'dir') {
+        const f = rec(c);
+        if (f) kept.push(f);
+      } else if (predicate(c)) {
+        kept.push(c);
+      }
+    }
+    if (kept.length === 0) return null;
+    return { ...n, children: kept };
+  };
+  return rec(root) ?? { ...root, children: [] };
+}
+
+export function countFiles(root: TreeDir): number {
+  let n = 0;
+  const walk = (d: TreeDir) => {
+    for (const c of d.children) {
+      if (c.kind === 'dir') walk(c);
+      else n++;
+    }
+  };
+  walk(root);
+  return n;
+}
+
 export function flattenSingleChildDirs(root: TreeDir): TreeDir {
   // Collapse a/b/c into "a/b/c" if each level only has a single dir child.
   const rec = (n: TreeDir): TreeDir => {
