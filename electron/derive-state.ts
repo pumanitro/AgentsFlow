@@ -1,4 +1,5 @@
 import type { ClaudeAgentJsonRow, JobState } from './claude-cli';
+import type { Conversation } from '../shared/types';
 
 // The live fields a `claude agents --json` row carries for a running session.
 // `status` (busy | idle | waiting) reflects the OS process in real time;
@@ -7,6 +8,36 @@ import type { ClaudeAgentJsonRow, JobState } from './claude-cli';
 // which stays live even after a session is re-opened via `claude --resume` and
 // its --bg daemon's state.json freezes on the previous turn.
 export type LiveAgentRow = Pick<ClaudeAgentJsonRow, 'state' | 'status' | 'waitingFor'>;
+
+// The conversation fields that identify which `claude agents --json` row (if
+// any) belongs to a conversation.
+export type ConvIdentity = Pick<Conversation, 'sessionName' | 'daemonShort' | 'sessionId'>;
+
+/**
+ * Find the live `claude agents --json` row for a conversation, if it's running.
+ *
+ * Three handles, in order of specificity:
+ *  1. `sessionName` — legacy, matched against the row's `name`.
+ *  2. `daemonShort` — the 8-char id of a `--bg` daemon, a prefix of its sessionId.
+ *  3. `sessionId` — exact. This is the only handle a *fork* has: it runs as an
+ *     interactive `--resume … --fork-session --session-id <new>` process, so it
+ *     never gets a daemonShort or a sessionName. Omitting this lookup is what
+ *     pinned forked rows to a permanently grey status dot.
+ */
+export function findLiveRow<R extends ClaudeAgentJsonRow>(c: ConvIdentity, rows: R[]): R | undefined {
+  if (c.sessionName) {
+    const byName = rows.find((r) => r.name === c.sessionName);
+    if (byName) return byName;
+  }
+  if (c.daemonShort) {
+    const byShort = rows.find((r) => r.sessionId.startsWith(c.daemonShort));
+    if (byShort) return byShort;
+  }
+  if (c.sessionId) {
+    return rows.find((r) => r.sessionId === c.sessionId);
+  }
+  return undefined;
+}
 
 function isBlocked(job: JobState): boolean {
   if ((job.tempo || '').toLowerCase() === 'blocked') return true;
@@ -58,7 +89,18 @@ export function reconcileLiveState(
   // Otherwise defer to the daemon's own state.json (blocked-on-question
   // detection, terminal states, …), then fall back to the row's logical state.
   const eff = job ? effectiveState(job) : undefined;
-  return eff || rowState || undefined;
+  if (eff) return eff;
+  if (rowState) return rowState;
+
+  // Nothing but a live `status: "idle"` — an interactive session with no `--bg`
+  // daemon behind it, i.e. a fork. It has no state.json and its row carries no
+  // logical `state`, so `status` is the only signal there will ever be. The row
+  // exists only while the process is alive, and an alive-but-idle Claude has
+  // finished its turn and is sitting at the prompt: that's "done". Returning
+  // undefined here would freeze the conversation on whatever it last was —
+  // pulsing blue forever once a turn ended.
+  if (status === 'idle') return 'done';
+  return undefined;
 }
 
 /**
@@ -76,7 +118,11 @@ export function deriveLiveDescription(
     const what = (row?.waitingFor || '').trim();
     return what ? `waiting — ${what}` : 'waiting for your input';
   }
-  return job ? deriveDescription(job) : '';
+  if (job) return deriveDescription(job);
+  // Daemonless (forked) session, live and idle — mirrors the "done" that
+  // `reconcileLiveState` derives, so the row's text can't linger on "working…".
+  if (status === 'idle') return 'completed';
+  return '';
 }
 
 export function deriveDescription(job: JobState): string {

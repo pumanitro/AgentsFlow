@@ -6,7 +6,7 @@ import { listAgentsResult, readJobState, stopAgent, type ClaudeAgentJsonRow } fr
 import { hasLiveViewer } from './pty-manager';
 import { store } from './store';
 import { Conversation } from '../shared/types';
-import { effectiveState, deriveDescription, reconcileLiveState, deriveLiveDescription } from './derive-state';
+import { effectiveState, deriveDescription, reconcileLiveState, deriveLiveDescription, findLiveRow } from './derive-state';
 
 let fallbackTimer: NodeJS.Timeout | null = null;
 const watchers = new Map<string, fs.FSWatcher>();
@@ -194,7 +194,6 @@ async function fallbackTick(): Promise<void> {
     return;
   }
   const rows: ClaudeAgentJsonRow[] = result.rows;
-  const byName = new Map(rows.filter((r) => r.name).map((r) => [r.name!, r]));
 
   // Drop miss counters for conversations that no longer exist.
   const liveIds = new Set(convs.map((c) => c.id));
@@ -206,11 +205,7 @@ async function fallbackTick(): Promise<void> {
   const updated = convs.map((c) => {
     let next = c;
     let changed = false;
-    // Look up by sessionName first (legacy), then by daemonShort prefix.
-    let row = c.sessionName ? byName.get(c.sessionName) : undefined;
-    if (!row && c.daemonShort) {
-      row = rows.find((r) => r.sessionId.startsWith(c.daemonShort));
-    }
+    const row = findLiveRow(c, rows);
     if (row) {
       missCount.delete(c.id);
       // `status` mirrors the live row's real-time process status (busy/idle/
@@ -242,8 +237,19 @@ async function fallbackTick(): Promise<void> {
         const merged = applyJobToConversation(next);
         if (merged.changed) { next = merged.next; changed = true; }
       }
+    } else if (ACTIVE_STATES.has((c.state || '').toLowerCase())) {
+      // Daemonless (forked) conversation whose interactive process is gone —
+      // the user closed the terminal, or it was killed mid-turn. There is no
+      // state.json to fall back on, so a lingering "working"/"blocked" can
+      // never advance on its own. Settle it as done once the absence is
+      // confirmed (same MISS_THRESHOLD debounce as the daemon path).
+      if (c.status) { next = { ...next, status: '' }; changed = true; }
+      const next_n = (missCount.get(c.id) ?? 0) + 1;
+      missCount.set(c.id, next_n);
+      if (next_n >= MISS_THRESHOLD) { next = { ...next, state: 'done' }; changed = true; }
     } else {
-      // No daemonShort recorded — nothing to reconcile against. Leave alone.
+      // No daemon and no live row: an unopened fork (state "idle") or a plain
+      // conversation with nothing to reconcile against. Leave alone.
     }
     if (changed) anyChange = true;
     return next;

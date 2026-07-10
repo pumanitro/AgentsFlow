@@ -1,7 +1,7 @@
 import { describe, it } from 'node:test';
 import * as assert from 'node:assert/strict';
-import { effectiveState, deriveDescription, reconcileLiveState, deriveLiveDescription } from './derive-state';
-import type { JobState } from './claude-cli';
+import { effectiveState, deriveDescription, reconcileLiveState, deriveLiveDescription, findLiveRow } from './derive-state';
+import type { ClaudeAgentJsonRow, JobState } from './claude-cli';
 
 const base = (over: Partial<JobState> = {}): JobState => ({
   inFlight: { tasks: 0, queued: 0, kinds: [] },
@@ -144,6 +144,58 @@ describe('deriveDescription', () => {
   });
 });
 
+describe('findLiveRow', () => {
+  // Verbatim shapes from a real `claude agents --json`. A `--bg` daemon carries
+  // `id` (the daemonShort) and a logical `state`; a fork's interactive process
+  // carries neither — only `status`.
+  const daemonRow: ClaudeAgentJsonRow = {
+    pid: 54609, cwd: '/Users/iij/IdeaProjects/atlas-of-doors', kind: 'background',
+    startedAt: 1783582564525, sessionId: 'caecd0f9-cbe2-4094-946e-16ba9cf8a96b',
+    name: 'game council bootstrap protocol', status: 'waiting',
+    waitingFor: 'permission prompt', state: 'blocked',
+  };
+  const forkRow: ClaudeAgentJsonRow = {
+    pid: 58416, cwd: '/Users/iij/IdeaProjects/atlas-of-doors', kind: 'interactive',
+    startedAt: 1783587950584, sessionId: '42c61f94-fe9e-458f-99a5-558ccf9d6f56',
+    name: 'game council bootstrap protocol', status: 'idle',
+  };
+  const rows = [daemonRow, forkRow];
+
+  it('regression: finds a fork by exact sessionId (no daemonShort, no sessionName)', () => {
+    // The store's real "V2 · /game-council" fork entry.
+    const fork = { sessionName: '', daemonShort: '', sessionId: '42c61f94-fe9e-458f-99a5-558ccf9d6f56' };
+    assert.equal(findLiveRow(fork, rows), forkRow);
+    // …and it must resolve to a real dot state, not stay grey.
+    assert.equal(reconcileLiveState(findLiveRow(fork, rows), null), 'done');
+  });
+
+  it('a fork whose interactive process is gone matches nothing', () => {
+    const fork = { sessionName: '', daemonShort: '', sessionId: 'deadbeef-0000-0000-0000-000000000000' };
+    assert.equal(findLiveRow(fork, rows), undefined);
+  });
+
+  it('an unopened fork (empty sessionId would match nothing) never grabs a row', () => {
+    assert.equal(findLiveRow({ sessionName: '', daemonShort: '', sessionId: '' }, rows), undefined);
+  });
+
+  it('a --bg conversation still matches by daemonShort prefix', () => {
+    const conv = { sessionName: '', daemonShort: 'caecd0f9', sessionId: '' };
+    assert.equal(findLiveRow(conv, rows), daemonRow);
+  });
+
+  it('the fork does not steal its source conversation\'s row (same name, different session)', () => {
+    // Both rows carry name "game council bootstrap protocol" — the fork inherits
+    // the source's CLI-derived name. daemonShort must still win for the source.
+    const source = { sessionName: '', daemonShort: 'caecd0f9', sessionId: 'caecd0f9-cbe2-4094-946e-16ba9cf8a96b' };
+    assert.equal(findLiveRow(source, rows), daemonRow);
+  });
+
+  it('sessionName takes precedence when set (legacy path)', () => {
+    const conv = { sessionName: 'game council bootstrap protocol', daemonShort: '', sessionId: '' };
+    assert.equal(findLiveRow(conv, rows), daemonRow);
+  });
+});
+
 describe('reconcileLiveState', () => {
   it('regression: interactive --resume reports busy while state.json is frozen on "done"', () => {
     // The exact "green dot while still thinking" bug (job 0a3ae346): the --bg
@@ -185,6 +237,22 @@ describe('reconcileLiveState', () => {
   it('handles a missing job (no state.json yet) using the row alone', () => {
     assert.equal(reconcileLiveState({ status: 'busy' }, null), 'working');
     assert.equal(reconcileLiveState({ state: 'working' }, null), 'working');
-    assert.equal(reconcileLiveState({ status: 'idle' }, null), undefined);
+  });
+
+  it('regression: a forked session (interactive row, no state.json) resolves a real state', () => {
+    // A fork runs as `--resume … --fork-session`: no --bg daemon, so no
+    // state.json and no logical `state` on its agents row. Its only signal is
+    // the live `status`. Returning undefined for all of these left the fork on
+    // its seeded "idle" forever — the permanently-grey dot.
+    assert.equal(reconcileLiveState({ status: 'busy' }, null), 'working');
+    assert.equal(reconcileLiveState({ status: 'waiting', waitingFor: 'permission prompt' }, null), 'blocked');
+    // Alive but idle = the turn finished and it's waiting at the prompt.
+    assert.equal(reconcileLiveState({ status: 'idle' }, null), 'done');
+    assert.equal(deriveLiveDescription({ status: 'idle' }, null), 'completed');
+  });
+
+  it('an unknown status with no job and no row state stays undecided', () => {
+    assert.equal(reconcileLiveState({ status: '' }, null), undefined);
+    assert.equal(reconcileLiveState(undefined, null), undefined);
   });
 });
