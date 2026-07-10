@@ -82,6 +82,7 @@ const api: AgentsFlowApi = {
   listFiles: (dirPath) => ipcRenderer.invoke('files:list', dirPath),
 
   notesRoot: (dirPath) => ipcRenderer.invoke('notes:root', dirPath),
+  globalNotesRoot: () => ipcRenderer.invoke('notes:globalRoot'),
   listNotes: (root) => ipcRenderer.invoke('notes:list', root),
   searchFiles: (dirPath, query, opts) => ipcRenderer.invoke('files:search', dirPath, query, opts),
 

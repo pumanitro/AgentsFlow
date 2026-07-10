@@ -14,8 +14,13 @@ import {
 interface Props {
   // The peer's project directory. Used only to resolve the peer's private notes
   // folder (stored under Peers Flow's app-data, NOT inside this directory) and to
-  // key the panel's persisted open/expanded state per peer.
-  dirPath: string;
+  // key the panel's persisted open/expanded state per peer. Ignored (and may be
+  // omitted) when `variant` is 'global'.
+  dirPath?: string;
+  // 'peer' (default) backs one tracked directory's private notes. 'global' backs
+  // the single shared notes folder surfaced on the home screen — same behaviour,
+  // different root + persistence key.
+  variant?: 'peer' | 'global';
   onFileOpen?: (absolutePath: string, line?: number) => void;
   openedFilePath?: string | null;
 }
@@ -39,32 +44,39 @@ function usePersistedBool(key: string, fallback: boolean): [boolean, (v: boolean
   return [value, set];
 }
 
-export default function NotesPanel({ dirPath, onFileOpen, openedFilePath }: Props) {
-  // Persisted per peer (the directory path), so the open/closed state and the
-  // note files are shared across every agent rooted in this peer and its preview.
-  const [open, setOpen] = usePersistedBool(`agentsflow:notes:open:${dirPath}`, false);
+export default function NotesPanel({ dirPath, variant = 'peer', onFileOpen, openedFilePath }: Props) {
+  const isGlobal = variant === 'global';
+  // Persistence key: the shared '__global__' bucket for global notes, else the
+  // peer's directory path — so the open/closed state and note files are shared
+  // across every agent rooted in this peer and its preview.
+  const storeKey = isGlobal ? '__global__' : dirPath ?? '';
+  const [open, setOpen] = usePersistedBool(`agentsflow:notes:open:${storeKey}`, false);
   const [root, setRoot] = useState<string | null>(null);
   const [files, setFiles] = useState<FileEntry[] | null>(null);
-  const expandedStore = useExpanded(`agentsflow:notes:expanded:${dirPath}`);
+  const expandedStore = useExpanded(`agentsflow:notes:expanded:${storeKey}`);
   const expanded = expandedStore.state;
   const setExpanded = expandedStore.setState;
 
-  // Resolve (and create) the peer's notes folder. Reset listing when the peer
-  // changes so a stale tree never bleeds across peers.
+  // Resolve (and create) the notes folder — the shared global one, or this
+  // peer's private one. Reset the listing when the source changes so a stale
+  // tree never bleeds across peers.
   useEffect(() => {
     let cancelled = false;
     setRoot(null);
     setFiles(null);
     const a = api();
-    if (typeof a.notesRoot !== 'function') return;
-    a.notesRoot(dirPath)
+    const resolve = isGlobal
+      ? (typeof a.globalNotesRoot === 'function' ? a.globalNotesRoot() : null)
+      : (typeof a.notesRoot === 'function' && dirPath ? a.notesRoot(dirPath) : null);
+    if (!resolve) return;
+    resolve
       .then((r) => { if (!cancelled) setRoot(r.root); })
       .catch((err) => {
         // eslint-disable-next-line no-console
-        console.error('[agentsflow] notesRoot failed', dirPath, err);
+        console.error('[agentsflow] notesRoot failed', isGlobal ? '(global)' : dirPath, err);
       });
     return () => { cancelled = true; };
-  }, [dirPath]);
+  }, [dirPath, isGlobal]);
 
   const refresh = useCallback(async () => {
     if (!root) return;
@@ -258,7 +270,10 @@ export default function NotesPanel({ dirPath, onFileOpen, openedFilePath }: Prop
   };
 
   const count = files?.length ?? 0;
-  const unavailable = typeof api().notesRoot !== 'function';
+  const unavailable = isGlobal
+    ? typeof api().globalNotesRoot !== 'function'
+    : typeof api().notesRoot !== 'function';
+  const title = isGlobal ? 'Global Notes' : 'Notes';
 
   return (
     <div
@@ -270,10 +285,14 @@ export default function NotesPanel({ dirPath, onFileOpen, openedFilePath }: Prop
           onClick={() => setOpen(!open)}
           onContextMenu={(e) => openContextMenu(e, null)}
           className="flex items-center gap-1.5 flex-1 min-w-0 text-left"
-          title={open ? 'Hide notes' : 'Show notes — this peer’s private notes'}
+          title={
+            isGlobal
+              ? (open ? 'Hide global notes' : 'Show global notes — shared across all peers')
+              : (open ? 'Hide notes' : 'Show notes — this peer’s private notes')
+          }
         >
           <span className="text-muted text-[10px] w-3 shrink-0">{open ? '▼' : '▶'}</span>
-          <span className="text-[11px] uppercase tracking-wider text-text font-semibold">Notes</span>
+          <span className="text-[11px] uppercase tracking-wider text-text font-semibold">{title}</span>
           {count > 0 && <span className="text-[10px] text-accent font-mono shrink-0">{count}</span>}
         </button>
         <button
@@ -292,7 +311,7 @@ export default function NotesPanel({ dirPath, onFileOpen, openedFilePath }: Prop
         >
           {unavailable ? (
             <div className="px-3 py-3 text-xs text-muted italic">
-              Restart the app to enable Notes (preload needs to refresh).
+              Restart the app to enable {title} (preload needs to refresh).
             </div>
           ) : !tree ? (
             <div className="px-3 py-3 text-xs text-muted italic">Loading…</div>

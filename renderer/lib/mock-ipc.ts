@@ -505,6 +505,7 @@ export function createMockApi(): AgentsFlowApi {
     ],
 
     notesRoot: async (dirPath: string) => ({ root: `${dirPath}/.peersflow-notes-mock` }),
+    globalNotesRoot: async () => ({ root: `/tmp/.peersflow-global-notes-mock` }),
     listNotes: async (): Promise<FileEntry[]> => [
       { path: 'scratch.md', isIgnored: false },
       { path: 'ideas/roadmap.md', isIgnored: false },

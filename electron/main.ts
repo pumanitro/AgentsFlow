@@ -931,6 +931,21 @@ ipcMain.handle('notes:root', async (_e, dirPath: string): Promise<{ root: string
   return { root };
 });
 
+// The single GLOBAL notes folder — not tied to any tracked peer. Shared across
+// every peer and surfaced at the bottom of the home screen's Tracked Peers pane.
+// Stored under the same app-data notes/ tree as per-peer notes, keyed on a
+// reserved name that can't collide with a peer id or path hash. Reuses every
+// notes:list / files:* mutation handler unchanged.
+function globalNotesRoot(): string {
+  return path.join(app.getPath('userData'), 'notes', '__global__');
+}
+
+ipcMain.handle('notes:globalRoot', async (): Promise<{ root: string }> => {
+  const root = globalNotesRoot();
+  fs.mkdirSync(root, { recursive: true });
+  return { root };
+});
+
 ipcMain.handle('notes:list', async (_e, root: string): Promise<FileEntry[]> => {
   // Plain recursive walk — the notes folder isn't a git repo and notes have no
   // changed/ignored concept, so we deliberately skip the git-aware listFiles().

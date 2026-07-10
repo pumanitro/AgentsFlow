@@ -217,6 +217,10 @@ export interface AgentsFlowApi {
   // (NOT inside the project, so note files never appear in git or the project
   // tree). Creates it on first access and returns its absolute path.
   notesRoot: (dirPath: string) => Promise<{ root: string }>;
+  // The single GLOBAL notes folder — shared across every peer, not tied to any
+  // tracked directory. Stored under Peers Flow's app-data. Creates it on first
+  // access and returns its absolute path.
+  globalNotesRoot: () => Promise<{ root: string }>;
   // Plain recursive listing of a notes folder (no git semantics).
   listNotes: (root: string) => Promise<FileEntry[]>;
 

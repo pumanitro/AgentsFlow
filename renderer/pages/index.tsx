@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import dynamic from 'next/dynamic';
 import { useRouter } from 'next/router';
 import PinnedRow from '../components/PinnedRow';
 import DelegatedChildRow from '../components/DelegatedChildRow';
@@ -14,6 +15,12 @@ import StatsView from '../components/StatsView';
 import { api } from '../lib/ipc';
 import { useUIState } from '../lib/ui-state';
 import { Conversation, PinnedDivider, PinnedItemRef, PinnedTodo, TrackedDirectory } from '../../shared/types';
+
+// Both touch the Electron-only `api()` at render time, so they must be
+// client-only — this page is server-rendered by Next, where `api()` throws.
+// FileEditor (CodeMirror / BlockNote) also only loads when a note is previewed.
+const NotesPanel = dynamic(() => import('../components/NotesPanel'), { ssr: false });
+const FileEditor = dynamic(() => import('../components/FileEditor'), { ssr: false });
 
 type PinnedItem =
   | { kind: 'conversation'; id: string; ref: PinnedItemRef; conv: Conversation }
@@ -60,6 +67,10 @@ export default function Home() {
   // not be draggable, or click-dragging to select text starts a row drag.
   const [editingKey, setEditingKey] = useState<string | null>(null);
   const [justAddedConvId, setJustAddedConvId] = useState<string | null>(null);
+  // Global notes: the shared folder's absolute root (for the preview's relative
+  // path display) and the note currently open in the quick-look modal.
+  const [globalNotesRoot, setGlobalNotesRoot] = useState<string | null>(null);
+  const [globalNoteFile, setGlobalNoteFile] = useState<string | null>(null);
 
   const refreshAll = async () => {
     // The todos calls are optional-chained: in dev the renderer hot-reloads
@@ -80,6 +91,25 @@ export default function Home() {
   };
 
   useEffect(() => { refreshAll(); }, []);
+
+  // Resolve the shared global-notes root once, so the preview modal can show a
+  // path relative to it. The panel itself resolves the same (idempotent) root
+  // independently; this copy is only for display.
+  useEffect(() => {
+    const a = api();
+    if (typeof a.globalNotesRoot !== 'function') return;
+    a.globalNotesRoot().then((r) => setGlobalNotesRoot(r.root)).catch(() => undefined);
+  }, []);
+
+  // Esc closes the global-note quick-look (its editor flushes on unmount).
+  useEffect(() => {
+    if (!globalNoteFile) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') { e.preventDefault(); setGlobalNoteFile(null); }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [globalNoteFile]);
 
   useEffect(() => {
     const offC = api().onConversationsUpdated((next) => setConvs(next));
@@ -256,6 +286,7 @@ export default function Home() {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (historyDirId) return;
+      if (globalNoteFile) return; // the quick-look modal owns the keyboard
       if (view === 'stats') return;
       if (pinnedItems.length === 0) return;
 
@@ -319,7 +350,7 @@ export default function Home() {
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [pinnedItems, focusedIdx, selectedChildId, selectableRows, convs, router, historyDirId, commitReorder, view]);
+  }, [pinnedItems, focusedIdx, selectedChildId, selectableRows, convs, router, historyDirId, commitReorder, view, globalNoteFile]);
 
   useEffect(() => {
     if (!keyboardNavActive) return;
@@ -640,7 +671,8 @@ export default function Home() {
         // Two independently scrolling panes: the Tracked Peers picker as a
         // compact left sidebar, conversations + history on the right.
         <div className="h-full flex">
-        <aside className="w-72 shrink-0 border-r border-border overflow-y-auto px-3 py-4">
+        <aside className="w-72 shrink-0 border-r border-border flex flex-col min-h-0">
+          <div className="flex-1 min-h-0 overflow-y-auto px-3 py-4">
           <h2 className="text-xs uppercase tracking-wider text-muted mb-2">Tracked Peers</h2>
           <input
             value={peerQuery}
@@ -681,6 +713,15 @@ export default function Home() {
               />
             ))}
           </div>
+          </div>
+          {/* Global notes — shared across every peer, pinned to the bottom-left.
+              Collapsed by default; open/expanded state persists just like a
+              peer's own notes. Clicking a note opens the quick-look modal. */}
+          <NotesPanel
+            variant="global"
+            onFileOpen={(abs) => setGlobalNoteFile(abs)}
+            openedFilePath={globalNoteFile}
+          />
         </aside>
 
         <div className="flex-1 min-w-0 overflow-y-auto pb-4">
@@ -828,6 +869,32 @@ export default function Home() {
       </main>
 
       {view !== 'stats' && <SpawnBar targetDir={selectedDir} onSend={handleSpawn} />}
+
+      {globalNoteFile && (
+        <div
+          className="fixed inset-0 z-[70] flex items-center justify-center bg-bg/80 backdrop-blur-sm p-6"
+          onMouseDown={() => setGlobalNoteFile(null)}
+        >
+          <div
+            className="w-[min(1100px,92vw)] h-[88vh] rounded-lg border border-border bg-bg shadow-2xl overflow-hidden flex flex-col"
+            onMouseDown={(e) => e.stopPropagation()}
+          >
+            <div className="shrink-0 flex items-center gap-2 px-3 py-1.5 border-b border-border bg-panel/60">
+              <span className="text-[10px] uppercase tracking-wider text-muted shrink-0">Global note</span>
+              <span className="flex-1" />
+              <button
+                onClick={() => setGlobalNoteFile(null)}
+                className="text-muted hover:text-text text-sm px-2 py-0.5 rounded hover:bg-panel2"
+                title="Close (Esc)"
+                aria-label="Close preview"
+              >Close ✕</button>
+            </div>
+            <div className="flex-1 min-h-0">
+              <FileEditor filePath={globalNoteFile} baseDir={globalNotesRoot ?? undefined} autoFocus />
+            </div>
+          </div>
+        </div>
+      )}
 
       {helpOpen && <HelpModal onClose={() => setHelpOpen(false)} />}
 
