@@ -47,17 +47,33 @@ function jobStatePath(daemonShort: string): string {
 }
 
 // ---------- Background-daemon reaper ----------
-// A finished `claude --bg` daemon sometimes lingers as a live process instead of
-// exiting — and every peer-aware one also holds an `agentsflow-mcp-server` child.
-// Left alone these stragglers accumulate over a long session and across app
-// restarts, draining the OS process/PTY budget until node-pty's forkpty() fails
-// and aborts the whole app (SIGABRT). The reaper stops a *live* daemon only when
-// its conversation has sat in a terminal state past a grace period, is NOT
-// pinned, and is NOT being watched. `claude stop` ends the daemon, which closes
-// its mcp-server child's stdin so that exits too. The transcript stays on disk,
-// so the conversation is still fully resumable — we free the process, not the
-// data. Pinned / active / starting / blocked / viewed sessions are never touched.
+// A `claude --bg` daemon lingers as a live process instead of exiting — and every
+// peer-aware one also holds a `bg-pty-host` (which owns a real PTY) plus an
+// `agentsflow-mcp-server` child. Left alone these stragglers accumulate over a
+// long session and across app restarts, draining the OS process/PTY budget until
+// node-pty's forkpty() fails and aborts the whole app (SIGABRT). `claude stop`
+// ends the daemon, which tears down its pty-host and closes its mcp-server
+// child's stdin so those exit too. The transcript stays on disk, so the
+// conversation is still fully resumable — we free the process, not the data.
+//
+// There are TWO reap classes, because a daemon leaks in two ways:
+//
+//  1. TERMINAL — the daemon reported it finished (done/completed/failed/error).
+//     Reaped after a short grace (REAP_GRACE_MS).
+//
+//  2. ABANDONED — the far more common leak in practice: a background daemon ends
+//     its turn on a permission prompt / AskUserQuestion (→ `blocked`/`waiting`)
+//     or simply goes `idle`, and then sits there *indefinitely*. It never reaches
+//     a terminal state, so a terminal-only reaper never touches it, and it piles
+//     up as a live PTY-holding process forever. We reap such a daemon once it has
+//     been non-terminal but quiescent for a much longer "abandoned" grace
+//     (ABANDON_GRACE_MS). A later open of the conversation re-dispatches it, so
+//     this stays non-destructive.
+//
+// Pinned, on-screen (viewed), and actively-working (busy / working / starting)
+// sessions are ALWAYS spared, in both classes.
 const REAP_GRACE_MS = Number(process.env.AGENTSFLOW_DAEMON_REAP_GRACE_MS) || 15 * 60 * 1000;
+const ABANDON_GRACE_MS = Number(process.env.AGENTSFLOW_DAEMON_ABANDON_GRACE_MS) || 6 * 60 * 60 * 1000;
 const MAX_REAPS_PER_TICK = 4;
 let reapInFlight = false;
 
@@ -70,18 +86,28 @@ async function reapStaleDaemons(convs: Conversation[], liveRows: ClaudeAgentJson
     for (const c of convs) {
       if (reaped >= MAX_REAPS_PER_TICK) break;
       if (!c.daemonShort || c.pinned) continue;
-      if (!TERMINAL_STATES.has((c.state || '').toLowerCase())) continue;
-      // Only reap a daemon that's actually still running.
+      // Only a daemon that's actually still running is worth (and possible) to reap.
       const row = liveRows.find((r) => r.sessionId.startsWith(c.daemonShort));
       if (!row) continue;
       if (hasLiveViewer(c.sessionId || row.sessionId)) continue;
-      // Require the daemon to have been quiet (terminal) for a while — its
-      // state.json mtime is when it last did anything.
-      let finishedAt = 0;
-      try { finishedAt = fs.statSync(jobStatePath(c.daemonShort)).mtimeMs; } catch { /* no file */ }
-      if (finishedAt && now - finishedAt < REAP_GRACE_MS) continue;
+      // Never interrupt an in-progress turn or a session still booting.
+      const status = (row.status || '').toLowerCase();
+      const state = (c.state || '').toLowerCase();
+      if (status === 'busy' || state === 'working' || state === 'starting') continue;
+      // Classify: terminal (short grace) vs abandoned/quiescent (long grace).
+      const terminal = TERMINAL_STATES.has(state);
+      const abandoned = status === 'idle' || status === 'waiting' || state === 'blocked' || state === 'needs-input';
+      if (!terminal && !abandoned) continue;
+      const grace = terminal ? REAP_GRACE_MS : ABANDON_GRACE_MS;
+      // state.json mtime is when the daemon last did anything; fall back to the
+      // process start time if the file is missing. A daemon that just blocked /
+      // went idle has a fresh mtime and is kept until the grace elapses.
+      let quietAt = 0;
+      try { quietAt = fs.statSync(jobStatePath(c.daemonShort)).mtimeMs; } catch { /* no file */ }
+      if (!quietAt && row.startedAt) quietAt = row.startedAt;
+      if (quietAt && now - quietAt < grace) continue;
       reaped++;
-      console.log('[agentsflow][reaper] stopping lingering daemon', { short: c.daemonShort, state: c.state, title: c.title });
+      console.log('[agentsflow][reaper] stopping lingering daemon', { short: c.daemonShort, reason: terminal ? 'terminal' : 'abandoned', state, status, title: c.title });
       try { await stopAgent(c.daemonShort); } catch { /* best-effort; next tick retries */ }
     }
   } finally {
