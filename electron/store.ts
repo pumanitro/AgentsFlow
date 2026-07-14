@@ -1,9 +1,11 @@
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+import { performance } from 'node:perf_hooks';
 import { app } from 'electron';
 import { Conversation, PinnedDivider, PinnedItemRef, PinnedTodo, TrackedDirectory } from '../shared/types';
 import { placePinnedRefAfter, placePinnedRefAtEndOfFirstSection } from './pinned-order';
+import * as perf from './perf';
 
 interface StoreShape {
   directories: TrackedDirectory[];
@@ -16,12 +18,34 @@ interface StoreShape {
 let cache: StoreShape | null = null;
 let filePath: string | null = null;
 
+// ---- Persistence tuning ----
+// Coalesce rapid mutations into one write instead of rewriting the whole store
+// synchronously on every change (which, at ~2 MB / 1000+ conversations, stacked
+// dozens of blocking writes during a state-change burst and froze the UI).
+const FLUSH_DEBOUNCE_MS = 250;
+// A terminal, unpinned conversation older than this is "cold": it can't change,
+// so it lives in history.json and is only rewritten when the cold set itself
+// changes — keeping the frequently-written store.json small no matter how much
+// history accumulates. All conversations stay merged in memory, so every reader
+// (History view, pinned list, poller) is unaffected — only the disk split changes.
+const COLD_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+const COLD_TERMINAL_STATES = new Set(['done', 'completed', 'failed', 'error', 'stopped']);
+let dirty = false;
+let flushTimer: NodeJS.Timeout | null = null;
+let flushing = false;
+// The ids currently persisted in history.json, so we only rewrite it on change.
+let lastColdIds = new Set<string>();
+
 function getPath(): string {
   if (!filePath) {
     filePath = path.join(app.getPath('userData'), 'store.json');
     migrateLegacyStoreIfNeeded(filePath);
   }
   return filePath;
+}
+
+function historyPath(): string {
+  return path.join(app.getPath('userData'), 'history.json');
 }
 
 /**
@@ -159,31 +183,149 @@ function sanitizePinnedOrder(
 function load(): StoreShape {
   if (cache) return cache;
   const p = getPath();
+  let parsed: Partial<StoreShape> = {};
   try {
-    const raw = fs.readFileSync(p, 'utf8');
-    const parsed = JSON.parse(raw) as Partial<StoreShape>;
-    const conversations = (parsed.conversations ?? []).map(migrateConversation);
-    const dividers = sanitizeDividers(parsed.dividers);
-    const todos = sanitizeTodos(parsed.todos);
-    const pinnedOrder = sanitizePinnedOrder(parsed.pinnedOrder, conversations, dividers, todos);
-    cache = {
-      directories: parsed.directories ?? [],
-      conversations,
-      dividers,
-      todos,
-      pinnedOrder,
-    };
+    parsed = JSON.parse(fs.readFileSync(p, 'utf8')) as Partial<StoreShape>;
   } catch {
-    cache = { directories: [], conversations: [], dividers: [], todos: [], pinnedOrder: [] };
+    parsed = {};
   }
+  // Cold (archived) conversations live in a separate history.json. Read them and
+  // merge back so every in-memory reader sees the full set — the split is purely
+  // a write optimization. Hot wins on any id overlap (it's the fresher copy after
+  // a fallback full-write); dedup defends against that overlap.
+  let coldRaw: unknown[] = [];
+  try {
+    const h = JSON.parse(fs.readFileSync(historyPath(), 'utf8')) as { conversations?: unknown[] };
+    if (Array.isArray(h?.conversations)) coldRaw = h.conversations;
+  } catch {
+    /* no history.json yet — first run on the new format */
+  }
+  const byId = new Map<string, any>();
+  for (const c of parsed.conversations ?? []) if (c && (c as any).id) byId.set((c as any).id, c);
+  for (const c of coldRaw) if (c && (c as any).id && !byId.has((c as any).id)) byId.set((c as any).id, c);
+  const conversations = Array.from(byId.values()).map(migrateConversation);
+
+  const dividers = sanitizeDividers(parsed.dividers);
+  const todos = sanitizeTodos(parsed.todos);
+  const pinnedOrder = sanitizePinnedOrder(parsed.pinnedOrder, conversations, dividers, todos);
+  cache = { directories: parsed.directories ?? [], conversations, dividers, todos, pinnedOrder };
+  // Seed from what's already archived so the first flush doesn't needlessly
+  // rewrite history.json.
+  lastColdIds = new Set(coldRaw.map((c) => (c as any)?.id).filter(Boolean));
   return cache;
 }
 
+function convTimestamp(c: Conversation): number {
+  const ms = Date.parse(c.unpinnedAt || c.createdAt || '');
+  return Number.isNaN(ms) ? 0 : ms;
+}
+
+/** A conversation that can never change again and is old enough to archive. */
+function isCold(c: Conversation, now: number): boolean {
+  if (c.pinned) return false;
+  if (!COLD_TERMINAL_STATES.has((c.state || '').toLowerCase())) return false;
+  const ts = convTimestamp(c);
+  return ts > 0 && now - ts > COLD_AGE_MS;
+}
+
+function sameIdSet(a: Set<string>, b: Set<string>): boolean {
+  if (a.size !== b.size) return false;
+  for (const id of a) if (!b.has(id)) return false;
+  return true;
+}
+
+function writeFileAtomicSync(target: string, data: string): void {
+  fs.mkdirSync(path.dirname(target), { recursive: true });
+  const tmp = `${target}.${process.pid}.tmp`;
+  fs.writeFileSync(tmp, data, 'utf8');
+  fs.renameSync(tmp, target);
+}
+
+async function writeFileAtomic(target: string, data: string): Promise<void> {
+  fs.mkdirSync(path.dirname(target), { recursive: true });
+  const tmp = `${target}.${process.pid}.tmp`;
+  await fs.promises.writeFile(tmp, data, 'utf8');
+  await fs.promises.rename(tmp, target);
+}
+
+/**
+ * Split the cache into { hot, cold }, serialize both, and report whether the cold
+ * set changed. Serialization (the only synchronous, main-thread-blocking part of
+ * a flush) is timed as `store:save` so a lag spell attributes to it.
+ */
+function serializeSplit(s: StoreShape, now: number): { hotJson: string; coldJson: string | null; coldIds: Set<string> } {
+  const t0 = performance.now();
+  const all = s.conversations;
+  const cold = all.filter((c) => isCold(c, now));
+  const coldIds = new Set(cold.map((c) => c.id));
+  const coldChanged = !sameIdSet(coldIds, lastColdIds);
+  const coldJson = coldChanged ? JSON.stringify({ conversations: cold }) : null;
+  const hot = all.filter((c) => !coldIds.has(c.id));
+  const hotJson = JSON.stringify({
+    directories: s.directories,
+    dividers: s.dividers,
+    todos: s.todos,
+    pinnedOrder: s.pinnedOrder,
+    conversations: hot,
+  });
+  perf.record('store:save', performance.now() - t0);
+  return { hotJson, coldJson, coldIds };
+}
+
+// Debounced, coalescing write. Marks the cache dirty and lets an in-flight or
+// scheduled flush pick it up — so a burst of mutations produces a single write.
 function save(): void {
+  dirty = true;
+  if (flushTimer || flushing) return;
+  flushTimer = setTimeout(() => { flushTimer = null; void flushToDisk(); }, FLUSH_DEBOUNCE_MS);
+}
+
+async function flushToDisk(): Promise<void> {
+  if (flushing || !cache || !dirty) return;
+  const snapshot = cache;
+  flushing = true;
+  dirty = false;
+  try {
+    const { hotJson, coldJson, coldIds } = serializeSplit(snapshot, Date.now());
+    let coldOk = true;
+    if (coldJson !== null) {
+      try {
+        await writeFileAtomic(historyPath(), coldJson);
+        lastColdIds = coldIds;
+      } catch (err) {
+        // Cold write failed → fall back to writing EVERYTHING to store.json so
+        // nothing is lost (load() dedups the overlap). Retry the split next flush.
+        coldOk = false;
+        console.error('[agentsflow] history flush failed — writing full store as fallback', err);
+      }
+    }
+    await writeFileAtomic(getPath(), coldOk ? hotJson : JSON.stringify(snapshot));
+  } catch (err) {
+    console.error('[agentsflow] store flush failed', err);
+    dirty = true; // ensure a retry
+  } finally {
+    flushing = false;
+    if (dirty) save();
+  }
+}
+
+/** Synchronous flush for shutdown (before-quit / signal) so nothing is lost. */
+function flushToDiskSync(): void {
   if (!cache) return;
-  const p = getPath();
-  fs.mkdirSync(path.dirname(p), { recursive: true });
-  fs.writeFileSync(p, JSON.stringify(cache, null, 2), 'utf8');
+  const snapshot = cache;
+  if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; }
+  dirty = false;
+  try {
+    const { hotJson, coldJson, coldIds } = serializeSplit(snapshot, Date.now());
+    let coldOk = true;
+    if (coldJson !== null) {
+      try { writeFileAtomicSync(historyPath(), coldJson); lastColdIds = coldIds; }
+      catch (err) { coldOk = false; console.error('[agentsflow] history flushSync failed', err); }
+    }
+    writeFileAtomicSync(getPath(), coldOk ? hotJson : JSON.stringify(snapshot));
+  } catch (err) {
+    console.error('[agentsflow] store flushSync failed', err);
+  }
 }
 
 function dropPinnedRef(s: StoreShape, ref: PinnedItemRef): void {
@@ -197,6 +339,10 @@ function prependPinnedRef(s: StoreShape, ref: PinnedItemRef): void {
 
 
 export const store = {
+  /** Persist synchronously right now — for app shutdown, so no change is lost. */
+  flushSync(): void {
+    flushToDiskSync();
+  },
   getDirectories(): TrackedDirectory[] {
     return load().directories;
   },

@@ -4,6 +4,7 @@ import * as fs from 'fs';
 import { v4 as uuid } from 'uuid';
 import serve from 'electron-serve';
 import { installCrashLogging } from './logger';
+import * as perf from './perf';
 
 const APP_NAME = 'Peers Flow';
 app.setName(APP_NAME);
@@ -43,19 +44,83 @@ import {
 import { refreshNow, startPoller, stopPoller, syncWatchers, unwatchConversation, watchConversation } from './poller';
 import { bridgeSocketPath, buildBootstrapSystemPrompt, getMcpServerInfo, writeMcpConfigForConversation } from './mcp-bridge';
 import { buildDelegatePrompt } from './registry';
-import { startPeersBridge, type DelegateRequest, type OpenFileRequest } from './delegation-bridge';
+import { startPeersBridge, type DelegateRequest, type OpenFileRequest, type PeersBridge } from './delegation-bridge';
 import * as pty from './pty-manager';
 import * as fileWatcher from './file-watcher';
 import { gitStatus, listFiles } from './git';
 import { searchInFiles } from './search';
 import { deleteAttachmentFiles, pastedImagesRoot, prunePastedImages, sweepOrphanAttachments, todayDateSlug } from './attachments';
-import { Conversation, FileEntry, PinnedDivider, PinnedItemRef, PinnedTodo, SlashCommand, SpawnRequest, TrackedDirectory } from '../shared/types';
+import { BridgeHealth, Conversation, FileEntry, PinnedDivider, PinnedItemRef, PinnedTodo, SlashCommand, SpawnRequest, TrackedDirectory } from '../shared/types';
 
 const isDev = process.env.NODE_ENV === 'development';
 const loadURL = isDev ? null : serve({ directory: path.join(__dirname, '..', '..', '..', 'renderer', 'out') });
 
 let mainWindow: BrowserWindow | null = null;
-let stopBridge: (() => void) | null = null;
+let peersBridge: PeersBridge | null = null;
+
+// Single-instance guard. Two overlapping mains race on the delegation-bridge
+// socket: the one that quits first runs its teardown `unlinkSync` and deletes
+// the SURVIVOR's socket file, leaving a bound-but-unreachable listener — every
+// `delegate` then silently degrades to a headless (unwatchable) run for the
+// rest of the session. Preventing a second instance removes that race at the
+// root. The second launch quits immediately; we just focus the live window.
+if (!app.requestSingleInstanceLock()) {
+  app.quit();
+}
+app.on('second-instance', () => {
+  if (mainWindow) {
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.show();
+    mainWindow.focus();
+  }
+});
+
+/**
+ * A snapshot of the delegation bridge's reachability for the renderer's health
+ * dot / MCP modal. Falls back to an all-false snapshot if the bridge never came
+ * up (so the UI shows "down" rather than nothing).
+ */
+function bridgeHealthSnapshot(): BridgeHealth {
+  return (
+    peersBridge?.health() ?? {
+      socketPath: bridgeSocketPath(),
+      listening: false,
+      socketFileExists: false,
+      healthy: false,
+    }
+  );
+}
+
+// ----- Per-operation performance instrumentation -----
+// Wrap ipcMain.handle ONCE so every IPC handler (all of them live in this file)
+// is timed and attributed to the peer it touched — no per-call-site changes, and
+// future handlers are covered automatically. Slow ops (> perf.SLOW_MS) log
+// immediately; a periodic summary + the stall dump surface the bottleneck when
+// the UI lags. Peer resolution is lazy (only slow ops pay for it), so hot
+// channels like term:write stay cheap. Must run before the first handler below.
+function resolvePeerForArgs(args: unknown[]): string | undefined {
+  const dirs = store.getDirectories();
+  for (const a of args) {
+    if (typeof a !== 'string' || !a) continue;
+    const byId = dirs.find((d) => d.id === a);
+    if (byId) return byId.displayName;
+    const conv = store.getConversations().find((c) => c.id === a);
+    if (conv) return conv.displayName;
+    if (a.includes('/')) {
+      const byPath = dirs.find((d) => a === d.path || a.startsWith(`${d.path}/`));
+      if (byPath) return byPath.displayName;
+    }
+  }
+  return undefined;
+}
+
+type IpcHandleFn = typeof ipcMain.handle;
+const rawIpcHandle: IpcHandleFn = ipcMain.handle.bind(ipcMain);
+const timedIpcHandle: IpcHandleFn = (channel, listener) =>
+  rawIpcHandle(channel, (event, ...args) =>
+    perf.timed(channel, () => listener(event, ...args), () => resolvePeerForArgs(args)),
+  );
+ipcMain.handle = timedIpcHandle;
 
 function createWindow() {
   const win = new BrowserWindow({
@@ -131,11 +196,12 @@ app.whenReady().then(() => {
   }
   createWindow();
   startPoller(() => mainWindow);
+  perf.startPerfSummary();
 
   // The bridge must be live before any session can call `delegate` / `open_file`.
   // The handlers are hoisted (function declarations), so it's safe to reference them here.
   try {
-    stopBridge = startPeersBridge(bridgeSocketPath(), {
+    peersBridge = startPeersBridge(bridgeSocketPath(), {
       onDelegate: handleDelegate,
       onOpenFile: handleOpenFile,
     });
@@ -170,7 +236,10 @@ app.on('window-all-closed', () => {
 });
 
 app.on('before-quit', () => {
-  try { stopBridge?.(); } catch { /* ignore */ }
+  try { peersBridge?.stop(); } catch { /* ignore */ }
+  // Flush any debounced store changes synchronously so a quit never loses the
+  // last few mutations (the async debounce window would otherwise drop them).
+  try { store.flushSync(); } catch { /* ignore */ }
 });
 
 // ----- IPC -----
@@ -239,7 +308,14 @@ ipcMain.handle('dirs:remove', (_e, id: string) => {
   store.setDirectories(recomputeAllDisplayNames(dirs));
 });
 
-ipcMain.handle('mcp:info', () => getMcpServerInfo(store.getDirectories()));
+ipcMain.handle('mcp:info', () => ({
+  ...getMcpServerInfo(store.getDirectories()),
+  bridge: bridgeHealthSnapshot(),
+}));
+
+// Lightweight liveness poll for the header health dot — avoids rebuilding the
+// full MCP descriptor (which rescans peers/skills) on every tick.
+ipcMain.handle('bridge:health', () => bridgeHealthSnapshot());
 
 ipcMain.handle('convs:list', () => store.getConversations());
 

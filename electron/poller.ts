@@ -7,6 +7,7 @@ import { hasLiveViewer } from './pty-manager';
 import { store } from './store';
 import { Conversation } from '../shared/types';
 import { effectiveState, deriveDescription, reconcileLiveState, deriveLiveDescription, findLiveRow } from './derive-state';
+import * as perf from './perf';
 
 let fallbackTimer: NodeJS.Timeout | null = null;
 const watchers = new Map<string, fs.FSWatcher>();
@@ -73,8 +74,13 @@ function jobStatePath(daemonShort: string): string {
 // Pinned, on-screen (viewed), and actively-working (busy / working / starting)
 // sessions are ALWAYS spared, in both classes.
 const REAP_GRACE_MS = Number(process.env.AGENTSFLOW_DAEMON_REAP_GRACE_MS) || 15 * 60 * 1000;
-const ABANDON_GRACE_MS = Number(process.env.AGENTSFLOW_DAEMON_ABANDON_GRACE_MS) || 6 * 60 * 60 * 1000;
-const MAX_REAPS_PER_TICK = 4;
+// Lowered from 6h → 2h: abandoned daemons are the main driver of the process/PTY
+// leak that makes `claude agents --json` (and thus every poll tick) slow, so we
+// reclaim them sooner. Still non-destructive — a later open re-dispatches them.
+const ABANDON_GRACE_MS = Number(process.env.AGENTSFLOW_DAEMON_ABANDON_GRACE_MS) || 2 * 60 * 60 * 1000;
+// Raised from 4 → 10 so a large backlog drains in minutes rather than tens of
+// minutes (each reap is a cheap fire-and-forget `claude stop`).
+const MAX_REAPS_PER_TICK = 10;
 let reapInFlight = false;
 
 async function reapStaleDaemons(convs: Conversation[], liveRows: ClaudeAgentJsonRow[]): Promise<void> {
@@ -207,12 +213,53 @@ export function syncWatchers(): void {
   }
 }
 
+// Index the live `claude agents --json` rows once per tick so the per-conversation
+// lookup is O(1) instead of an O(rows) scan for each of the (potentially hundreds
+// of) conversations. Matching precedence mirrors findLiveRow: name → daemonShort
+// (an 8-char sessionId prefix) → full sessionId.
+interface RowIndex {
+  byName: Map<string, ClaudeAgentJsonRow>;
+  byId: Map<string, ClaudeAgentJsonRow>;
+  byShort: Map<string, ClaudeAgentJsonRow>;
+}
+function buildRowIndex(rows: ClaudeAgentJsonRow[]): RowIndex {
+  const byName = new Map<string, ClaudeAgentJsonRow>();
+  const byId = new Map<string, ClaudeAgentJsonRow>();
+  const byShort = new Map<string, ClaudeAgentJsonRow>();
+  for (const r of rows) {
+    if (r.name) byName.set(r.name, r);
+    if (r.sessionId) {
+      byId.set(r.sessionId, r);
+      const short = r.sessionId.slice(0, 8);
+      if (!byShort.has(short)) byShort.set(short, r);
+    }
+  }
+  return { byName, byId, byShort };
+}
+function lookupRow(index: RowIndex, rows: ClaudeAgentJsonRow[], c: Conversation): ClaudeAgentJsonRow | undefined {
+  if (c.sessionName) { const r = index.byName.get(c.sessionName); if (r) return r; }
+  if (c.daemonShort) {
+    if (c.daemonShort.length === 8) { const r = index.byShort.get(c.daemonShort); if (r) return r; }
+    else { const r = findLiveRow(c, rows); if (r) return r; } // rare: non-8-char short
+  }
+  if (c.sessionId) { const r = index.byId.get(c.sessionId); if (r) return r; }
+  return undefined;
+}
+
+// Timed wrapper around a poll cycle so main.log shows how long each tick — and
+// the `claude agents --json` subprocess inside it — actually takes. The poll is
+// a prime suspect for main-thread load, so `poll:tick` / `poll:listAgents`
+// timings are what tell you whether a lag spell is the CLI call or reconciliation.
 async function fallbackTick(): Promise<void> {
+  await perf.timed('poll:tick', fallbackTickImpl);
+}
+
+async function fallbackTickImpl(): Promise<void> {
   syncWatchers();
   const convs = store.getConversations();
   if (convs.length === 0) return;
 
-  const result = await listAgentsResult();
+  const result = await perf.timed('poll:listAgents', () => listAgentsResult());
   // On transient CLI failure: don't touch state, don't advance miss counters.
   // The next tick will re-attempt; meanwhile the UI keeps the last good state
   // rather than oscillating to "done" on every flaky list call.
@@ -220,6 +267,7 @@ async function fallbackTick(): Promise<void> {
     return;
   }
   const rows: ClaudeAgentJsonRow[] = result.rows;
+  const rowIndex = buildRowIndex(rows);
 
   // Drop miss counters for conversations that no longer exist.
   const liveIds = new Set(convs.map((c) => c.id));
@@ -229,9 +277,17 @@ async function fallbackTick(): Promise<void> {
 
   let anyChange = false;
   const updated = convs.map((c) => {
+    // Terminal conversations can't change from polling — skip the live-row lookup
+    // and the state.json read (the expensive part) entirely. Only clear a stale
+    // live `status` if one somehow lingers. This keeps per-tick work proportional
+    // to ACTIVE conversations, not total history (which grows without bound).
+    if (TERMINAL_STATES.has((c.state || '').toLowerCase())) {
+      if (c.status) { anyChange = true; return { ...c, status: '' }; }
+      return c;
+    }
     let next = c;
     let changed = false;
-    const row = findLiveRow(c, rows);
+    const row = lookupRow(rowIndex, rows, c);
     if (row) {
       missCount.delete(c.id);
       // `status` mirrors the live row's real-time process status (busy/idle/
@@ -292,7 +348,12 @@ async function fallbackTick(): Promise<void> {
   void reapStaleDaemons(updated, rows);
 }
 
-const FAST_TICK_MS = 3000;
+// The file-watcher already delivers per-conversation state.json changes in real
+// time, so this poll is only the periodic liveness/reconcile + reaper pass. 5s
+// (was 3s) meaningfully cuts `claude agents --json` spawn frequency — the biggest
+// recurring main-thread load — while daemon-death is still detected within
+// MISS_THRESHOLD ticks (~10s).
+const FAST_TICK_MS = 5000;
 const SLOW_TICK_MS = 30000;
 
 function scheduleNextTick(): void {

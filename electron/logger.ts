@@ -1,6 +1,7 @@
 import { app } from 'electron';
 import * as fs from 'fs';
 import * as path from 'path';
+import { recentSlowOpsSummary } from './perf';
 
 // ---------- Persistent main-process logging ----------
 // Until now the main process only ever wrote to console.*, which in dev scrolls
@@ -139,7 +140,9 @@ export function installCrashLogging(): void {
     const now = Date.now();
     const stall = now - lastTick - LOOP_TICK_MS;
     if (stall > LOOP_STALL_THRESHOLD_MS) {
-      console.error(`[agentsflow][stall] main event loop blocked for ~${Math.round(stall)}ms — the UI was frozen`);
+      // Append the recent slow-op history so a freeze can be attributed to the
+      // operation that caused it, instead of just recording that one happened.
+      console.error(`[agentsflow][stall] main event loop blocked for ~${Math.round(stall)}ms — the UI was frozen${recentSlowOpsSummary()}`);
     }
     lastTick = now;
   }, LOOP_TICK_MS);

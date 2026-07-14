@@ -184,6 +184,14 @@ export function createMockApi(): AgentsFlowApi {
         hasProjectMcp: d.displayName === 'abi',
         skills: d.displayName === 'abi' ? ['slack-connect', 'daily-digest'] : [],
       })),
+      bridge: { socketPath: '/mock/userData/peersflow-bridge.sock', listening: true, socketFileExists: true, healthy: true },
+    }),
+
+    getBridgeHealth: async () => ({
+      socketPath: '/mock/userData/peersflow-bridge.sock',
+      listening: true,
+      socketFileExists: true,
+      healthy: true,
     }),
 
     listConversations: async () => state.conversations,

@@ -14,7 +14,7 @@ import McpModal from '../components/McpModal';
 import StatsView from '../components/StatsView';
 import { api } from '../lib/ipc';
 import { useUIState } from '../lib/ui-state';
-import { Conversation, PinnedDivider, PinnedItemRef, PinnedTodo, TrackedDirectory } from '../../shared/types';
+import { BridgeHealth, Conversation, PinnedDivider, PinnedItemRef, PinnedTodo, TrackedDirectory } from '../../shared/types';
 
 // Both touch the Electron-only `api()` at render time, so they must be
 // client-only — this page is server-rendered by Next, where `api()` throws.
@@ -44,6 +44,10 @@ export default function Home() {
   const [historyDirId, setHistoryDirId] = useState<string | null>(null);
   const [helpOpen, setHelpOpen] = useState(false);
   const [mcpOpen, setMcpOpen] = useState(false);
+  // Live delegation-bridge liveness, polled for the header health dot. When this
+  // goes down, delegations silently degrade to unwatchable headless runs, so we
+  // surface it at a glance rather than leaving it invisible.
+  const [bridgeHealth, setBridgeHealth] = useState<BridgeHealth | null>(null);
   // A delegated peer (sub-row) can be selected independently of its root row.
   // When set, the root's own selection highlight is suppressed so only one
   // element — root OR peer — shows the orange selection at a time.
@@ -91,6 +95,22 @@ export default function Home() {
   };
 
   useEffect(() => { refreshAll(); }, []);
+
+  // Poll the delegation-bridge liveness for the header health dot. Optional-
+  // chained: in dev the renderer can hot-reload ahead of the Electron main, so a
+  // not-yet-restarted preload may predate this IPC — treat that as "unknown"
+  // (dot hidden) rather than crashing.
+  useEffect(() => {
+    let alive = true;
+    const poll = () => {
+      const getHealth = api().getBridgeHealth;
+      if (typeof getHealth !== 'function') return;
+      getHealth().then((h) => { if (alive) setBridgeHealth(h); }).catch(() => undefined);
+    };
+    poll();
+    const t = setInterval(poll, 5000);
+    return () => { alive = false; clearInterval(t); };
+  }, []);
 
   // Resolve the shared global-notes root once, so the preview modal can show a
   // path relative to it. The panel itself resolves the same (idempotent) root
@@ -599,6 +619,25 @@ export default function Home() {
             <rect x="350" y="620" width="226" height="64" rx="32" ry="32" fill="#ff7847" fillOpacity="0.52" />
           </svg>
           <span className="font-semibold text-sm tracking-tight">Peers Flow</span>
+          {bridgeHealth && (
+            <button
+              onClick={() => setMcpOpen(true)}
+              title={
+                bridgeHealth.healthy
+                  ? 'Delegation bridge live — delegations spawn watchable sub-peer sessions. Click for details.'
+                  : 'Delegation bridge DOWN — delegations run headless & unwatchable (no sub-peer row). Restart Peers Flow. Click for details.'
+              }
+              aria-label={bridgeHealth.healthy ? 'Delegation bridge live' : 'Delegation bridge down'}
+              className="shrink-0 flex items-center"
+              style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
+            >
+              <span
+                className={`w-2 h-2 rounded-full ${
+                  bridgeHealth.healthy ? 'bg-emerald-400/80' : 'bg-red-400 animate-pulse ring-2 ring-red-500/30'
+                }`}
+              />
+            </button>
+          )}
         </div>
         )}
         <div className="flex items-center gap-2" style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}>

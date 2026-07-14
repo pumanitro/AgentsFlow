@@ -72,6 +72,37 @@ export default function McpModal({ onClose }: Props) {
 
           {info && (
             <>
+              {info.bridge && (
+                <section>
+                  <div
+                    className={`flex items-start gap-2.5 rounded-lg border px-3 py-2.5 ${
+                      info.bridge.healthy
+                        ? 'border-emerald-500/40 bg-emerald-500/10'
+                        : 'border-red-500/40 bg-red-500/10'
+                    }`}
+                  >
+                    <span
+                      className={`mt-1 w-2 h-2 rounded-full shrink-0 ${
+                        info.bridge.healthy ? 'bg-emerald-400' : 'bg-red-400 animate-pulse'
+                      }`}
+                    />
+                    <div className="min-w-0">
+                      <div className="text-[13px] font-medium text-text">
+                        Delegation bridge: {info.bridge.healthy ? 'live' : 'DOWN'}
+                      </div>
+                      <div className="text-[12px] text-muted mt-0.5 leading-snug">
+                        {info.bridge.healthy
+                          ? 'Delegations spawn tracked, watchable sub-peer sessions that appear nested under their root on the home screen.'
+                          : 'Delegations cannot reach the app and fall back to headless, unwatchable runs (no sub-peer row). Restart Peers Flow to restore it.'}
+                      </div>
+                      <div className="text-[11px] text-muted/80 font-mono mt-1 break-all">
+                        listening={String(info.bridge.listening)} · socketFile={String(info.bridge.socketFileExists)} · {info.bridge.socketPath}
+                      </div>
+                    </div>
+                  </div>
+                </section>
+              )}
+
               <section>
                 <p className="text-sm text-text/90 leading-relaxed">
                   Every session Peers Flow spawns automatically loads this MCP server and a fresh

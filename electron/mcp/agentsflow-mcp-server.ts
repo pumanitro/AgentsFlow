@@ -337,12 +337,18 @@ async function toolDelegate(rawArgs: DelegateArgs): Promise<Record<string, unkno
     const envelope = await runBridgeDelegate(directoryToken, goal, deliverable, timeoutMs);
     if (envelope) {
       const artifactPath = writeArtifact(envelope, String(envelope.directory || directoryToken));
-      return textContent(JSON.stringify({ ...envelope, artifactPath }, null, 2), envelope.status === 'failure');
+      // `watchable: true` — this ran as a tracked app session with a sub-peer row.
+      return textContent(JSON.stringify({ ...envelope, watchable: true, artifactPath }, null, 2), envelope.status === 'failure');
     }
-    log('bridge unavailable/failed — falling back to headless claude -p');
+    // BRIDGE_SOCK was set (we're inside the app) but the bridge was unreachable.
+    // We still run the work headless so it gets done, but flag it as DEGRADED so
+    // the calling agent surfaces that it was not watchable and produced no
+    // sub-peer row — instead of the failure looking identical to a normal run.
+    log('bridge unavailable/failed — falling back to headless claude -p (DEGRADED)');
+    return runInlineDelegate(directoryToken, goal, deliverable, timeoutMs, true);
   }
 
-  return runInlineDelegate(directoryToken, goal, deliverable, timeoutMs);
+  return runInlineDelegate(directoryToken, goal, deliverable, timeoutMs, false);
 }
 
 /**
@@ -355,7 +361,20 @@ async function runInlineDelegate(
   goal: string,
   deliverable: string,
   timeoutMs: number,
+  // True when we're inside the app (BRIDGE_SOCK set) but the bridge was
+  // unreachable — the run is NOT watchable and produces no sub-peer row, so
+  // every envelope below is stamped so the caller can surface that.
+  degraded: boolean,
 ): Promise<Record<string, unknown>> {
+  // Shared markers merged into every envelope this function returns. A headless
+  // run is never watchable; `degraded` additionally means it *should* have been.
+  const inlineMarkers: Record<string, unknown> = {
+    watchable: false,
+    degraded,
+    note: degraded
+      ? 'App bridge was unreachable — this ran as a headless `claude -p` (NOT watchable, no sub-peer row). Restart Peers Flow to restore live, watchable delegation.'
+      : undefined,
+  };
   if (DEPTH >= MAX_DEPTH) {
     return textContent(
       JSON.stringify(
@@ -413,8 +432,8 @@ async function runInlineDelegate(
       error: `Sub-agent timed out after ${timeoutMs}ms.`,
       durationMs,
     };
-    const artifactPath = writeArtifact(envelope, dir.displayName);
-    return textContent(JSON.stringify({ ...envelope, artifactPath }, null, 2), true);
+    const artifactPath = writeArtifact({ ...envelope, ...inlineMarkers }, dir.displayName);
+    return textContent(JSON.stringify({ ...envelope, ...inlineMarkers, artifactPath }, null, 2), true);
   }
 
   // `claude -p --output-format json` prints a single JSON result object.
@@ -436,8 +455,8 @@ async function runInlineDelegate(
       error: res.code === 0 ? null : firstLines(res.stderr) || `Exit code ${res.code}`,
       durationMs,
     };
-    const artifactPath = writeArtifact(envelope, dir.displayName);
-    return textContent(JSON.stringify({ ...envelope, artifactPath }, null, 2), envelope.status === 'failure');
+    const artifactPath = writeArtifact({ ...envelope, ...inlineMarkers }, dir.displayName);
+    return textContent(JSON.stringify({ ...envelope, ...inlineMarkers, artifactPath }, null, 2), envelope.status === 'failure');
   }
 
   const result = typeof parsed.result === 'string' ? parsed.result : '';
@@ -455,8 +474,8 @@ async function runInlineDelegate(
     numTurns: typeof parsed.num_turns === 'number' ? parsed.num_turns : undefined,
     error: isError ? result || 'Sub-agent reported an error.' : null,
   };
-  const artifactPath = writeArtifact(envelope, dir.displayName);
-  return textContent(JSON.stringify({ ...envelope, artifactPath }, null, 2), isError);
+  const artifactPath = writeArtifact({ ...envelope, ...inlineMarkers }, dir.displayName);
+  return textContent(JSON.stringify({ ...envelope, ...inlineMarkers, artifactPath }, null, 2), isError);
 }
 
 // ---------------------------------------------------------------------------

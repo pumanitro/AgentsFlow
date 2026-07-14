@@ -209,14 +209,26 @@ function parseZ(s: string): string[] {
   return s.split('\0').filter(Boolean);
 }
 
-function walkFs(cwd: string, sub = '', acc: FileEntry[] = []): FileEntry[] {
+// Non-git directories fall back to this filesystem walk. It is bounded — by depth
+// and total entries — and skips heavy build/dependency dirs, so a huge non-repo
+// folder (e.g. ~/Desktop) can't block the main thread for hundreds of ms on every
+// `files:list`. (Git repos never reach here; they use `git ls-files`.)
+const WALK_MAX_ENTRIES = 5000;
+const WALK_MAX_DEPTH = 6;
+const WALK_SKIP_DIRS = new Set([
+  '.git', 'node_modules', '.next', 'dist', 'build', '.cache', '.turbo',
+  '__pycache__', '.venv', 'venv', '.gradle', '.idea', 'DerivedData',
+]);
+function walkFs(cwd: string, sub = '', acc: FileEntry[] = [], depth = 0): FileEntry[] {
+  if (acc.length >= WALK_MAX_ENTRIES || depth > WALK_MAX_DEPTH) return acc;
   const here = sub ? path.join(cwd, sub) : cwd;
   let entries: fs.Dirent[];
   try { entries = fs.readdirSync(here, { withFileTypes: true }); } catch { return acc; }
   for (const ent of entries) {
-    if (ent.name === '.git' || ent.name === 'node_modules') continue;
+    if (acc.length >= WALK_MAX_ENTRIES) break;
+    if (WALK_SKIP_DIRS.has(ent.name)) continue;
     const rel = sub ? path.join(sub, ent.name) : ent.name;
-    if (ent.isDirectory()) walkFs(cwd, rel, acc);
+    if (ent.isDirectory()) walkFs(cwd, rel, acc, depth + 1);
     else acc.push({ path: rel, isIgnored: false });
   }
   return acc;

@@ -17,6 +17,7 @@
  */
 import * as net from 'net';
 import * as fs from 'fs';
+import type { BridgeHealth } from '../shared/types';
 
 export interface DelegateRequest {
   type?: 'delegate';
@@ -48,54 +49,106 @@ export interface BridgeHandlers {
   onOpenFile: (req: OpenFileRequest) => Promise<BridgeEnvelope>;
 }
 
+/** Handle to a running bridge: query its liveness or shut it down. */
+export interface PeersBridge {
+  /** A fresh snapshot of the bridge's reachability, for the UI health dot. */
+  health: () => BridgeHealth;
+  /** Stop the watchdog, close the server, and remove the socket file. */
+  stop: () => void;
+}
+
+// How often the watchdog re-checks the socket. The socket can be silently
+// disabled if something deletes the file out from under a live listener (a
+// bound-but-unlinked socket stays "listening" yet is unreachable — ENOENT on
+// connect). A cheap periodic check turns "dead until restart" into "self-heals
+// within one tick".
+const WATCHDOG_INTERVAL_MS = 10_000;
+
 export function startPeersBridge(
   socketPath: string,
   handlers: BridgeHandlers,
-): () => void {
-  // A stale socket file from a previous run would make listen() fail with EADDRINUSE.
-  try { fs.unlinkSync(socketPath); } catch { /* not present */ }
+): PeersBridge {
+  let server: net.Server | null = null;
+  let stopped = false;
 
-  const server = net.createServer((sock) => {
-    let buffer = '';
-    let handled = false;
-    sock.setEncoding('utf8');
-    sock.on('data', (chunk: string) => {
-      buffer += chunk;
-      const nl = buffer.indexOf('\n');
-      if (nl < 0 || handled) return;
-      handled = true;
-      const line = buffer.slice(0, nl).trim();
-      let req: (DelegateRequest | OpenFileRequest) & { id?: string } | null = null;
-      try {
-        req = JSON.parse(line) as DelegateRequest | OpenFileRequest;
-      } catch {
-        sock.end(`${JSON.stringify({ type: 'result', id: '', envelope: { status: 'failure', error: 'bad request json' } })}\n`);
-        return;
-      }
-      const reply = (envelope: BridgeEnvelope) => {
-        try { sock.end(`${JSON.stringify({ type: 'result', id: req!.id, envelope })}\n`); } catch { /* socket gone */ }
-      };
-      // Route by request type. Anything without an explicit type is a delegate
-      // (the original, pre-open_file protocol).
-      const run = req.type === 'open_file'
-        ? handlers.onOpenFile(req as OpenFileRequest)
-        : handlers.onDelegate(req as DelegateRequest);
-      run
-        .then(reply)
-        .catch((e) => reply({ status: 'failure', error: `bridge error: ${(e as Error).message}` }));
+  const makeServer = (): net.Server => {
+    const s = net.createServer((sock) => {
+      let buffer = '';
+      let handled = false;
+      sock.setEncoding('utf8');
+      sock.on('data', (chunk: string) => {
+        buffer += chunk;
+        const nl = buffer.indexOf('\n');
+        if (nl < 0 || handled) return;
+        handled = true;
+        const line = buffer.slice(0, nl).trim();
+        let req: (DelegateRequest | OpenFileRequest) & { id?: string } | null = null;
+        try {
+          req = JSON.parse(line) as DelegateRequest | OpenFileRequest;
+        } catch {
+          sock.end(`${JSON.stringify({ type: 'result', id: '', envelope: { status: 'failure', error: 'bad request json' } })}\n`);
+          return;
+        }
+        const reply = (envelope: BridgeEnvelope) => {
+          try { sock.end(`${JSON.stringify({ type: 'result', id: req!.id, envelope })}\n`); } catch { /* socket gone */ }
+        };
+        // Route by request type. Anything without an explicit type is a delegate
+        // (the original, pre-open_file protocol).
+        const run = req.type === 'open_file'
+          ? handlers.onOpenFile(req as OpenFileRequest)
+          : handlers.onDelegate(req as DelegateRequest);
+        run
+          .then(reply)
+          .catch((e) => reply({ status: 'failure', error: `bridge error: ${(e as Error).message}` }));
+      });
+      sock.on('error', () => { /* client vanished mid-flight; nothing to do */ });
     });
-    sock.on('error', () => { /* client vanished mid-flight; nothing to do */ });
-  });
+    s.on('error', (err) => {
+      // EADDRINUSE / permission errors land here; the watchdog will retry a bind.
+      console.error('[peersflow] bridge server error', err);
+    });
+    return s;
+  };
 
-  server.on('error', (err) => {
-    console.error('[peersflow] bridge server error', err);
-  });
-  server.listen(socketPath, () => {
-    console.log('[peersflow] bridge listening at', socketPath);
-  });
+  const bind = (): void => {
+    if (stopped) return;
+    // A stale socket file (a previous run, or one left behind) makes listen()
+    // fail with EADDRINUSE, so clear it first, then bind a fresh one.
+    try { fs.unlinkSync(socketPath); } catch { /* not present */ }
+    server = makeServer();
+    server.listen(socketPath, () => {
+      console.log('[peersflow] bridge listening at', socketPath);
+    });
+  };
 
-  return () => {
-    try { server.close(); } catch { /* ignore */ }
-    try { fs.unlinkSync(socketPath); } catch { /* ignore */ }
+  bind();
+
+  // Watchdog: if the socket file vanished or the server dropped out of the
+  // listening state, rebind so the bridge recovers on its own instead of
+  // silently forcing every delegate onto the unwatchable headless fallback.
+  const watchdog = setInterval(() => {
+    if (stopped) return;
+    const fileOk = fs.existsSync(socketPath);
+    const listening = !!server?.listening;
+    if (!fileOk || !listening) {
+      console.error(`[peersflow] bridge unhealthy (socketFile=${fileOk} listening=${listening}) — rebinding`);
+      try { server?.close(); } catch { /* ignore */ }
+      bind();
+    }
+  }, WATCHDOG_INTERVAL_MS);
+  watchdog.unref?.();
+
+  return {
+    health: (): BridgeHealth => {
+      const listening = !stopped && !!server?.listening;
+      const socketFileExists = !stopped && fs.existsSync(socketPath);
+      return { socketPath, listening, socketFileExists, healthy: listening && socketFileExists };
+    },
+    stop: (): void => {
+      stopped = true;
+      clearInterval(watchdog);
+      try { server?.close(); } catch { /* ignore */ }
+      try { fs.unlinkSync(socketPath); } catch { /* ignore */ }
+    },
   };
 }

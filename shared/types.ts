@@ -136,6 +136,24 @@ export interface McpPeerSummary {
 
 // Everything the "MCP server" preview modal needs: connection details, the
 // tools the server exposes, and a snapshot of the current peer registry.
+/**
+ * Liveness of the delegation bridge — the unix-domain socket the MCP server
+ * calls back on to spawn *tracked, watchable* peer sessions. When it is down,
+ * `delegate` silently degrades to a headless `claude -p` (no sub-peer row, not
+ * watchable), so the UI surfaces this so a dead bridge is never invisible.
+ */
+export interface BridgeHealth {
+  socketPath: string;
+  // The main-process server reports itself as accepting connections.
+  listening: boolean;
+  // The socket file is present on disk. A bound-but-unlinked socket is
+  // unreachable by any NEW client (ENOENT on connect) even while `listening` is
+  // true — that exact split is the failure that silently disables delegation.
+  socketFileExists: boolean;
+  // Both of the above: the bridge is actually reachable by the MCP server.
+  healthy: boolean;
+}
+
 export interface McpServerInfo {
   serverName: string;
   // Whether the compiled server script is present on disk (wired into spawns).
@@ -146,6 +164,8 @@ export interface McpServerInfo {
   configJson: string;
   tools: McpToolSummary[];
   peers: McpPeerSummary[];
+  // Live delegation-bridge liveness (set by the `mcp:info` IPC handler).
+  bridge?: BridgeHealth;
 }
 
 export interface AgentsFlowApi {
@@ -161,6 +181,10 @@ export interface AgentsFlowApi {
   // Connection info + tool catalogue + live peer registry for the MCP server
   // that powers peer awareness and delegation.
   getMcpServerInfo: () => Promise<McpServerInfo>;
+
+  // Lightweight liveness of the delegation bridge socket — polled for the
+  // at-a-glance health dot without rebuilding the whole MCP descriptor.
+  getBridgeHealth: () => Promise<BridgeHealth>;
 
   listConversations: () => Promise<Conversation[]>;
   spawnAgent: (req: SpawnRequest) => Promise<SpawnResult>;
