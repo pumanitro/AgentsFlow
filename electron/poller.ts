@@ -158,7 +158,17 @@ function applyJobToConversation(
 function refreshOneFromFile(conversationId: string): void {
   const conv = store.getConversations().find((c) => c.id === conversationId);
   if (!conv) return;
-  const { next, changed } = applyJobToConversation(conv);
+  let { next, changed } = applyJobToConversation(conv);
+  // state.json just settled this conversation into a terminal state, but the live
+  // `status` (last written by the poll) may still read "busy"/"waiting" — and the
+  // dot checks `status` BEFORE `state`, so a stale "busy" would keep a finished
+  // conversation blue until the next poll clears it (up to FAST_TICK_MS later).
+  // Clear it here so the dot flips green the instant the file-watcher sees done —
+  // real-time, off the cheap event-driven path, with no poll latency.
+  if (next.status && TERMINAL_STATES.has((next.state || '').toLowerCase())) {
+    next = { ...next, status: '' };
+    changed = true;
+  }
   if (changed) {
     store.updateConversation(conversationId, next);
     schedulePush();
@@ -277,17 +287,27 @@ async function fallbackTickImpl(): Promise<void> {
 
   let anyChange = false;
   const updated = convs.map((c) => {
-    // Terminal conversations can't change from polling — skip the live-row lookup
-    // and the state.json read (the expensive part) entirely. Only clear a stale
-    // live `status` if one somehow lingers. This keeps per-tick work proportional
-    // to ACTIVE conversations, not total history (which grows without bound).
-    if (TERMINAL_STATES.has((c.state || '').toLowerCase())) {
+    // The indexed live-row lookup is O(1) and cheap, so we do it even for
+    // terminal conversations: a FINISHED session that was re-opened (its daemon
+    // is live again — now busy/waiting) must flip its dot back green→blue/amber,
+    // which only `reconcileLiveState` against the live row can detect (a
+    // --resume'd session leaves its state.json frozen, so the file-watcher never
+    // fires). What we skip for terminal conversations is the EXPENSIVE part — the
+    // per-conversation state.json read — but ONLY when there is genuinely no live
+    // daemon to react to. Steady-state work stays proportional to ACTIVE +
+    // re-opened conversations, never total history, yet a re-activated dot is
+    // never frozen.
+    const row = lookupRow(rowIndex, rows, c);
+    if (TERMINAL_STATES.has((c.state || '').toLowerCase()) && !row) {
+      // Confirmed dead: no live process, so the real-time `status` is meaningless
+      // — clear any stale one (a lingering "busy" would otherwise keep the dot
+      // blue) and skip the state.json read entirely.
+      missCount.delete(c.id);
       if (c.status) { anyChange = true; return { ...c, status: '' }; }
       return c;
     }
     let next = c;
     let changed = false;
-    const row = lookupRow(rowIndex, rows, c);
     if (row) {
       missCount.delete(c.id);
       // `status` mirrors the live row's real-time process status (busy/idle/
