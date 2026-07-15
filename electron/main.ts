@@ -1,9 +1,9 @@
-import { app, BrowserWindow, clipboard, dialog, ipcMain, nativeImage, shell } from 'electron';
+import { app, BrowserWindow, clipboard, dialog, ipcMain, nativeImage, powerMonitor, shell } from 'electron';
 import * as path from 'path';
 import * as fs from 'fs';
 import { v4 as uuid } from 'uuid';
 import serve from 'electron-serve';
-import { installCrashLogging } from './logger';
+import { installCrashLogging, notePowerResume, notePowerSuspend } from './logger';
 import * as perf from './perf';
 
 const APP_NAME = 'Peers Flow';
@@ -41,7 +41,7 @@ import {
   readJobState,
   hasLiveDaemon,
 } from './claude-cli';
-import { refreshNow, startPoller, stopPoller, syncWatchers, unwatchConversation, watchConversation } from './poller';
+import { refreshNow, setPollerForeground, startPoller, stopPoller, syncWatchers, unwatchConversation, watchConversation } from './poller';
 import { bridgeSocketPath, buildBootstrapSystemPrompt, getMcpServerInfo, writeMcpConfigForConversation } from './mcp-bridge';
 import { buildDelegatePrompt } from './registry';
 import { startPeersBridge, type DelegateRequest, type OpenFileRequest, type PeersBridge } from './delegation-bridge';
@@ -180,6 +180,22 @@ function createWindow() {
   // renderer itself is wedged — pure diagnosis signal for a freeze report.
   win.webContents.on('unresponsive', () => console.error('[agentsflow][stall] renderer unresponsive'));
   win.webContents.on('responsive', () => console.log('[agentsflow][stall] renderer responsive again'));
+
+  // Drive the poller's cadence from window visibility: fast 5s polling only
+  // matters while the user is actually looking at the dots. Blur/hide/minimize
+  // → back off to the slow cadence (kills the steady `claude agents --json`
+  // churn while backgrounded); focus/show/restore → refresh immediately and go
+  // fast again. macOS can't report cross-Space occlusion, so focus is the best
+  // available proxy for "the user is elsewhere".
+  const toBackground = () => setPollerForeground(false);
+  const toForeground = () => setPollerForeground(true);
+  win.on('focus', toForeground);
+  win.on('show', toForeground);
+  win.on('restore', toForeground);
+  win.on('blur', toBackground);
+  win.on('hide', toBackground);
+  win.on('minimize', toBackground);
+
   win.on('closed', () => {
     if (mainWindow === win) mainWindow = null;
   });
@@ -197,6 +213,22 @@ app.whenReady().then(() => {
   createWindow();
   startPoller(() => mainWindow);
   perf.startPerfSummary();
+
+  // OS sleep/wake: tell the stall detector so the multi-minute gap it sees on
+  // resume is logged as a power event, not a "UI frozen" false alarm, and back
+  // the poller off while suspended. (powerMonitor is only available after
+  // `ready`, which is why this lives here rather than in installCrashLogging.)
+  powerMonitor.on('suspend', () => { notePowerSuspend(); setPollerForeground(false); });
+  powerMonitor.on('lock-screen', () => { notePowerSuspend(); setPollerForeground(false); });
+  const onWake = () => {
+    notePowerResume();
+    // Only resume fast polling if the window is actually in front on wake.
+    if (mainWindow && !mainWindow.isDestroyed() && mainWindow.isVisible() && mainWindow.isFocused()) {
+      setPollerForeground(true);
+    }
+  };
+  powerMonitor.on('resume', onWake);
+  powerMonitor.on('unlock-screen', onWake);
 
   // The bridge must be live before any session can call `delegate` / `open_file`.
   // The handlers are hoisted (function declarations), so it's safe to reference them here.

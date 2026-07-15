@@ -27,6 +27,20 @@ const SUMMARY_INTERVAL_MS = 5 * 60_000;
 const RECENT_SLOW_CAP = 50;
 const SUMMARY_TOP_N = 10;
 
+// Some ops have an intrinsically high floor: spawning the `claude` CLI to list
+// agents is ~300ms even on a healthy machine, so gating it at the sensitive
+// 150ms default flagged EVERY poll tick as "SLOW" — thousands of noise lines a
+// day that buried the genuine multi-second spikes and flooded the stall dump.
+// Give those ops a realistic floor so only real regressions surface; every
+// other label keeps the sensitive default.
+const LABEL_SLOW_MS: Record<string, number> = {
+  'poll:listAgents': 1500,
+  'poll:tick': 1500,
+};
+function slowThreshold(label: string): number {
+  return LABEL_SLOW_MS[label] ?? SLOW_MS;
+}
+
 interface Stat {
   count: number;
   totalMs: number;
@@ -51,7 +65,7 @@ export function record(label: string, ms: number, peer?: string): void {
   s.totalMs += ms;
   if (peer) s.lastPeer = peer;
   if (ms > s.maxMs) { s.maxMs = ms; s.maxPeer = peer; }
-  if (ms >= SLOW_MS) {
+  if (ms >= slowThreshold(label)) {
     s.overCount++;
     recentSlow.push({ at: new Date().toISOString(), label, ms, peer });
     if (recentSlow.length > RECENT_SLOW_CAP) recentSlow.shift();
@@ -74,7 +88,7 @@ export async function timed<T>(
     return await fn();
   } finally {
     const ms = performance.now() - start;
-    record(label, ms, ms >= SLOW_MS && peerResolver ? peerResolver() : undefined);
+    record(label, ms, ms >= slowThreshold(label) && peerResolver ? peerResolver() : undefined);
   }
 }
 

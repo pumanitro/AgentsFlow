@@ -13,6 +13,12 @@ let fallbackTimer: NodeJS.Timeout | null = null;
 const watchers = new Map<string, fs.FSWatcher>();
 let getWindowRef: (() => BrowserWindow | null) | null = null;
 let pushScheduled = false;
+// Whether the app window is in the foreground. When it isn't (the user is in
+// another app / on another Space), there's no one watching the dots, so the
+// 5s `claude agents --json` spawn is pure churn — and exactly when the OS is
+// likely to nap us. We drop to the slow cadence while backgrounded; the
+// file-watcher still pushes real state.json changes immediately regardless.
+let windowForeground = true;
 
 const ACTIVE_STATES = new Set(['working', 'active', 'blocked', 'needs-input', 'starting']);
 const TERMINAL_STATES = new Set(['done', 'completed', 'failed', 'error']);
@@ -378,11 +384,23 @@ const SLOW_TICK_MS = 30000;
 
 function scheduleNextTick(): void {
   if (fallbackTimer) clearTimeout(fallbackTimer);
-  const interval = hasActiveConversation(store.getConversations()) ? FAST_TICK_MS : SLOW_TICK_MS;
+  const fast = windowForeground && hasActiveConversation(store.getConversations());
+  const interval = fast ? FAST_TICK_MS : SLOW_TICK_MS;
   fallbackTimer = setTimeout(async () => {
     try { await fallbackTick(); } catch { /* swallow */ }
     scheduleNextTick();
   }, interval);
+}
+
+// Called by main when the window gains/loses the foreground (focus/blur, show/
+// hide, and OS suspend/resume). Coming back to the foreground refreshes once
+// immediately so the dots are current the instant the user looks, then resumes
+// the fast cadence; going to the background just reschedules at the slow one.
+export function setPollerForeground(foreground: boolean): void {
+  if (windowForeground === foreground) return;
+  windowForeground = foreground;
+  if (foreground) fallbackTick().catch(() => undefined);
+  scheduleNextTick();
 }
 
 export function startPoller(getWindow: () => BrowserWindow | null): void {

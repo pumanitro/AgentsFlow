@@ -20,6 +20,19 @@ import { recentSlowOpsSummary } from './perf';
 let installed = false;
 let logFilePath = '';
 
+// Wall-clock timestamp of the last OS power/visibility transition that legitimately
+// stops the event loop from ticking (system sleep, and — where observable — App Nap
+// while the window sits occluded on another Space). main.ts feeds these in via
+// notePowerSuspend/Resume once `powerMonitor` is available (it isn't at the very
+// early point installCrashLogging() runs). The stall detector uses it to avoid
+// misreporting an OS-parked process as a frozen UI. See the detector below.
+let lastPowerSuspendAt = 0;
+let lastPowerResumeAt = 0;
+/** Called by main when the OS is about to suspend the app (screen lock / sleep). */
+export function notePowerSuspend(): void { lastPowerSuspendAt = Date.now(); }
+/** Called by main when the OS resumes the app from suspension. */
+export function notePowerResume(): void { lastPowerResumeAt = Date.now(); }
+
 function resolveLogDir(): string {
   // Prefer the OS logs dir (~/Library/Logs/Peers Flow on macOS); fall back to
   // userData/logs. Both are available before app `ready`.
@@ -135,14 +148,38 @@ export function installCrashLogging(): void {
   // the lifecycle/signal lines below — still narrows the cause.)
   const LOOP_TICK_MS = 2000;
   const LOOP_STALL_THRESHOLD_MS = 4000;
+  // Above this, a "stall" is almost certainly the OS having *parked* the whole
+  // process (system sleep / display sleep / App Nap while occluded on another
+  // Space), not the JS event loop being wedged. The detector measures Date.now()
+  // drift, which can't by itself tell "busy for N seconds" from "suspended for N
+  // seconds" — but a genuine main-thread block that long isn't survivable (macOS
+  // shows the beach-ball and the user force-quits), whereas the process here kept
+  // running fine afterwards. Real pathological blocks this detector was built for
+  // (the original ~43s freeze) sit comfortably under this ceiling, so they still
+  // report as freezes; multi-minute "stalls" get reclassified as power events.
+  const SUSPEND_LIKELY_MS = 60_000;
   let lastTick = Date.now();
   const loopMon = setInterval(() => {
     const now = Date.now();
     const stall = now - lastTick - LOOP_TICK_MS;
     if (stall > LOOP_STALL_THRESHOLD_MS) {
-      // Append the recent slow-op history so a freeze can be attributed to the
-      // operation that caused it, instead of just recording that one happened.
-      console.error(`[agentsflow][stall] main event loop blocked for ~${Math.round(stall)}ms — the UI was frozen${recentSlowOpsSummary()}`);
+      // A power transition (from powerMonitor) or a stall past the ceiling means
+      // the process was parked by the OS, not frozen. Either boundary catches it:
+      // powerMonitor fires for real system sleep; the size ceiling catches App
+      // Nap / occlusion throttling, which does NOT fire powerMonitor.
+      const bracketsResume =
+        (lastPowerSuspendAt && lastPowerSuspendAt >= lastTick) ||
+        (lastPowerResumeAt && now - lastPowerResumeAt <= LOOP_TICK_MS * 2);
+      if (stall > SUSPEND_LIKELY_MS || bracketsResume) {
+        console.warn(
+          `[agentsflow][power] process resumed after ~${Math.round(stall / 1000)}s parked by the OS ` +
+            `(sleep / App Nap while backgrounded) — not a real UI freeze`,
+        );
+      } else {
+        // Append the recent slow-op history so a freeze can be attributed to the
+        // operation that caused it, instead of just recording that one happened.
+        console.error(`[agentsflow][stall] main event loop blocked for ~${Math.round(stall)}ms — the UI was frozen${recentSlowOpsSummary()}`);
+      }
     }
     lastTick = now;
   }, LOOP_TICK_MS);
