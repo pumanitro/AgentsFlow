@@ -99,6 +99,19 @@ let _listAgentsDebugCount = 0;
 let _tmpCounter = 0;
 let _inFlightListAgents: Promise<ListAgentsResult> | null = null;
 
+// Short freshness cache. The single-flight below already collapses *concurrent*
+// callers, but a spawn burst also produces callers a few hundred ms apart — the
+// periodic poll tick, each spawn's detached `refreshNow`, and a `term:attach` —
+// that would otherwise each launch a fresh `claude agents --json`, and every
+// extra spawn inflates the latency of all the others. Serving a very recent
+// successful result to callers inside this window collapses those clusters to a
+// single spawn. The window is far below both the 5s poll cadence and the 1.2s
+// delegation-poll cadence, so neither of those paths ever rides a stale result
+// in steady state — only genuine sub-window bursts coalesce. Failures are never
+// cached, so a transient CLI choke is always re-attempted immediately.
+const LIST_AGENTS_FRESH_MS = Number(process.env.AGENTSFLOW_LIST_AGENTS_FRESH_MS) || 750;
+let _lastListAgents: { at: number; result: ListAgentsResult } | null = null;
+
 /**
  * Some Electron environments truncate the streamed stdout from `claude agents --json`
  * around the OS pipe buffer (~8 KB), producing parse failures. Writing claude's
@@ -113,7 +126,19 @@ let _inFlightListAgents: Promise<ListAgentsResult> | null = null;
  */
 export function listAgentsResult(): Promise<ListAgentsResult> {
   if (_inFlightListAgents) return _inFlightListAgents;
-  _inFlightListAgents = runListAgentsOnce().finally(() => { _inFlightListAgents = null; });
+  const cached = _lastListAgents;
+  if (cached && cached.result.ok && Date.now() - cached.at < LIST_AGENTS_FRESH_MS) {
+    return Promise.resolve(cached.result);
+  }
+  _inFlightListAgents = runListAgentsOnce()
+    .then((result) => {
+      // Only remember successful listings; a failed call must not suppress the
+      // next real attempt (the poller relies on fresh failures to avoid mutating
+      // state on a transient CLI choke).
+      if (result.ok) _lastListAgents = { at: Date.now(), result };
+      return result;
+    })
+    .finally(() => { _inFlightListAgents = null; });
   return _inFlightListAgents;
 }
 

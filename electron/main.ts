@@ -442,7 +442,14 @@ async function spawnConversation(opts: {
     });
   }
 
-  await refreshNow();
+  // Don't block the spawn on a full `claude agents --json` poll. The 5s poller
+  // and the per-conversation file-watcher already reconcile this session, and
+  // awaiting a refresh here both added ~1.5s of latency to every spawn AND
+  // injected an extra heavy agent-list spawn into the middle of a spawn burst —
+  // the main driver of the multi-second spawn latency observed under load. Fire
+  // it detached so a not-yet-listed daemon is still picked up promptly, then
+  // return on the optimistic + job-state we already applied above.
+  void refreshNow().catch(() => undefined);
   broadcastConversations();
   return { conversationId, sessionId, daemonShort };
 }

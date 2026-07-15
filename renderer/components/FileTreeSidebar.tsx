@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api } from '../lib/ipc';
 import { useUIState } from '../lib/ui-state';
 import { FileEntry, GitEntryStatus, GitStatusResult } from '../../shared/types';
@@ -150,6 +150,24 @@ export default function FileTreeSidebar({ dirPath, conversationId, onFileOpen, o
 
   useEffect(() => { refresh(); }, [refresh]);
 
+  // Debounced refresh for the bursty file-watcher path. A single write often
+  // produces several rapid `onFilesUpdated` events (macOS atomic write = tmp +
+  // rename, plus editor/build tools touching many files), and each one used to
+  // fire an immediate `git status` + `ls-files`. Collapse a burst into one call
+  // on the trailing edge; `refreshRef` keeps the timer pointed at the latest
+  // `refresh` closure so a mid-burst mode/dir change is still honored.
+  const refreshRef = useRef(refresh);
+  useEffect(() => { refreshRef.current = refresh; }, [refresh]);
+  const refreshTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const scheduleRefresh = useCallback((delayMs = 120) => {
+    if (refreshTimer.current) clearTimeout(refreshTimer.current);
+    refreshTimer.current = setTimeout(() => {
+      refreshTimer.current = null;
+      refreshRef.current();
+    }, delayMs);
+  }, []);
+  useEffect(() => () => { if (refreshTimer.current) clearTimeout(refreshTimer.current); }, []);
+
   // Push-based refresh: subscribe to filesystem events for this directory.
   // Replaces the old 4 s polling interval — updates fire ~150 ms after the
   // last write, regardless of who made it (user, Claude agent, build tool).
@@ -163,14 +181,17 @@ export default function FileTreeSidebar({ dirPath, conversationId, onFileOpen, o
     });
     const off = a.onFilesUpdated((p) => {
       if (cancelled) return;
-      if (p === dirPath) refresh();
+      if (p === dirPath) scheduleRefresh();
     });
     return () => {
       cancelled = true;
       off();
       a.unwatchFiles?.(dirPath).catch(() => undefined);
     };
-  }, [dirPath, refresh]);
+    // `scheduleRefresh` is stable and reads the latest `refresh` via a ref, so
+    // the watcher re-subscribes only when the directory actually changes — not
+    // on every mode toggle, which used to churn watch/unwatch needlessly.
+  }, [dirPath, scheduleRefresh]);
 
   // Slow heartbeat backstop: filesystem events can be dropped on network
   // volumes (SMB, NFS, some sync clients). A 30 s tick guarantees we

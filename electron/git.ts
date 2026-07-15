@@ -96,7 +96,25 @@ function getRepoMeta(cwd: string): RepoMeta {
   return meta;
 }
 
-export async function gitStatus(cwd: string): Promise<GitStatusResult> {
+// Coalesce concurrent identical requests per directory. The file tree fires its
+// `refresh()` on mount, on every file-watcher event, and on a heartbeat — bursts
+// that used to launch several identical child processes for the same directory
+// at the same instant (observed: 3 concurrent `git status` spawns on one peer,
+// each ~1s under the resulting contention). Sharing the in-flight promise per
+// cwd collapses each burst to a single spawn; the entry is deleted the moment it
+// settles, so a later call always re-runs and results are never stale.
+const _statusInFlight = new Map<string, Promise<GitStatusResult>>();
+const _listInFlight = new Map<string, Promise<FileEntry[]>>();
+
+export function gitStatus(cwd: string): Promise<GitStatusResult> {
+  const existing = _statusInFlight.get(cwd);
+  if (existing) return existing;
+  const p = gitStatusImpl(cwd).finally(() => { _statusInFlight.delete(cwd); });
+  _statusInFlight.set(cwd, p);
+  return p;
+}
+
+async function gitStatusImpl(cwd: string): Promise<GitStatusResult> {
   try { fs.accessSync(cwd); } catch { return { isRepo: false, entries: [] }; }
   const meta = getRepoMeta(cwd);
   if (!meta.isRepo) return { isRepo: false, entries: [] };
@@ -180,7 +198,15 @@ export interface FileEntry {
   isIgnored: boolean;
 }
 
-export async function listFiles(cwd: string): Promise<FileEntry[]> {
+export function listFiles(cwd: string): Promise<FileEntry[]> {
+  const existing = _listInFlight.get(cwd);
+  if (existing) return existing;
+  const p = listFilesImpl(cwd).finally(() => { _listInFlight.delete(cwd); });
+  _listInFlight.set(cwd, p);
+  return p;
+}
+
+async function listFilesImpl(cwd: string): Promise<FileEntry[]> {
   try { fs.accessSync(cwd); } catch { return []; }
   // Skip the git probes entirely if we already know it's not a repo.
   if (!getRepoMeta(cwd).isRepo) return walkFs(cwd);
