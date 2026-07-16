@@ -18,6 +18,13 @@ interface ScrollState {
   altBuffer: boolean;
 }
 
+// Private xterm 5.3 internals, reached for at teardown — see disposeTerm below.
+interface XtermViewport {
+  _refreshAnimationFrame: number | null;
+  _innerRefresh: () => void;
+  syncScrollArea: (immediate?: boolean) => void;
+}
+
 export default function Terminal({ conversationId, shellId, shellCwd, onExit, autoFocus = true }: Props) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const cleanupRef = useRef<(() => void) | null>(null);
@@ -107,6 +114,45 @@ export default function Terminal({ conversationId, shellId, shellCwd, onExit, au
       term.open(containerRef.current);
       fit.fit();
 
+      // Tearing a terminal down is not just term.dispose(). xterm 5.3's Viewport
+      // schedules _innerRefresh() through requestAnimationFrame (Viewport._refresh)
+      // and never cancels that frame when the terminal is disposed — it is the one
+      // frame scheduler in the library that doesn't (RenderDebouncer.dispose(), for
+      // instance, cancels its own). The stale frame then reads
+      // this._renderService.dimensions, a getter that dereferences a
+      // MutableDisposable which reports `value === undefined` once disposed, and so
+      // throws "Cannot read properties of undefined (reading 'dimensions')" from
+      // inside a rAF callback — where no try/catch of ours can reach it, leaving it
+      // an unhandled renderer error that takes the window down. Unmounting while
+      // output is streaming leaves exactly such a frame pending (each write syncs the
+      // scroll area, which calls _refresh), so switching away from a busy agent's
+      // terminal triggers it.
+      //
+      // Cancel the frame xterm forgot, and no-op the two methods that read
+      // .dimensions: the Viewport also schedules callbacks we hold no handle for (a
+      // setTimeout(syncScrollArea) in its constructor, an rAF in reset()), and a
+      // terminal being destroyed loses nothing by skipping a refresh.
+      const disposeTerm = () => {
+        const viewport = (term as unknown as { _core?: { viewport?: XtermViewport } })._core?.viewport;
+        if (viewport) {
+          if (typeof viewport._refreshAnimationFrame === 'number') {
+            window.cancelAnimationFrame(viewport._refreshAnimationFrame);
+            viewport._refreshAnimationFrame = null;
+          }
+          viewport._innerRefresh = () => {};
+          viewport.syncScrollArea = () => {};
+        } else {
+          // eslint-disable-next-line no-console
+          console.warn('[agentsflow] xterm viewport internals missing — dispose-race guard inactive');
+        }
+        term.dispose();
+      };
+      // Claim the teardown now rather than after the async attach below: an unmount
+      // landing while attachTerminal is still in flight would otherwise find detach
+      // still null and leak this terminal, its DOM and its renderer for the life of
+      // the window.
+      detach = disposeTerm;
+
       // The first fit() can run before the monospace web font has finished
       // loading. xterm then measures the character cell with a fallback font and
       // locks in the wrong cols/rows; once the real font loads, glyphs render
@@ -161,7 +207,7 @@ export default function Terminal({ conversationId, shellId, shellCwd, onExit, au
       } catch (err) {
         // eslint-disable-next-line no-console
         console.error('[agentsflow] attachTerminal failed', err);
-        term.write(`\r\n\x1b[31m[attach failed] ${(err as Error)?.message ?? err}\x1b[0m\r\n`);
+        if (!disposed) term.write(`\r\n\x1b[31m[attach failed] ${(err as Error)?.message ?? err}\x1b[0m\r\n`);
         return;
       }
       channelId = cid;
@@ -169,9 +215,10 @@ export default function Terminal({ conversationId, shellId, shellCwd, onExit, au
       // attachTerminal above is async — by the time it resolves the component may
       // have unmounted (e.g. the user navigated away, or `open_file` switched to
       // the file view, while the attach was still in flight). The cleanup has then
-      // already run (disposed=true) and the container ref is gone, so every
-      // `containerRef.current` below would be null. Bail before touching it, and
-      // release the channel we just claimed so it isn't leaked.
+      // already run (disposed=true, and it disposed the terminal through the detach
+      // claimed above) and the container ref is gone, so every `containerRef.current`
+      // below would be null. Bail before touching it, and release the channel we just
+      // claimed so it isn't leaked.
       if (disposed || !containerRef.current) {
         api().detachTerminal(cid).catch(() => undefined);
         return;
@@ -212,6 +259,23 @@ export default function Terminal({ conversationId, shellId, shellCwd, onExit, au
         }
         if (isBackspace && e.altKey) {
           api().writeTerminal(cid, '\x17'); // ⌥+Backspace → kill previous word
+          return false;
+        }
+        // xterm sends a bare \r for Shift+Enter, identical to plain Enter, so
+        // Claude Code can't tell them apart and submits either way. \x1b\r
+        // (ESC + CR) is the sequence Claude Code's /terminal-setup configures
+        // other terminals to send, and it already reads it as "insert newline,
+        // don't submit". Guard the other modifiers so ⌘/⌥/Ctrl+Enter stay free.
+        //
+        // preventDefault is required, not defensive: returning false makes xterm
+        // bail out of _keyDown before its own cancel(), so the browser still
+        // fires keypress, and xterm's _keyPress sends Enter's charCode as a bare
+        // \r — Claude Code would get \x1b\r then \r, i.e. newline-then-submit.
+        // Canceling the keydown suppresses keypress entirely. The Backspace
+        // branches above need no such thing: they emit no printable keypress.
+        if (e.key === 'Enter' && e.shiftKey && !e.metaKey && !e.altKey && !e.ctrlKey) {
+          api().writeTerminal(cid, '\x1b\r'); // Shift+Enter → newline, no submit
+          e.preventDefault();
           return false;
         }
         return true;
@@ -274,7 +338,7 @@ export default function Terminal({ conversationId, shellId, shellCwd, onExit, au
         container.removeEventListener('mousedown', onContainerMouseDown);
         container.removeEventListener('wheel', onWheel, { capture: true } as any);
         if (channelId) api().detachTerminal(channelId).catch(() => undefined);
-        term.dispose();
+        disposeTerm();
         scrollToLineRef.current = null;
         termFocusRef.current = () => {};
       };

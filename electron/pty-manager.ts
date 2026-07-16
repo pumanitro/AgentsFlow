@@ -68,10 +68,20 @@ function safeSend(win: BrowserWindow, channel: string, ...args: unknown[]): void
 //    sessionId, subscriber-tracked, with a replay buffer. Killing it on detach
 //    is what was aborting in-progress turns when switching/closing the view.
 
+// TERM_PROGRAM identifies the hosting terminal to the programs we spawn. Left
+// unset, Claude Code can't name us and /terminal-setup reports it can't run
+// "from xterm-256color" (the bare TERM string). This is deliberately NOT one of
+// the values /terminal-setup knows how to configure (Apple_Terminal, vscode,
+// iTerm.app) — claiming those would make it write a keybinding into some other
+// app's config. We just want to be identifiable; Terminal.tsx already sends
+// \x1b\r for Shift+Enter itself, so we need nothing from /terminal-setup.
+const TERM_PROGRAM = 'PeersFlow';
+
 const env = () => withUtf8Locale({
   ...process.env,
   PATH: `${process.env.PATH}:${path.join(os.homedir(), '.local/bin')}`,
   TERM: 'xterm-256color',
+  TERM_PROGRAM,
 } as Record<string, string>);
 
 interface ClaudeChannel { id: string; pty: IPty; win: BrowserWindow; sessionId: string; }
@@ -461,11 +471,6 @@ export async function attachShell(opts: {
 
   if (!shell) {
     const shellBin = process.env.SHELL || '/bin/zsh';
-    const env = withUtf8Locale({
-      ...process.env,
-      PATH: `${process.env.PATH}:${path.join(os.homedir(), '.local/bin')}`,
-      TERM: 'xterm-256color',
-    } as Record<string, string>);
     console.log('[agentsflow][pty] spawning shell', { shellId: opts.shellId, shell: shellBin, cwd: opts.cwd, cols: opts.cols, rows: opts.rows });
     if (!(await ensurePtyCapacity(opts.win, opts.channelId, 'shell'))) return '';
     let pty: IPty;
@@ -475,7 +480,7 @@ export async function attachShell(opts: {
         cols: Math.max(opts.cols, 20),
         rows: Math.max(opts.rows, 5),
         cwd: opts.cwd,
-        env,
+        env: env(),
       });
     } catch (err) {
       console.error('[agentsflow][pty] shell spawn failed', err);
