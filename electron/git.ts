@@ -14,6 +14,7 @@ const REPO_CACHE_TTL_MS = 60_000;
 
 export function invalidateGitCache(cwd: string): void {
   repoCache.delete(cwd);
+  _worktreesCache.delete(cwd);
 }
 
 export interface GitEntry {
@@ -258,4 +259,145 @@ function walkFs(cwd: string, sub = '', acc: FileEntry[] = [], depth = 0): FileEn
     else acc.push({ path: rel, isIgnored: false });
   }
   return acc;
+}
+
+// ---- Git worktrees ---------------------------------------------------------
+
+export interface WorktreeInfo {
+  path: string;          // absolute worktree directory
+  branch: string;        // short branch name, or 'HEAD' when detached
+  head: string;          // short HEAD sha
+  isMain: boolean;       // the repo's primary working tree
+  isCurrent: boolean;    // realpath === the requested dir
+  changedCount: number;  // uncommitted (working-tree) file count
+  aligned: boolean;      // green when true, blue otherwise
+  aheadOfMain: number;   // commits on this branch not in main (0 for the main tree)
+}
+
+interface RawWorktree { path: string; head: string; branch?: string; detached: boolean; bare: boolean }
+
+function parseWorktreePorcelain(out: string): RawWorktree[] {
+  const list: RawWorktree[] = [];
+  let cur: Partial<RawWorktree> | null = null;
+  const flush = () => {
+    if (cur && cur.path) {
+      list.push({ path: cur.path, head: cur.head ?? '', branch: cur.branch, detached: !!cur.detached, bare: !!cur.bare });
+    }
+    cur = null;
+  };
+  for (const line of out.split('\n')) {
+    if (line === '') { flush(); continue; }
+    const sp = line.indexOf(' ');
+    const key = sp === -1 ? line : line.slice(0, sp);
+    const val = sp === -1 ? '' : line.slice(sp + 1);
+    if (key === 'worktree') { flush(); cur = { path: val }; }
+    else if (!cur) { continue; }
+    else if (key === 'HEAD') cur.head = val;
+    else if (key === 'branch') cur.branch = val.replace(/^refs\/heads\//, '');
+    else if (key === 'detached') cur.detached = true;
+    else if (key === 'bare') cur.bare = true;
+  }
+  flush();
+  return list;
+}
+
+function realpathOrSelf(p: string): string {
+  try { return fs.realpathSync(p); } catch { return p; }
+}
+
+// ~2 s TTL + in-flight coalescing keyed on the requested dir. The Changes
+// sidebar refetches on every file-watcher burst; without this a repo with
+// several worktrees would fan a burst out into (worktrees × git) spawns. The
+// file-watcher clears this alongside the repo-meta cache on ref/index changes.
+interface WorktreesCacheEntry { at: number; promise: Promise<WorktreeInfo[]> }
+const _worktreesCache = new Map<string, WorktreesCacheEntry>();
+const WORKTREES_TTL_MS = 2_000;
+
+export function listWorktrees(cwd: string): Promise<WorktreeInfo[]> {
+  const cached = _worktreesCache.get(cwd);
+  if (cached && Date.now() - cached.at < WORKTREES_TTL_MS) return cached.promise;
+  const promise = listWorktreesImpl(cwd).catch((err) => {
+    // On failure don't poison the cache — let the next call retry.
+    _worktreesCache.delete(cwd);
+    throw err;
+  });
+  _worktreesCache.set(cwd, { at: Date.now(), promise });
+  return promise;
+}
+
+async function listWorktreesImpl(cwd: string): Promise<WorktreeInfo[]> {
+  try { fs.accessSync(cwd); } catch { return []; }
+  if (!getRepoMeta(cwd).isRepo) return [];
+
+  const res = await runGit(['worktree', 'list', '--porcelain'], cwd);
+  if (res.code !== 0) return [];
+  const raws = parseWorktreePorcelain(res.stdout).filter((w) => !w.bare);
+  if (raws.length === 0) return [];
+
+  // The primary working tree is the first entry; its branch defines "main".
+  const primary = raws[0];
+  const mainRef = primary.branch; // undefined if the primary is detached
+  const realCwd = realpathOrSelf(cwd);
+
+  const out = await Promise.all(raws.map(async (w, idx): Promise<WorktreeInfo> => {
+    const isMain = idx === 0;
+    const status = await gitStatus(w.path);
+    const changedCount = status.entries.length;
+    const clean = status.isRepo && changedCount === 0;
+
+    let aheadOfMain = 0;
+    if (!isMain && mainRef && w.branch !== mainRef) {
+      const rev = w.branch ?? w.head;
+      const r = await runGit(['rev-list', '--count', `${mainRef}..${rev}`], cwd);
+      if (r.code === 0) aheadOfMain = parseInt(r.stdout.trim(), 10) || 0;
+    }
+
+    // Green requires being fully folded into main AND a clean tree. For the
+    // primary tree "merged into main" is trivially true; for a linked tree we
+    // need mainRef to be known and zero commits ahead.
+    const merged = isMain || (!!mainRef && aheadOfMain === 0);
+    const aligned = merged && clean;
+
+    return {
+      path: w.path,
+      branch: w.branch ?? (w.detached ? 'HEAD' : ''),
+      head: w.head.slice(0, 8),
+      isMain,
+      isCurrent: realpathOrSelf(w.path) === realCwd,
+      changedCount,
+      aligned,
+      aheadOfMain,
+    };
+  }));
+
+  return out;
+}
+
+export async function removeWorktree(
+  repoDir: string,
+  worktreePath: string,
+  force = false,
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  // Never let the primary working tree be removed out from under a peer.
+  try {
+    const raws = parseWorktreePorcelain((await runGit(['worktree', 'list', '--porcelain'], repoDir)).stdout).filter((w) => !w.bare);
+    const target = realpathOrSelf(worktreePath);
+    if (raws.length > 0 && realpathOrSelf(raws[0].path) === target) {
+      return { ok: false, error: 'Refusing to remove the primary working tree.' };
+    }
+    if (realpathOrSelf(repoDir) === target) {
+      return { ok: false, error: 'Refusing to remove the currently open worktree.' };
+    }
+  } catch { /* fall through to git, which has its own guards */ }
+
+  const args = ['worktree', 'remove'];
+  if (force) args.push('--force');
+  args.push(worktreePath);
+  const res = await runGit(args, repoDir);
+  if (res.code === 0) {
+    _worktreesCache.delete(repoDir);
+    return { ok: true };
+  }
+  const error = (res.stderr || res.stdout || 'git worktree remove failed').trim();
+  return { ok: false, error };
 }

@@ -47,7 +47,7 @@ import { buildDelegatePrompt } from './registry';
 import { startPeersBridge, type DelegateRequest, type OpenFileRequest, type PeersBridge } from './delegation-bridge';
 import * as pty from './pty-manager';
 import * as fileWatcher from './file-watcher';
-import { gitStatus, listFiles } from './git';
+import { gitStatus, listFiles, listWorktrees, removeWorktree } from './git';
 import { searchInFiles } from './search';
 import { deleteAttachmentFiles, pastedImagesRoot, prunePastedImages, sweepOrphanAttachments, todayDateSlug } from './attachments';
 import { BridgeHealth, Conversation, FileEntry, PinnedDivider, PinnedItemRef, PinnedTodo, SlashCommand, SpawnRequest, TrackedDirectory } from '../shared/types';
@@ -1017,6 +1017,9 @@ ipcMain.handle('skills:list', async (_e, dirPath: string | null): Promise<SlashC
 });
 
 ipcMain.handle('git:status', async (_e, dirPath: string) => gitStatus(dirPath));
+ipcMain.handle('git:worktrees', async (_e, dirPath: string) => listWorktrees(dirPath));
+ipcMain.handle('git:removeWorktree', async (_e, repoDir: string, worktreePath: string, force?: boolean) =>
+  removeWorktree(repoDir, worktreePath, force));
 ipcMain.handle('files:list', async (_e, dirPath: string) => listFiles(dirPath));
 ipcMain.handle('files:search', async (_e, dirPath: string, query: string, opts) => {
   try {
@@ -1208,6 +1211,39 @@ ipcMain.handle('files:revealInFinder', async (_e, targetPath: string): Promise<{
   shell.showItemInFolder(targetPath);
   return { ok: true };
 });
+
+// Resolves a bare token pulled from terminal output (an absolute path, a
+// `~`-prefixed path, or a path relative to the terminal's cwd) to an absolute
+// path and reports whether it exists on disk. The terminal link provider calls
+// this while hovering a line so that ONLY real, resolvable paths light up as
+// clickable — a non-existent match never becomes a link. Kept cheap (a single
+// existsSync) because it runs per candidate token on hover.
+ipcMain.handle(
+  'files:probePath',
+  async (_e, baseDir: string | null, token: string): Promise<{ exists: boolean; absPath: string } | null> => {
+    if (typeof token !== 'string' || !token || token.length > 4096) return null;
+    let candidate = token;
+    if (candidate === '~' || candidate.startsWith('~/')) {
+      candidate = path.join(app.getPath('home'), candidate.slice(1));
+    }
+    let abs: string;
+    if (path.isAbsolute(candidate)) {
+      abs = path.normalize(candidate);
+    } else if (baseDir && path.isAbsolute(baseDir)) {
+      abs = path.resolve(baseDir, candidate);
+    } else {
+      // A relative token with no base directory to anchor it — unresolvable.
+      return null;
+    }
+    let exists = false;
+    try {
+      exists = fs.existsSync(abs);
+    } catch {
+      exists = false;
+    }
+    return { exists, absPath: abs };
+  },
+);
 
 ipcMain.handle('files:startDrag', async (e, filePath: string): Promise<void> => {
   if (!path.isAbsolute(filePath)) return;

@@ -237,6 +237,21 @@ export interface AgentsFlowApi {
   gitStatus: (dirPath: string) => Promise<GitStatusResult>;
   listFiles: (dirPath: string) => Promise<FileEntry[]>;
 
+  // Lists every git worktree for the repo that `dirPath` belongs to (the
+  // primary working tree plus any linked ones under `.claude/worktrees/`),
+  // each annotated with its uncommitted change count and alignment with main.
+  // Returns [] when `dirPath` is not a git repo.
+  listWorktrees: (dirPath: string) => Promise<WorktreeInfo[]>;
+  // Removes a linked worktree (`git worktree remove`). `repoDir` anchors the
+  // command inside the repo; `worktreePath` is the worktree to drop. Refuses to
+  // remove the primary working tree. Pass `force: true` to remove a worktree
+  // that still has uncommitted/untracked changes.
+  removeWorktree: (
+    repoDir: string,
+    worktreePath: string,
+    force?: boolean,
+  ) => Promise<{ ok: true } | { ok: false; error: string }>;
+
   // The per-peer private "notes" folder, stored under Peers Flow's app-data
   // (NOT inside the project, so note files never appear in git or the project
   // tree). Creates it on first access and returns its absolute path.
@@ -281,6 +296,13 @@ export interface AgentsFlowApi {
   // on Windows, default file manager on Linux).
   revealInFinder: (targetPath: string) => Promise<{ ok: true } | { ok: false; error: string }>;
 
+  // Resolves a token from terminal output (absolute, `~`-prefixed, or relative
+  // to `baseDir`) to an absolute path and reports whether it exists. Powers the
+  // terminal's clickable-path links: only tokens that resolve to a real file or
+  // directory become clickable. Returns null when the token is unresolvable
+  // (e.g. relative with no baseDir).
+  probePath: (baseDir: string | null, token: string) => Promise<{ exists: boolean; absPath: string } | null>;
+
   // Hands the file path to Electron's native drag-and-drop session so the
   // user can drop the file on any external app (Finder, Chrome, etc.).
   startFileDrag: (filePath: string) => Promise<void>;
@@ -321,6 +343,21 @@ export interface GitStatusResult {
 export interface FileEntry {
   path: string;
   isIgnored: boolean;
+}
+
+// One entry in the Changes-view worktree list. The primary working tree and
+// every linked worktree both show up as a WorktreeInfo.
+export interface WorktreeInfo {
+  path: string;          // absolute worktree directory
+  branch: string;        // short branch name, or 'HEAD' when detached
+  head: string;          // short HEAD sha
+  isMain: boolean;       // the repo's primary working tree
+  isCurrent: boolean;    // path === the directory the sidebar was opened for
+  changedCount: number;  // uncommitted (working-tree) file count
+  // Green dot when true (fully merged into main AND clean), blue dot otherwise
+  // (uncommitted/untracked edits, or commits not yet in main).
+  aligned: boolean;
+  aheadOfMain: number;   // commits on this branch not in main (0 for the main tree)
 }
 
 export interface SearchOptions {

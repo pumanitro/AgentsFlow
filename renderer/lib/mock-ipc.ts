@@ -1,4 +1,4 @@
-import type { AgentsFlowApi, Conversation, PinnedDivider, PinnedItemRef, PinnedTodo, TrackedDirectory, SpawnRequest, GitStatusResult, FileEntry, SearchOptions, SearchResult, SearchMatchLine } from '../../shared/types';
+import type { AgentsFlowApi, Conversation, PinnedDivider, PinnedItemRef, PinnedTodo, TrackedDirectory, SpawnRequest, GitStatusResult, FileEntry, SearchOptions, SearchResult, SearchMatchLine, WorktreeInfo } from '../../shared/types';
 import { forkTitle } from '../../shared/fork-title';
 
 const STORE_KEY = 'agentsflow:mock:v3';
@@ -114,6 +114,15 @@ function insertRefAtEndOfFirstSection(state: MockShape, ref: PinnedItemRef) {
 
 export function createMockApi(): AgentsFlowApi {
   let state = load();
+
+  // Fake worktree set so the Changes-view worktree section renders in the
+  // browser demo. Mutable so `removeWorktree` visibly drops a row.
+  let mockWorktrees: WorktreeInfo[] = [
+    { path: '/Users/demo/Desktop/LISA', branch: 'master', head: '74dbe3b5', isMain: true, isCurrent: true, changedCount: 3, aligned: false, aheadOfMain: 0 },
+    { path: '/Users/demo/Desktop/LISA/.claude/worktrees/collect-chats-script', branch: 'worktree-collect-chats-script', head: 'cbeb6dc2', isMain: false, isCurrent: false, changedCount: 0, aligned: true, aheadOfMain: 0 },
+    { path: '/Users/demo/Desktop/LISA/.claude/worktrees/dpd-complaint', branch: 'worktree-dpd-complaint', head: 'ce1e91fc', isMain: false, isCurrent: false, changedCount: 2, aligned: false, aheadOfMain: 1 },
+    { path: '/Users/demo/Desktop/LISA/.claude/worktrees/nutrable-chat-script', branch: 'worktree-nutrable-chat-script', head: 'b36dd36a', isMain: false, isCurrent: false, changedCount: 0, aligned: false, aheadOfMain: 2 },
+  ];
 
   return {
     listDirectories: async () => state.directories,
@@ -465,6 +474,14 @@ export function createMockApi(): AgentsFlowApi {
         { path: 'scratch/draft.md', status: 'untracked', staged: false, unstaged: true },
       ],
     }),
+    listWorktrees: async (): Promise<WorktreeInfo[]> => mockWorktrees,
+    removeWorktree: async (_repoDir: string, worktreePath: string) => {
+      const before = mockWorktrees.length;
+      mockWorktrees = mockWorktrees.filter((w) => w.path !== worktreePath || w.isMain);
+      return mockWorktrees.length < before
+        ? { ok: true as const }
+        : { ok: false as const, error: 'mock — cannot remove that worktree' };
+    },
     saveImageToDir: async (targetDir: string, _data: string, mime: string) => {
       const ext = (mime.split('/')[1] || 'png').replace(/[^a-z0-9]/gi, '') || 'png';
       return { savedPath: `${targetDir}/pasted-${Date.now()}.${ext}` };
@@ -490,6 +507,7 @@ export function createMockApi(): AgentsFlowApi {
     removePath: async (_target: string) => ({ ok: true as const }),
     copyImageToClipboard: async (_filePath: string) => ({ ok: true as const }),
     revealInFinder: async (_target: string) => ({ ok: true as const }),
+    probePath: async (_baseDir: string | null, _token: string) => null,
     startFileDrag: async (_filePath: string) => undefined,
     readBinaryFile: async (filePath: string) => {
       // A 1x1 transparent PNG to prove the wiring in browser mode.

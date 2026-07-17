@@ -80,6 +80,9 @@ const api: AgentsFlowApi = {
   },
 
   gitStatus: (dirPath) => ipcRenderer.invoke('git:status', dirPath),
+  listWorktrees: (dirPath) => ipcRenderer.invoke('git:worktrees', dirPath),
+  removeWorktree: (repoDir, worktreePath, force) =>
+    ipcRenderer.invoke('git:removeWorktree', repoDir, worktreePath, force),
   listFiles: (dirPath) => ipcRenderer.invoke('files:list', dirPath),
 
   notesRoot: (dirPath) => ipcRenderer.invoke('notes:root', dirPath),
@@ -107,6 +110,7 @@ const api: AgentsFlowApi = {
 
   copyImageToClipboard: (filePath) => ipcRenderer.invoke('clipboard:copyImage', filePath),
   revealInFinder: (targetPath) => ipcRenderer.invoke('files:revealInFinder', targetPath),
+  probePath: (baseDir, token) => ipcRenderer.invoke('files:probePath', baseDir, token),
   startFileDrag: (filePath) => ipcRenderer.invoke('files:startDrag', filePath),
 };
 

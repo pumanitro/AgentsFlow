@@ -1,10 +1,15 @@
 import { useEffect, useRef, useState } from 'react';
 import { api } from '../lib/ipc';
+import { createPathLinkProvider } from '../lib/path-links';
 
 interface Props {
   conversationId?: string;
   shellId?: string;
   shellCwd?: string;
+  // Directory that relative paths in the terminal output are resolved against
+  // when turning them into clickable "reveal in Finder" links. For a chat pane
+  // this is the conversation's directory; for a shell it's the shell's cwd.
+  baseDir?: string;
   onExit?: () => void;
   // Controls whether the terminal grabs focus on mount and refocuses on window
   // focus. Shells pass false so they never steal focus from the chat/file pane.
@@ -25,8 +30,12 @@ interface XtermViewport {
   syncScrollArea: (immediate?: boolean) => void;
 }
 
-export default function Terminal({ conversationId, shellId, shellCwd, onExit, autoFocus = true }: Props) {
+export default function Terminal({ conversationId, shellId, shellCwd, baseDir, onExit, autoFocus = true }: Props) {
   const containerRef = useRef<HTMLDivElement | null>(null);
+  // Read fresh inside the link provider so a later prop change is picked up
+  // without rebuilding the xterm instance.
+  const baseDirRef = useRef<string | undefined>(baseDir);
+  baseDirRef.current = baseDir ?? shellCwd;
   const cleanupRef = useRef<(() => void) | null>(null);
   const scrollToLineRef = useRef<((line: number) => void) | null>(null);
   const termFocusRef = useRef<() => void>(() => {});
@@ -110,6 +119,20 @@ export default function Terminal({ conversationId, shellId, shellCwd, onExit, au
       // kinds funnel through shell.openExternal instead of window.open()'s
       // urlless no-op.
       term.loadAddon(new linksMod.WebLinksAddon(openLink));
+
+      // Filesystem paths in the output → click to reveal in Finder. Only paths
+      // that actually exist on disk (resolved via the main process) light up.
+      const pathLinks = term.registerLinkProvider(
+        createPathLinkProvider(term, {
+          getBaseDir: () => baseDirRef.current ?? null,
+          probe: (dir, token) => api().probePath(dir, token),
+          reveal: (absPath) => {
+            api()
+              .revealInFinder(absPath)
+              .catch((err) => console.error('[agentsflow] revealInFinder failed', err));
+          },
+        }),
+      );
 
       term.open(containerRef.current);
       fit.fit();
@@ -332,6 +355,7 @@ export default function Terminal({ conversationId, shellId, shellCwd, onExit, au
       ro.observe(container);
 
       detach = () => {
+        pathLinks.dispose();
         scrollDisp.dispose();
         bufDisp.dispose();
         ro.disconnect();

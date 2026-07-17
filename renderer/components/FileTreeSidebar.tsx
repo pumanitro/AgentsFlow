@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api } from '../lib/ipc';
 import { useUIState } from '../lib/ui-state';
-import { FileEntry, GitEntryStatus, GitStatusResult } from '../../shared/types';
+import { FileEntry, GitEntryStatus, GitStatusResult, WorktreeInfo } from '../../shared/types';
 import SearchModal from './SearchModal';
 import NotesPanel from './NotesPanel';
 import {
@@ -73,12 +73,36 @@ function filesEquals(a: FileEntry[] | null, b: FileEntry[] | null): boolean {
   return true;
 }
 
+// Skip re-render when a worktree refresh returns the same list (the heartbeat
+// and watcher bursts re-fetch often, but the list rarely actually changes).
+function worktreesEqual(a: WorktreeInfo[], b: WorktreeInfo[]): boolean {
+  if (a === b) return true;
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    const x = a[i];
+    const y = b[i];
+    if (x.path !== y.path || x.changedCount !== y.changedCount || x.aligned !== y.aligned
+      || x.aheadOfMain !== y.aheadOfMain || x.branch !== y.branch || x.isCurrent !== y.isCurrent) {
+      return false;
+    }
+  }
+  return true;
+}
+
 export default function FileTreeSidebar({ dirPath, conversationId, onFileOpen, openedFilePath, initialMode }: Props) {
   const globalMode = useUIState('sidebarMode');
   const localMode = useState<'changes' | 'files'>(initialMode ?? 'changes');
   const [mode, setMode] = initialMode ? localMode : globalMode;
   const [status, setStatus] = useState<GitStatusResult | null>(null);
   const [files, setFiles] = useState<FileEntry[] | null>(null);
+  // Worktrees for this repo + which one the Changes tree is currently showing.
+  // `selectedWorktree === null` means the peer's own (current) working tree —
+  // i.e. today's default behaviour. Selection only applies in Changes mode.
+  const [worktrees, setWorktrees] = useState<WorktreeInfo[]>([]);
+  const [selectedWorktree, setSelectedWorktree] = useState<string | null>(null);
+  const activeDir = mode === 'changes' && selectedWorktree ? selectedWorktree : dirPath;
+  // A peer switch invalidates any worktree selection.
+  useEffect(() => { setSelectedWorktree(null); }, [dirPath]);
   const changesStore = useExpanded(`agentsflow:tree:${conversationId}:changes`);
   const filesStore = useExpanded(`agentsflow:tree:${conversationId}:files`);
   const expandedChanges = changesStore.state;
@@ -123,12 +147,21 @@ export default function FileTreeSidebar({ dirPath, conversationId, onFileOpen, o
       setLoading(true);
       try {
         const a = api();
-        // Always fetch git status so Files mode can color files too.
+        // Always fetch git status so Files mode can color files too. Reads the
+        // active worktree (the peer itself unless another worktree is selected).
         if (typeof a.gitStatus === 'function') {
-          const s = await a.gitStatus(dirPath);
+          const s = await a.gitStatus(activeDir);
           setStatus((prev) => (statusEquals(prev, s) ? prev : s));
         } else {
           setStatus((prev) => (prev && !prev.isRepo && prev.entries.length === 0 ? prev : { isRepo: false, entries: [] }));
+        }
+        // Worktree overview is Changes-mode only. Silently skipped on an older
+        // preload that predates the handler.
+        if (mode === 'changes' && typeof a.listWorktrees === 'function') {
+          try {
+            const wts = await a.listWorktrees(dirPath);
+            setWorktrees((prev) => (worktreesEqual(prev, wts) ? prev : wts));
+          } catch { /* leave last-known list in place */ }
         }
         if (mode === 'files') {
           if (typeof a.listFiles !== 'function') {
@@ -145,10 +178,18 @@ export default function FileTreeSidebar({ dirPath, conversationId, onFileOpen, o
         setLoading(false);
       }
     },
-    [mode, dirPath],
+    [mode, dirPath, activeDir],
   );
 
   useEffect(() => { refresh(); }, [refresh]);
+
+  // If the selected worktree disappears (removed, or the repo changed), fall
+  // back to the current working tree so the view never points at nothing.
+  useEffect(() => {
+    if (selectedWorktree && !worktrees.some((w) => w.path === selectedWorktree)) {
+      setSelectedWorktree(null);
+    }
+  }, [worktrees, selectedWorktree]);
 
   // Debounced refresh for the bursty file-watcher path. A single write often
   // produces several rapid `onFilesUpdated` events (macOS atomic write = tmp +
@@ -290,6 +331,7 @@ export default function FileTreeSidebar({ dirPath, conversationId, onFileOpen, o
 
   const [renaming, setRenaming] = useState<{ node: TreeNode; value: string; error?: string; busy?: boolean } | null>(null);
   const [removing, setRemoving] = useState<{ node: TreeNode; error?: string; busy?: boolean } | null>(null);
+  const [removingWt, setRemovingWt] = useState<{ wt: WorktreeInfo; error?: string; busy?: boolean; canForce?: boolean } | null>(null);
   const [creating, setCreating] = useState<{ parentRel: string; value: string; error?: string; busy?: boolean } | null>(null);
   const [toast, setToast] = useState<{ kind: 'ok' | 'err'; text: string } | null>(null);
 
@@ -330,8 +372,8 @@ export default function FileTreeSidebar({ dirPath, conversationId, onFileOpen, o
       return;
     }
     const fullPath = creating.parentRel
-      ? `${dirPath}/${creating.parentRel}/${name}`
-      : `${dirPath}/${name}`;
+      ? `${activeDir}/${creating.parentRel}/${name}`
+      : `${activeDir}/${name}`;
     setCreating({ ...creating, busy: true, error: undefined });
     try {
       await a.createFile(fullPath);
@@ -357,7 +399,7 @@ export default function FileTreeSidebar({ dirPath, conversationId, onFileOpen, o
   const copyImage = async (node: TreeNode) => {
     setMenu(null);
     if (node.kind !== 'file') return;
-    const fullPath = `${dirPath}/${node.path}`;
+    const fullPath = `${activeDir}/${node.path}`;
     const a = api();
     if (typeof a.copyImageToClipboard !== 'function') {
       setToast({ kind: 'err', text: 'Restart the app to enable copy (preload needs to refresh).' });
@@ -377,7 +419,7 @@ export default function FileTreeSidebar({ dirPath, conversationId, onFileOpen, o
 
   const revealInFinder = async (node: TreeNode) => {
     setMenu(null);
-    const fullPath = `${dirPath}/${node.path}`;
+    const fullPath = `${activeDir}/${node.path}`;
     const a = api();
     if (typeof a.revealInFinder !== 'function') {
       setToast({ kind: 'err', text: 'Restart the app to enable this (preload needs to refresh).' });
@@ -400,9 +442,9 @@ export default function FileTreeSidebar({ dirPath, conversationId, onFileOpen, o
       setRenaming({ ...renaming, error: 'Invalid name. No path separators.' });
       return;
     }
-    const oldFullPath = `${dirPath}/${node.path}`;
+    const oldFullPath = `${activeDir}/${node.path}`;
     const parentRel = node.path.includes('/') ? node.path.slice(0, node.path.lastIndexOf('/')) : '';
-    const newFullPath = parentRel ? `${dirPath}/${parentRel}/${newName}` : `${dirPath}/${newName}`;
+    const newFullPath = parentRel ? `${activeDir}/${parentRel}/${newName}` : `${activeDir}/${newName}`;
     setRenaming({ ...renaming, busy: true, error: undefined });
     try {
       await api().renamePath(oldFullPath, newFullPath);
@@ -417,7 +459,7 @@ export default function FileTreeSidebar({ dirPath, conversationId, onFileOpen, o
 
   const submitRemove = async () => {
     if (!removing) return;
-    const fullPath = `${dirPath}/${removing.node.path}`;
+    const fullPath = `${activeDir}/${removing.node.path}`;
     setRemoving({ ...removing, busy: true, error: undefined });
     try {
       await api().removePath(fullPath);
@@ -430,11 +472,42 @@ export default function FileTreeSidebar({ dirPath, conversationId, onFileOpen, o
     }
   };
 
+  const submitRemoveWt = async (force = false) => {
+    if (!removingWt) return;
+    const a = api();
+    if (typeof a.removeWorktree !== 'function') {
+      setRemovingWt({ ...removingWt, error: 'Restart the app to enable this (preload needs to refresh).' });
+      return;
+    }
+    setRemovingWt({ ...removingWt, busy: true, error: undefined });
+    try {
+      const res = await a.removeWorktree(dirPath, removingWt.wt.path, force);
+      if (!res.ok) {
+        // A worktree with local changes needs --force; surface that as a second step.
+        const canForce = !force && /modified|untracked|contains|use --force|locked/i.test(res.error);
+        setRemovingWt({ ...removingWt, busy: false, error: res.error, canForce });
+        return;
+      }
+      if (selectedWorktree === removingWt.wt.path) setSelectedWorktree(null);
+      setRemovingWt(null);
+      await refresh();
+    } catch (err) {
+      setRemovingWt({ ...removingWt, busy: false, error: (err as Error)?.message ?? String(err) });
+    }
+  };
+
   const summary = status && mode === 'changes'
     ? `${status.entries.length} change${status.entries.length === 1 ? '' : 's'}${status.branch ? ` · ${status.branch}` : ''}`
     : files && mode === 'files'
       ? `${files.length} file${files.length === 1 ? '' : 's'}`
       : '';
+
+  // Which worktree row is highlighted: an explicit selection, else the peer's
+  // own (current) tree. The section only shows in Changes mode for repos that
+  // actually have a linked worktree.
+  const currentWtPath = worktrees.find((w) => w.isCurrent)?.path ?? null;
+  const effectiveSelected = selectedWorktree ?? currentWtPath;
+  const showWorktrees = mode === 'changes' && worktrees.length > 1;
 
   return (
     <div className="h-full flex flex-col bg-panel">
@@ -509,6 +582,52 @@ export default function FileTreeSidebar({ dirPath, conversationId, onFileOpen, o
           title="Refresh"
         >{loading ? '…' : '↻'}</button>
       </div>
+      {showWorktrees && (
+        <div className="shrink-0 border-b border-border">
+          <div className="px-3 pt-2 pb-1 text-[10px] uppercase tracking-wider text-muted flex items-center gap-1.5">
+            <span>Worktrees</span>
+            <span className="text-muted/70">{worktrees.length}</span>
+          </div>
+          <div className="max-h-40 overflow-y-auto pb-1">
+            {worktrees.map((wt) => {
+              const selected = effectiveSelected === wt.path;
+              const label = (wt.isMain ? wt.branch : wt.branch.replace(/^worktree-/, '')) || '(detached)';
+              const removable = !wt.isMain && !wt.isCurrent;
+              const dotTitle = wt.aligned
+                ? 'Aligned with main — merged and clean'
+                : `Work in progress${wt.changedCount ? ` — ${wt.changedCount} uncommitted change${wt.changedCount === 1 ? '' : 's'}` : ''}`
+                  + `${wt.aheadOfMain ? `${wt.changedCount ? ',' : ' —'} ${wt.aheadOfMain} commit${wt.aheadOfMain === 1 ? '' : 's'} not in main` : ''}`;
+              return (
+                <div
+                  key={wt.path}
+                  onClick={() => setSelectedWorktree(wt.isCurrent ? null : wt.path)}
+                  title={wt.path}
+                  className={`group w-full flex items-center gap-2 px-3 py-1 cursor-pointer ${selected ? 'bg-accent/25 text-text font-medium' : 'text-text/90 hover:bg-panel2'}`}
+                >
+                  <span
+                    className={`inline-block w-2 h-2 rounded-full shrink-0 ${wt.aligned ? 'bg-ok' : 'bg-info animate-pulse'}`}
+                    title={dotTitle}
+                    aria-hidden
+                  />
+                  <span className="flex-1 min-w-0 truncate text-[12px]">{label}</span>
+                  {wt.isMain && <span className="text-[9px] uppercase tracking-wider text-muted shrink-0">main</span>}
+                  {wt.changedCount > 0 && (
+                    <span className="text-[10px] text-accent font-mono shrink-0" title={`${wt.changedCount} uncommitted change${wt.changedCount === 1 ? '' : 's'}`}>{wt.changedCount}</span>
+                  )}
+                  {removable && (
+                    <button
+                      onClick={(e) => { e.stopPropagation(); setRemovingWt({ wt }); }}
+                      title="Remove worktree"
+                      aria-label={`Remove worktree ${label}`}
+                      className="shrink-0 text-muted hover:text-err leading-none text-[13px] px-0.5 opacity-0 group-hover:opacity-100 focus:opacity-100"
+                    >✕</button>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
       {summary && (
         <div className="shrink-0 px-3 py-1.5 text-[11px] text-muted border-b border-border">{summary}</div>
       )}
@@ -558,7 +677,7 @@ export default function FileTreeSidebar({ dirPath, conversationId, onFileOpen, o
             root={displayTree}
             expanded={displayExpanded}
             setExpanded={displaySetExpanded}
-            dirPath={dirPath}
+            dirPath={activeDir}
             onFileOpen={onFileOpen}
             openedFilePath={openedFilePath}
             onContextMenu={openContextMenu}
@@ -718,6 +837,52 @@ export default function FileTreeSidebar({ dirPath, conversationId, onFileOpen, o
                 disabled={removing.busy}
                 className="px-3 py-1.5 rounded-md bg-err text-bg font-medium text-sm disabled:opacity-40 hover:opacity-90"
               >{removing.busy ? 'Deleting…' : 'Delete'}</button>
+            </div>
+          </div>
+        </div>
+      )}
+      {removingWt && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-bg/70 backdrop-blur-sm"
+          onClick={() => !removingWt.busy && setRemovingWt(null)}
+        >
+          <div
+            className="bg-panel border border-border rounded-md p-4 w-[440px] max-w-[90vw] shadow-xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="text-sm font-medium text-text mb-1">Remove worktree?</div>
+            <div className="text-[11px] text-muted mb-3 truncate" title={removingWt.wt.path}>{removingWt.wt.path}</div>
+            <div className="text-xs text-text/85">
+              Runs <span className="font-mono text-text">git worktree remove</span>. The branch{' '}
+              <span className="font-mono text-text">{removingWt.wt.branch}</span> stays in the repo — only the folder is deleted.
+            </div>
+            {removingWt.wt.changedCount > 0 && !removingWt.error && (
+              <div className="text-[11px] text-err mt-2">
+                Heads up: {removingWt.wt.changedCount} uncommitted change{removingWt.wt.changedCount === 1 ? '' : 's'} here — a plain remove will be refused.
+              </div>
+            )}
+            {removingWt.error && (
+              <div className="text-[11px] text-err mt-2 break-words">{removingWt.error}</div>
+            )}
+            <div className="flex justify-end gap-2 mt-3">
+              <button
+                onClick={() => setRemovingWt(null)}
+                disabled={removingWt.busy}
+                className="px-3 py-1.5 rounded-md text-sm text-muted hover:text-text hover:bg-panel2 disabled:opacity-40"
+              >Cancel</button>
+              {removingWt.canForce ? (
+                <button
+                  onClick={() => submitRemoveWt(true)}
+                  disabled={removingWt.busy}
+                  className="px-3 py-1.5 rounded-md bg-err text-bg font-medium text-sm disabled:opacity-40 hover:opacity-90"
+                >{removingWt.busy ? 'Removing…' : 'Force remove'}</button>
+              ) : (
+                <button
+                  onClick={() => submitRemoveWt(false)}
+                  disabled={removingWt.busy}
+                  className="px-3 py-1.5 rounded-md bg-err text-bg font-medium text-sm disabled:opacity-40 hover:opacity-90"
+                >{removingWt.busy ? 'Removing…' : 'Remove'}</button>
+              )}
             </div>
           </div>
         </div>

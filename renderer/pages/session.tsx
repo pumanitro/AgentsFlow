@@ -378,7 +378,7 @@ export default function SessionPage() {
                 </div>
               ) : (
                 <PaneErrorBoundary key={chatGen} label="Terminal">
-                  <Terminal key={chatGen} conversationId={String(id)} onExit={() => setChatExited(true)} autoFocus={rightPane === 'chat'} />
+                  <Terminal key={chatGen} conversationId={String(id)} baseDir={conv?.directoryPath} onExit={() => setChatExited(true)} autoFocus={rightPane === 'chat'} />
                 </PaneErrorBoundary>
               )
             ) : (
