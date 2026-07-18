@@ -231,6 +231,79 @@ export function readJobState(daemonShort: string): JobState | null {
   }
 }
 
+// ---------- Session cwd from the transcript ----------
+// `claude agents --json` only knows about *live* daemons, so once a chat's
+// daemon exits its cwd — and with it, which worktree the chat was working in —
+// is no longer reported. The transcript keeps it: Claude Code stamps `cwd` on
+// every entry and re-homes the file under a project directory slugged from that
+// cwd, so the LAST occurrence is the session's final working directory.
+//
+// The slug is lossy (both `/` and `.` become `-`), so it can't be decoded back
+// into a path. We don't need to: the transcript is found by scanning project
+// directories for `<sessionId>.jsonl`, and the answer is read from the file's
+// own contents rather than inferred from its name.
+const TRANSCRIPT_TAIL_BYTES = 64 * 1024;
+
+function projectsDir(): string {
+  return path.join(os.homedir(), '.claude', 'projects');
+}
+
+/** Locate `<sessionId>.jsonl` across the project dirs. Null if absent. */
+function findTranscript(sessionId: string): string | null {
+  if (!/^[0-9a-f-]{8,}$/i.test(sessionId)) return null; // never build paths from unvalidated ids
+  const root = projectsDir();
+  let entries: fs.Dirent[];
+  try {
+    entries = fs.readdirSync(root, { withFileTypes: true });
+  } catch {
+    return null;
+  }
+  for (const ent of entries) {
+    if (!ent.isDirectory()) continue;
+    const p = path.join(root, ent.name, `${sessionId}.jsonl`);
+    try {
+      if (fs.existsSync(p)) return p;
+    } catch {
+      /* unreadable project dir — keep looking */
+    }
+  }
+  return null;
+}
+
+/**
+ * The working directory a session was last running in, per its transcript.
+ * Returns null when there's no transcript or it carries no `cwd`.
+ *
+ * Reads only the tail: a long transcript runs to many MB and the newest entry
+ * is what we want, so pulling the whole file in would be pure waste on a path
+ * that runs while the user is opening a chat.
+ */
+export function readSessionCwdFromTranscript(sessionId: string): string | null {
+  const file = findTranscript(sessionId);
+  if (!file) return null;
+  let fd: number | null = null;
+  try {
+    const size = fs.statSync(file).size;
+    const start = Math.max(0, size - TRANSCRIPT_TAIL_BYTES);
+    const len = size - start;
+    if (len <= 0) return null;
+    const buf = Buffer.alloc(len);
+    fd = fs.openSync(file, 'r');
+    fs.readSync(fd, buf, 0, len, start);
+    // Last match wins — the tail may span several entries.
+    const matches = buf.toString('utf8').match(/"cwd":"((?:[^"\\]|\\.)*)"/g);
+    if (!matches || matches.length === 0) return null;
+    const raw = matches[matches.length - 1];
+    const value = raw.slice('"cwd":"'.length, -1);
+    // The field is JSON-escaped (Windows separators, quotes in odd dir names).
+    return JSON.parse(`"${value}"`) as string;
+  } catch {
+    return null;
+  } finally {
+    if (fd !== null) { try { fs.closeSync(fd); } catch { /* ignore */ } }
+  }
+}
+
 export async function dispatchBackground(opts: {
   cwd: string;
   prompt: string;

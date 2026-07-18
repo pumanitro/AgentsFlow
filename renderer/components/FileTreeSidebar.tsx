@@ -39,6 +39,11 @@ function buildNameMatcher(query: string): (node: TreeFile) => boolean {
 interface Props {
   dirPath: string;
   conversationId: string;
+  // The worktree this conversation is working in, if any (Conversation
+  // .worktreePath). Seeds the Changes-mode selection when the chat is opened,
+  // so the panel shows the tree the chat is actually changing rather than the
+  // peer's own. A manual pick afterwards stands until the chat changes.
+  worktreePath?: string | null;
   onFileOpen?: (absolutePath: string, line?: number) => void;
   openedFilePath?: string | null;
   // When set, the Changes/Files toggle uses local state seeded to this mode
@@ -89,7 +94,7 @@ function worktreesEqual(a: WorktreeInfo[], b: WorktreeInfo[]): boolean {
   return true;
 }
 
-export default function FileTreeSidebar({ dirPath, conversationId, onFileOpen, openedFilePath, initialMode }: Props) {
+export default function FileTreeSidebar({ dirPath, conversationId, worktreePath, onFileOpen, openedFilePath, initialMode }: Props) {
   const globalMode = useUIState('sidebarMode');
   const localMode = useState<'changes' | 'files'>(initialMode ?? 'changes');
   const [mode, setMode] = initialMode ? localMode : globalMode;
@@ -101,8 +106,18 @@ export default function FileTreeSidebar({ dirPath, conversationId, onFileOpen, o
   const [worktrees, setWorktrees] = useState<WorktreeInfo[]>([]);
   const [selectedWorktree, setSelectedWorktree] = useState<string | null>(null);
   const activeDir = mode === 'changes' && selectedWorktree ? selectedWorktree : dirPath;
-  // A peer switch invalidates any worktree selection.
-  useEffect(() => { setSelectedWorktree(null); }, [dirPath]);
+  // Follow the conversation: opening a chat selects the worktree that chat is
+  // working in, and switching peers clears the selection. Guarded on the inputs
+  // themselves rather than firing every render, so a manual pick inside the same
+  // chat isn't immediately overwritten — only a genuine change to the chat, the
+  // peer, or where that chat now lives re-seeds it.
+  const seededFor = useRef<string | null>(null);
+  useEffect(() => {
+    const key = [dirPath, conversationId, worktreePath ?? ''].join('|');
+    if (seededFor.current === key) return;
+    seededFor.current = key;
+    setSelectedWorktree(worktreePath ?? null);
+  }, [dirPath, conversationId, worktreePath]);
   const changesStore = useExpanded(`agentsflow:tree:${conversationId}:changes`);
   const filesStore = useExpanded(`agentsflow:tree:${conversationId}:files`);
   const expandedChanges = changesStore.state;
@@ -185,7 +200,15 @@ export default function FileTreeSidebar({ dirPath, conversationId, onFileOpen, o
 
   // If the selected worktree disappears (removed, or the repo changed), fall
   // back to the current working tree so the view never points at nothing.
+  //
+  // The empty check is load-bearing, not defensive: `worktrees` starts [] and is
+  // filled by an async refresh, so without it this effect fires on mount and
+  // discards the selection seeded from the conversation before the list it would
+  // validate against has arrived. A repo always reports at least its own working
+  // tree, so [] means "not loaded yet" (or not a repo) — either way there is
+  // nothing to prune against, and pruning then is always wrong.
   useEffect(() => {
+    if (worktrees.length === 0) return;
     if (selectedWorktree && !worktrees.some((w) => w.path === selectedWorktree)) {
       setSelectedWorktree(null);
     }

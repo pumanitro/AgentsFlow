@@ -88,6 +88,49 @@ function probeRepo(cwd: string): { isRepo: boolean; gitDir: string | null } {
   return { isRepo: false, gitDir: null };
 }
 
+/**
+ * The root of the *linked worktree* `cwd` sits inside, plus the main repo that
+ * owns it — or null if `cwd` belongs to an ordinary working tree (or no repo).
+ *
+ * Distinguishing the two is what makes "which worktree is this chat in?"
+ * answerable without spawning git: a linked worktree's `.git` is a FILE holding
+ * `gitdir: <main>/.git/worktrees/<name>`, while a main working tree's `.git` is
+ * a DIRECTORY. Walking up from `cwd` and stopping at whichever comes first also
+ * handles a session sitting in a *subdirectory* — of a worktree (→ attributes
+ * the worktree root, which is what the UI matches on) or of the main tree
+ * (→ null, rather than mistaking the subdirectory itself for a worktree).
+ *
+ * `gitdir` pointing anywhere other than a `worktrees/<name>` entry means a
+ * submodule or a plain gitlink, which is not a worktree — hence null.
+ */
+export function linkedWorktreeRoot(cwd: string): { root: string; mainRepo: string } | null {
+  let dir = cwd;
+  for (let i = 0; i < 64; i++) {
+    const candidate = path.join(dir, '.git');
+    try {
+      const st = fs.statSync(candidate);
+      // Main working tree — reached before any worktree marker, so `cwd` is not
+      // in a linked worktree.
+      if (st.isDirectory()) return null;
+      if (st.isFile()) {
+        const txt = fs.readFileSync(candidate, 'utf8').trim();
+        const m = txt.match(/^gitdir:\s*(.+)$/);
+        if (!m) return null;
+        const gitDir = path.isAbsolute(m[1]) ? m[1] : path.join(dir, m[1]);
+        // <mainRepo>/.git/worktrees/<name>  →  strip three segments for the repo.
+        const parts = gitDir.split(path.sep);
+        const wtIdx = parts.lastIndexOf('worktrees');
+        if (wtIdx < 2 || parts[wtIdx - 1] !== '.git' || wtIdx !== parts.length - 2) return null;
+        return { root: dir, mainRepo: parts.slice(0, wtIdx - 1).join(path.sep) };
+      }
+    } catch { /* no .git at this level — keep walking up */ }
+    const parent = path.dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  return null;
+}
+
 function getRepoMeta(cwd: string): RepoMeta {
   const cached = repoCache.get(cwd);
   if (cached && Date.now() - cached.cachedAt < REPO_CACHE_TTL_MS) return cached;

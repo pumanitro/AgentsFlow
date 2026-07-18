@@ -39,6 +39,18 @@ export interface Conversation {
   // attach routing checks the transcript file on disk to decide whether the
   // fork still needs to be performed, so a failed fork just retries.
   forkFromSessionId?: string;
+  // Absolute path of the git worktree this chat is working inside, when that
+  // differs from the peer's own directory. Nothing needs to observe worktree
+  // *creation* to know this: a session that enters a worktree reports the new
+  // cwd, so the association is simply read off the session rather than tracked.
+  // Two sources, in order of authority:
+  //   1. `claude agents --json` → row.cwd, while the daemon is alive (the
+  //      poller reconciles it every tick, so a chat that moves is followed);
+  //   2. the transcript's most recent `cwd`, backfilled lazily for chats whose
+  //      daemon has already exited.
+  // Persisted so the association outlives the process that established it.
+  // Undefined means "the peer's own working tree" — the default.
+  worktreePath?: string;
 }
 
 export interface PinnedDivider {

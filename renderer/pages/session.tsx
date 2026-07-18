@@ -333,6 +333,7 @@ export default function SessionPage() {
               <FileTreeSidebar
                 dirPath={conv.directoryPath}
                 conversationId={conv.id}
+                worktreePath={conv.worktreePath}
                 openedFilePath={openFile}
                 onFileOpen={(abs, line) => {
                   setOpenFile(abs);

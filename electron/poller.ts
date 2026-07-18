@@ -2,8 +2,9 @@ import { BrowserWindow } from 'electron';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { listAgentsResult, readJobState, stopAgent, type ClaudeAgentJsonRow } from './claude-cli';
+import { listAgentsResult, readJobState, readSessionCwdFromTranscript, stopAgent, type ClaudeAgentJsonRow } from './claude-cli';
 import { hasLiveViewer } from './pty-manager';
+import { linkedWorktreeRoot } from './git';
 import { store } from './store';
 import { Conversation } from '../shared/types';
 import { effectiveState, deriveDescription, reconcileLiveState, deriveLiveDescription, findLiveRow } from './derive-state';
@@ -262,6 +263,33 @@ function lookupRow(index: RowIndex, rows: ClaudeAgentJsonRow[], c: Conversation)
   return undefined;
 }
 
+// ---------- Worktree attribution ----------
+// Normalize a session cwd into a `worktreePath`. Note this is NOT "cwd differs
+// from the peer directory" — plenty of sessions simply run in a subdirectory
+// (`<peer>/art/prompts`, `<peer>/customer-ui`), and calling those worktrees
+// would populate the field with paths the worktree panel can never match. Only
+// a genuine linked-worktree root counts, and only when it belongs to *this*
+// peer's repo; anything else leaves the chat on the peer's own tree.
+function worktreeOf(c: Conversation, cwd: string | undefined): string | undefined {
+  if (!cwd) return undefined;
+  const wt = linkedWorktreeRoot(cwd);
+  if (!wt) return undefined;
+  // realpath both sides: the peer may be tracked through a symlink while git
+  // reports the resolved path (or vice versa), and a raw string compare would
+  // then reject every legitimate worktree.
+  const real = (p: string): string => { try { return fs.realpathSync(p); } catch { return p; } };
+  return real(wt.mainRepo) === real(c.directoryPath) ? wt.root : undefined;
+}
+
+// Chats whose daemon has already exited never appear in `claude agents --json`,
+// so the live path above can't attribute them — their worktree has to come from
+// the transcript instead. That read touches the filesystem, so it is done at
+// most once per conversation (recorded here, whatever the outcome) and only a
+// few per tick, keeping a large history from turning one tick into a scan of
+// every transcript on disk.
+const worktreeBackfilled = new Set<string>();
+const BACKFILL_PER_TICK = 3;
+
 // Timed wrapper around a poll cycle so main.log shows how long each tick — and
 // the `claude agents --json` subprocess inside it — actually takes. The poll is
 // a prime suspect for main-thread load, so `poll:tick` / `poll:listAgents`
@@ -292,6 +320,7 @@ async function fallbackTickImpl(): Promise<void> {
   }
 
   let anyChange = false;
+  let backfillsLeft = BACKFILL_PER_TICK;
   const updated = convs.map((c) => {
     // The indexed live-row lookup is O(1) and cheap, so we do it even for
     // terminal conversations: a FINISHED session that was re-opened (its daemon
@@ -321,6 +350,13 @@ async function fallbackTickImpl(): Promise<void> {
       const liveStatus = row.status || '';
       if (liveStatus !== c.status) { next = { ...next, status: liveStatus }; changed = true; }
       if (row.sessionId && row.sessionId !== c.sessionId) { next = { ...next, sessionId: row.sessionId }; changed = true; }
+      // Which worktree this chat is in, straight off the live row. A session
+      // that enters a worktree reports the new cwd, so following it here means
+      // worktree *creation* never has to be observed — and a chat that moves
+      // between worktrees mid-session is tracked rather than pinned to wherever
+      // it first landed.
+      const liveWt = worktreeOf(c, row.cwd);
+      if (liveWt !== c.worktreePath) { next = { ...next, worktreePath: liveWt }; changed = true; }
       // Daemon is present: reconcile the live row against state.json — the row's
       // real-time state/status wins over a frozen state.json (e.g. a session
       // re-opened interactively via --resume still reporting "busy").
@@ -358,6 +394,16 @@ async function fallbackTickImpl(): Promise<void> {
     } else {
       // No daemon and no live row: an unopened fork (state "idle") or a plain
       // conversation with nothing to reconcile against. Leave alone.
+    }
+    // Attribute a worktree to a chat the live rows can't speak for. Runs for any
+    // conversation still lacking one — including chats that predate this being
+    // tracked at all, which is what makes existing history light up rather than
+    // only newly-created worktrees.
+    if (!row && !next.worktreePath && !worktreeBackfilled.has(c.id) && backfillsLeft > 0) {
+      worktreeBackfilled.add(c.id);
+      backfillsLeft--;
+      const wt = worktreeOf(next, readSessionCwdFromTranscript(next.sessionId) ?? undefined);
+      if (wt) { next = { ...next, worktreePath: wt }; changed = true; }
     }
     if (changed) anyChange = true;
     return next;
