@@ -321,11 +321,32 @@ export async function attach(opts: {
   pty.onData(guardCb('attach onData', (data) => {
     safeSend(ch.win, 'terminal:data', opts.channelId, data);
   }));
-  pty.onExit(guardCb('attach onExit', () => {
+  // Logged like the shell/resume exits below. Without this, an attach PTY's
+  // whole lifecycle was write-only in the log — every spawn recorded, no exit
+  // ever — so "88 spawns, 0 exits" read as a leak when reconstructing an
+  // incident, and a *real* leak would have looked identical.
+  pty.onExit(guardCb('attach onExit', (e) => {
+    console.log('[agentsflow][pty] attach onExit', {
+      sessionId: opts.sessionId,
+      pid: pty.pid,
+      exitCode: e?.exitCode,
+      signal: e?.signal,
+    });
     safeSend(ch.win, 'terminal:exit', opts.channelId);
     claudeChannels.delete(opts.channelId);
   }));
   return '';
+}
+
+/** Live PTY/subsystem counts for the heartbeat. Cheap: no subprocess, no fds. */
+export function ptyStats(): Record<string, number> {
+  return {
+    attachPtys: claudeChannels.size,
+    resumePtys: resumeSessions.size,
+    shellPtys: shells.size,
+    systemPtys: systemPtyCount(),
+    ptmxMax: PTMX_MAX,
+  };
 }
 
 // Persistent, subscriber-based attach for `claude --resume`. Mirrors attachShell:

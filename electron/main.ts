@@ -3,7 +3,7 @@ import * as path from 'path';
 import * as fs from 'fs';
 import { v4 as uuid } from 'uuid';
 import serve from 'electron-serve';
-import { installCrashLogging, notePowerResume, notePowerSuspend } from './logger';
+import { installCrashLogging, notePowerResume, notePowerSuspend, registerHealthProbe } from './logger';
 import * as perf from './perf';
 
 const APP_NAME = 'Peers Flow';
@@ -64,10 +64,25 @@ let peersBridge: PeersBridge | null = null;
 // `delegate` then silently degrades to a headless (unwatchable) run for the
 // rest of the session. Preventing a second instance removes that race at the
 // root. The second launch quits immediately; we just focus the live window.
+//
+// Both sides of this handshake log. Silently, it produced a log that read like
+// a crash: a `main process start` followed by `before-quit` in the same second,
+// with nothing saying why — which is exactly what a fresh `npm run dev` against
+// an already-running instance looks like. In dev that also tears down the whole
+// new stack (`concurrently -k` kills `next` when `electron` exits), so it
+// presents to the user as "the app won't start"/"the app crashed".
 if (!app.requestSingleInstanceLock()) {
+  console.log(
+    '[agentsflow][lifecycle] another instance already holds the single-instance lock — exiting this one. ' +
+      'The running instance was focused instead; quit it first if you meant to restart.',
+  );
   app.quit();
 }
 app.on('second-instance', () => {
+  // Logged on the *holder* side: a launch attempt against a live instance is a
+  // strong breadcrumb that the user was trying to restart, which is context you
+  // want when reading back whatever happened to this process next.
+  console.log('[agentsflow][lifecycle] second-instance launch attempt — focusing the existing window');
   if (mainWindow) {
     if (mainWindow.isMinimized()) mainWindow.restore();
     mainWindow.show();
@@ -90,6 +105,15 @@ function bridgeHealthSnapshot(): BridgeHealth {
     }
   );
 }
+
+// Feed the heartbeat the subsystem counts worth trending over a long session:
+// the PTY/pty-budget numbers whose exhaustion has historically aborted the app,
+// and whether the delegation bridge is still reachable.
+registerHealthProbe(() => ({
+  ...pty.ptyStats(),
+  convs: store.getConversations().length,
+  bridgeOk: bridgeHealthSnapshot().healthy,
+}));
 
 // ----- Per-operation performance instrumentation -----
 // Wrap ipcMain.handle ONCE so every IPC handler (all of them live in this file)

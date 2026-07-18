@@ -87,6 +87,48 @@ export function getLogFilePath(): string {
   return logFilePath;
 }
 
+// ---------- Health heartbeat ----------
+// The log is event-driven, so an idle app writes nothing — and "wrote nothing"
+// is indistinguishable from "was dead" after the fact. That ambiguity is what
+// made the 2026-07-18 termination unattributable: the last line was ~2 minutes
+// before the process actually exited, and nothing in the log could say whether
+// those 2 minutes were a healthy idle or a wedged main thread. A fixed-cadence
+// line removes the ambiguity in both directions:
+//   • its presence up to the exit proves the app was alive and pumping, so the
+//     exit was external (a signal) rather than a freeze;
+//   • its absence pins the freeze to a known window.
+// It also trends the resources whose exhaustion has historically aborted us
+// (PTYs, fds, RSS), so a slow leak is visible in the log *before* it crashes.
+const HEARTBEAT_MS = Number(process.env.AGENTSFLOW_HEARTBEAT_MS) || 60_000;
+type HealthProbe = () => Record<string, unknown>;
+let healthProbe: HealthProbe | null = null;
+
+/**
+ * Register the subsystem-stats provider merged into each heartbeat line. Kept
+ * as a callback so this module stays dependency-free (it is imported before
+ * almost everything else, including anything that touches `app`).
+ */
+export function registerHealthProbe(fn: HealthProbe): void {
+  healthProbe = fn;
+}
+
+function heartbeat(): void {
+  const mem = process.memoryUsage();
+  const fields: Record<string, unknown> = {
+    uptimeS: Math.round(process.uptime()),
+    rssMB: Math.round(mem.rss / 1024 / 1024),
+    heapMB: Math.round(mem.heapUsed / 1024 / 1024),
+  };
+  if (healthProbe) {
+    try {
+      Object.assign(fields, healthProbe());
+    } catch (err) {
+      fields.probeError = (err as Error)?.message ?? String(err);
+    }
+  }
+  console.log('[agentsflow][health]', fields);
+}
+
 // Call once, as early as possible in main.ts (after app.setName). Patches
 // console.*, opens the log file, and registers global failure handlers.
 export function installCrashLogging(): void {
@@ -184,6 +226,12 @@ export function installCrashLogging(): void {
     lastTick = now;
   }, LOOP_TICK_MS);
   loopMon.unref?.();
+
+  // Emit one immediately so a short-lived run (e.g. a second instance that
+  // exits on the single-instance lock) still records its resource baseline.
+  heartbeat();
+  const beat = setInterval(heartbeat, HEARTBEAT_MS);
+  beat.unref?.();
 
   // ---------- Termination attribution ----------
   // A plain Cmd+Q and an external SIGKILL both leave the log silent today, so a
