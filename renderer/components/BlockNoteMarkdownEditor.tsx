@@ -1,8 +1,17 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { BlockNoteEditor as BNEditorInstance, Block } from '@blocknote/core';
-import { useCreateBlockNote } from '@blocknote/react';
+import { BlockNoteEditor as BNEditorInstance, Block, PartialBlock } from '@blocknote/core';
+import {
+  FormattingToolbar,
+  FormattingToolbarController,
+  getFormattingToolbarItems,
+  useBlockNoteEditor,
+  useComponentsContext,
+  useCreateBlockNote,
+  useSelectedBlocks,
+} from '@blocknote/react';
 import { BlockNoteView } from '@blocknote/ariakit';
 import { api } from '../lib/ipc';
+import { parseWidthFragment, stripWidthFragment, withWidthFragment } from '../../shared/md-image-width';
 
 interface Props {
   filePath: string;
@@ -37,6 +46,9 @@ function resolveImageRef(ref: string, mdAbsPath: string, baseDir?: string): stri
   if (r.startsWith('<') && r.endsWith('>')) r = r.slice(1, -1).trim();
   const spaceIdx = r.search(/\s/);
   if (spaceIdx >= 0) r = r.slice(0, spaceIdx);
+  // A `#w=<px>` fragment encodes display width (see shared/md-image-width) —
+  // it is not part of the on-disk filename.
+  r = stripWidthFragment(r);
   if (!r) return null;
   if (r.startsWith('/')) return r; // absolute filesystem path
   // Relative — resolve against the markdown file's directory, fall back to baseDir.
@@ -62,7 +74,7 @@ async function inlineLocalImages(
   markdown: string,
   filePath: string,
   baseDir?: string,
-): Promise<{ markdown: string; restoreMap: Map<string, string> }> {
+): Promise<{ markdown: string; restoreMap: Map<string, string>; widths: Map<string, number> }> {
   // Match standard markdown images: ![alt](path "optional title")
   const re = /!\[([^\]]*)\]\(([^)]+)\)/g;
   const matches: { full: string; alt: string; inside: string; absPath: string }[] = [];
@@ -72,7 +84,7 @@ async function inlineLocalImages(
     if (!abs) continue;
     matches.push({ full: m[0], alt: m[1], inside: m[2], absPath: abs });
   }
-  if (matches.length === 0) return { markdown, restoreMap: new Map() };
+  if (matches.length === 0) return { markdown, restoreMap: new Map(), widths: new Map() };
 
   const unique = Array.from(new Set(matches.map((x) => x.absPath)));
   const dataUrls = new Map<string, string>();
@@ -91,14 +103,49 @@ async function inlineLocalImages(
   // wins — duplicating an image block in the editor will collapse to that
   // single original path, which is harmless and rare.
   const restoreMap = new Map<string, string>();
+  // Display widths carried by `#w=` fragments, keyed like restoreMap (by data
+  // URL) — applied to the parsed blocks as previewWidth so a saved resize is
+  // visible again on reopen. The restore map stores the CLEAN ref; the save
+  // path re-appends the fragment from the block's then-current previewWidth.
+  const widths = new Map<string, number>();
   let out = markdown;
   for (const x of matches) {
     const dataUrl = dataUrls.get(x.absPath);
     if (!dataUrl) continue;
-    if (!restoreMap.has(dataUrl)) restoreMap.set(dataUrl, x.inside);
+    if (!restoreMap.has(dataUrl)) restoreMap.set(dataUrl, stripWidthFragment(x.inside));
+    const w = parseWidthFragment(x.inside);
+    if (w !== null && !widths.has(dataUrl)) widths.set(dataUrl, w);
     out = out.replace(x.full, `![${x.alt}](${dataUrl})`);
   }
-  return { markdown: out, restoreMap };
+  return { markdown: out, restoreMap, widths };
+}
+
+/**
+ * Set previewWidth on parsed image blocks whose ref carried a `#w=` fragment.
+ * Recurses into nested children (list items, toggles).
+ */
+function applyImageWidths(blocks: Block[], widths: Map<string, number>): Block[] {
+  if (widths.size === 0) return blocks;
+  return blocks.map((b) => {
+    const kids = b.children && b.children.length ? applyImageWidths(b.children as Block[], widths) : b.children;
+    const url = (b.props as { url?: string }).url;
+    if (b.type === 'image' && url && widths.has(url)) {
+      return { ...b, props: { ...b.props, previewWidth: widths.get(url) }, children: kids } as unknown as Block;
+    }
+    return kids === b.children ? b : ({ ...b, children: kids } as Block);
+  });
+}
+
+/** url → previewWidth for every resized image block in the document. */
+function collectImageWidths(blocks: Block[], out = new Map<string, number>()): Map<string, number> {
+  for (const b of blocks) {
+    const props = b.props as { url?: string; previewWidth?: number };
+    if (b.type === 'image' && props.url && typeof props.previewWidth === 'number' && props.previewWidth > 0) {
+      if (!out.has(props.url)) out.set(props.url, props.previewWidth);
+    }
+    if (b.children && b.children.length) collectImageWidths(b.children as Block[], out);
+  }
+  return out;
 }
 
 // Files we're willing to garbage-collect when their last reference is removed:
@@ -135,10 +182,19 @@ async function gcLocalFile(
   if (done.has(abs)) return;
   const a = api();
   if (typeof a.removePath !== 'function' || typeof a.searchFiles !== 'function') return;
-  const root = baseDir || dirname(mdPath);
-  if (!abs.startsWith(root + '/')) return;
+  const mdDir = dirname(mdPath);
+  const root = baseDir || mdDir;
   const name = abs.slice(abs.lastIndexOf('/') + 1);
-  if (!IMAGE_NAME.test(name) && !PASTED_NAME.test(name)) return;
+  if (PASTED_NAME.test(name)) {
+    // Our pasted attachments live next to the .md (or in its images/ subdir).
+    // In the session view baseDir is the conversation's PROJECT directory, and
+    // note files live elsewhere (the app-data notes tree) — so the md's own
+    // directory must be an accepted root or these never get cleaned up.
+    if (!abs.startsWith(mdDir + '/') && !abs.startsWith(root + '/')) return;
+  } else {
+    if (!IMAGE_NAME.test(name)) return;
+    if (!abs.startsWith(root + '/')) return;
+  }
   try {
     // Our own pasted attachments embed a timestamp+random slug, so their
     // names are unique to this document — delete straight away. Generic
@@ -184,12 +240,19 @@ async function cleanupOrphanedImages(
  * Reverse of inlineLocalImages — replaces inlined data URLs in serialized
  * markdown with the original on-disk refs so saves don't bloat the file.
  */
-function restoreImageRefs(markdown: string, restoreMap: Map<string, string>): string {
+function restoreImageRefs(
+  markdown: string,
+  restoreMap: Map<string, string>,
+  widths: Map<string, number> = new Map(),
+): string {
   if (restoreMap.size === 0) return markdown;
   // Also matches plain links — non-image pastes serialize as [name](data:…).
   return markdown.replace(/(!?)\[([^\]]*)\]\((data:[^)]+)\)/g, (full, bang: string, alt: string, url: string) => {
     const original = restoreMap.get(url);
-    return original ? `${bang}[${alt}](${original})` : full;
+    if (!original) return full;
+    // Images carry their display width as a `#w=` fragment; links never do.
+    const ref = bang ? withWidthFragment(original, widths.get(url)) : original;
+    return `${bang}[${alt}](${ref})`;
   });
 }
 
@@ -269,8 +332,98 @@ function decodeBlankBlocks(blocks: Block[]): Block[] {
  * (see BLANK_SENTINEL) and restoring inlined image data URLs to their on-disk refs.
  */
 async function serializeDoc(editor: BNEditorInstance, restoreMap: Map<string, string>): Promise<string> {
-  const md = await editor.blocksToMarkdownLossy(encodeBlankBlocks(editor.document as Block[]));
-  return restoreImageRefs(md, restoreMap);
+  const doc = editor.document as Block[];
+  const md = await editor.blocksToMarkdownLossy(encodeBlankBlocks(doc));
+  return restoreImageRefs(md, restoreMap, collectImageWidths(doc));
+}
+
+/**
+ * Copy an image (data URL or fetchable URL) to the OS clipboard. Prefers the
+ * native IPC path (faithful bytes, no focus requirement); falls back to
+ * decode-via-canvas + the async web clipboard API, which also covers a main
+ * process that predates the handler.
+ */
+async function copyImageToSystemClipboard(url: string): Promise<void> {
+  const a = api();
+  if (url.startsWith('data:') && typeof a.copyImageDataToClipboard === 'function') {
+    try {
+      const res = await a.copyImageDataToClipboard(url.slice(url.indexOf(',') + 1));
+      if (res.ok) return;
+    } catch {
+      // handler missing (stale main) — fall through to the web path
+    }
+  }
+  const img = new Image();
+  img.crossOrigin = 'anonymous';
+  await new Promise<void>((resolve, reject) => {
+    img.onload = () => resolve();
+    img.onerror = () => reject(new Error('could not load image'));
+    img.src = url;
+  });
+  const canvas = document.createElement('canvas');
+  canvas.width = img.naturalWidth;
+  canvas.height = img.naturalHeight;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) throw new Error('canvas unavailable');
+  ctx.drawImage(img, 0, 0);
+  // The async clipboard API only accepts PNG for images.
+  const blob = await new Promise<Blob>((resolve, reject) =>
+    canvas.toBlob((b) => (b ? resolve(b) : reject(new Error('PNG encode failed'))), 'image/png'),
+  );
+  await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]);
+}
+
+const COPY_ICON = (
+  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
+    <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+  </svg>
+);
+
+const COPIED_ICON = (
+  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <polyline points="20 6 9 17 4 12" />
+  </svg>
+);
+
+/**
+ * "Copy image" button for the formatting toolbar — shown only when a single
+ * image block is selected (the toolbar that appears when you click an image).
+ */
+function CopyImageButton() {
+  const editor = useBlockNoteEditor();
+  const Components = useComponentsContext()!;
+  const selectedBlocks = useSelectedBlocks(editor);
+  const [state, setState] = useState<'idle' | 'copied' | 'error'>('idle');
+  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => { if (timer.current) clearTimeout(timer.current); }, []);
+
+  const block = selectedBlocks.length === 1 ? selectedBlocks[0] : undefined;
+  const url = block && block.type === 'image' ? (block.props as { url?: string }).url : undefined;
+  if (!url) return null;
+
+  const flash = (s: 'copied' | 'error') => {
+    setState(s);
+    if (timer.current) clearTimeout(timer.current);
+    timer.current = setTimeout(() => setState('idle'), 1500);
+  };
+
+  return (
+    <Components.FormattingToolbar.Button
+      label="Copy image"
+      mainTooltip={state === 'error' ? 'Copy failed' : state === 'copied' ? 'Copied' : 'Copy image to clipboard'}
+      icon={state === 'copied' ? COPIED_ICON : COPY_ICON}
+      onClick={() => {
+        copyImageToSystemClipboard(url)
+          .then(() => flash('copied'))
+          .catch((err) => {
+            // eslint-disable-next-line no-console
+            console.error('[agentsflow] copy image to clipboard failed', err);
+            flash('error');
+          });
+      }}
+    />
+  );
 }
 
 /**
@@ -316,9 +469,11 @@ function Inner({
         throw new Error('saveImageToDir unavailable — preload needs a refresh');
       }
       const base64 = dataUrl.slice(dataUrl.indexOf(',') + 1);
-      const { savedPath } = await a.saveImageToDir(dirname(filePath), base64, file.type || 'image/png');
+      // All pastes for files in this directory share one images/ subdir, so
+      // the notes listing shows a single folder instead of loose screenshots.
+      const { savedPath } = await a.saveImageToDir(dirname(filePath) + '/images', base64, file.type || 'image/png');
       const name = savedPath.slice(savedPath.lastIndexOf('/') + 1);
-      restoreRef.current.set(dataUrl, name);
+      restoreRef.current.set(dataUrl, 'images/' + name);
       setError(null);
     } catch (err) {
       // Never throw out of uploadFile — BlockNote doesn't catch rejections,
@@ -332,7 +487,55 @@ function Inner({
     return dataUrl;
   }, [filePath]);
 
-  const editor = useCreateBlockNote({ initialContent: initialBlocks, uploadFile });
+  const uploadRef = useRef(uploadFile);
+  uploadRef.current = uploadFile;
+
+  // BlockNote's default paste routing prefers text/html over Files, so copying
+  // an image from a browser / Figma / Trello (which put BOTH an html fragment
+  // and the bitmap on the clipboard) pastes an <img> pointing at the ORIGINAL
+  // remote URL — usually auth-gated or expired, i.e. "paste did nothing" — and
+  // sources whose html flavor has no <img> at all insert literally nothing.
+  // Whenever the clipboard carries actual image bytes, upload those instead.
+  const pasteHandler = useCallback(
+    (ctx: {
+      event: ClipboardEvent;
+      editor: BNEditorInstance;
+      defaultPasteHandler: () => boolean | undefined;
+    }): boolean | undefined => {
+      const { event, editor, defaultPasteHandler } = ctx;
+      const items = event.clipboardData ? Array.from(event.clipboardData.items) : [];
+      const images = items
+        .filter((i) => i.kind === 'file' && i.type.startsWith('image/'))
+        .map((i) => i.getAsFile())
+        .filter((f): f is File => f !== null);
+      if (images.length === 0) return defaultPasteHandler();
+      event.preventDefault();
+      void (async () => {
+        // Anchor chaining keeps multiple images in paste order while leaving
+        // the user's caret alone — selecting the inserted image would make the
+        // NEXT paste replace it (ProseMirror node-selection semantics).
+        let anchor: Block = editor.getTextCursorPosition().block as Block;
+        // Mirror BlockNote's own file-insertion rule: replace the block under
+        // the caret when it is empty, otherwise insert below it.
+        let replaceEmpty = Array.isArray(anchor.content) && anchor.content.length === 0;
+        for (const file of images) {
+          const url = await uploadRef.current(file);
+          if (!url) continue;
+          const block: PartialBlock = { type: 'image', props: { name: file.name, url } };
+          if (replaceEmpty) {
+            anchor = editor.updateBlock(anchor, block) as Block;
+            replaceEmpty = false;
+          } else {
+            anchor = editor.insertBlocks([block], anchor, 'after')[0] as Block;
+          }
+        }
+      })();
+      return true;
+    },
+    [],
+  );
+
+  const editor = useCreateBlockNote({ initialContent: initialBlocks, uploadFile, pasteHandler });
 
   useEffect(() => {
     if (!autoFocus) return;
@@ -470,7 +673,17 @@ function Inner({
       </header>
 
       <div className="flex-1 min-h-0 overflow-y-auto blocknote-host">
-        <BlockNoteView editor={editor} theme="dark" />
+        <BlockNoteView editor={editor} theme="dark" formattingToolbar={false}>
+          {/* Default toolbar plus a "Copy image" button when an image is selected. */}
+          <FormattingToolbarController
+            formattingToolbar={() => (
+              <FormattingToolbar>
+                {...getFormattingToolbarItems()}
+                <CopyImageButton key="copy-image" />
+              </FormattingToolbar>
+            )}
+          />
+        </BlockNoteView>
       </div>
     </div>
   );
@@ -494,11 +707,14 @@ export default function BlockNoteMarkdownEditor({ filePath, baseDir, autoFocus }
         if (res.binary) { setState({ kind: 'error', message: 'Binary file — preview not supported' }); return; }
         if (res.truncated) { setState({ kind: 'error', message: `File too large (${formatBytes(res.size)})` }); return; }
 
-        const { markdown: inlined, restoreMap } = await inlineLocalImages(res.content, filePath, baseDir);
+        const { markdown: inlined, restoreMap, widths } = await inlineLocalImages(res.content, filePath, baseDir);
         if (cancelled) return;
         // Spin up a throwaway editor just to use the markdown parser.
         const parser = BNEditorInstance.create();
-        const blocks = decodeBlankBlocks((await parser.tryParseMarkdownToBlocks(inlined)) as Block[]);
+        const blocks = applyImageWidths(
+          decodeBlankBlocks((await parser.tryParseMarkdownToBlocks(inlined)) as Block[]),
+          widths,
+        );
         if (cancelled) return;
         setState({ kind: 'ready', blocks, markdown: res.content, size: res.size, restoreMap });
       } catch (err) {

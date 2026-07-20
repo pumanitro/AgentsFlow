@@ -50,6 +50,7 @@ import * as fileWatcher from './file-watcher';
 import { gitStatus, listBranches, listFiles, listWorktrees, removeWorktree } from './git';
 import { searchInFiles } from './search';
 import { deleteAttachmentFiles, pastedImagesRoot, prunePastedImages, sweepOrphanAttachments, todayDateSlug } from './attachments';
+import { noteDirForPath, sweepNoteDir, sweepNoteImages } from './note-images';
 import { BridgeHealth, Conversation, FileEntry, PinnedDivider, PinnedItemRef, PinnedTodo, SlashCommand, SpawnRequest, TrackedDirectory } from '../shared/types';
 
 const isDev = process.env.NODE_ENV === 'development';
@@ -278,6 +279,20 @@ app.whenReady().then(() => {
   } catch (err) {
     console.error('[agentsflow] prune failed', err);
   }
+
+  // Orphaned note images: pasted screenshots whose last markdown reference is
+  // gone (note deleted, or the live editor GC missed them). Once at startup,
+  // then periodically — cheap (notes dirs are tiny) and age-guarded.
+  const sweepNotes = () => {
+    try {
+      const result = sweepNoteImages(path.join(app.getPath('userData'), 'notes'));
+      if (result.deleted > 0) console.log('[agentsflow] swept orphaned note images', result);
+    } catch (err) {
+      console.error('[agentsflow] note-image sweep failed', err);
+    }
+  };
+  sweepNotes();
+  setInterval(sweepNotes, 6 * 60 * 60 * 1000);
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
@@ -1223,6 +1238,13 @@ ipcMain.handle('files:remove', async (_e, targetPath: string) => {
     throw new Error(`remove: refusing to delete suspicious path ${targetPath}`);
   }
   fsMod.rmSync(targetPath, { recursive: true, force: false });
+  // Deleting a note (or anything else inside a note folder) can orphan pasted
+  // images only that file referenced — sweep just that folder right away.
+  // Age-guarded, so a freshly pasted image in a still-open editor is safe.
+  const noteDir = noteDirForPath(pathMod.join(app.getPath('userData'), 'notes'), targetPath);
+  if (noteDir) {
+    try { sweepNoteDir(noteDir); } catch {}
+  }
   return { ok: true as const };
 });
 
@@ -1292,6 +1314,17 @@ ipcMain.handle('clipboard:copyImage', async (_e, filePath: string): Promise<{ ok
   if (!IMAGE_EXTS.has(ext)) return { ok: false, error: `not an image (.${ext})` };
   try {
     const img = nativeImage.createFromPath(filePath);
+    if (img.isEmpty()) return { ok: false, error: 'failed to decode image' };
+    clipboard.writeImage(img);
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: (err as Error)?.message ?? String(err) };
+  }
+});
+
+ipcMain.handle('clipboard:copyImageData', async (_e, dataBase64: string): Promise<{ ok: true } | { ok: false; error: string }> => {
+  try {
+    const img = nativeImage.createFromBuffer(Buffer.from(dataBase64, 'base64'));
     if (img.isEmpty()) return { ok: false, error: 'failed to decode image' };
     clipboard.writeImage(img);
     return { ok: true };

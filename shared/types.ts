@@ -309,6 +309,11 @@ export interface AgentsFlowApi {
   removePath: (targetPath: string) => Promise<{ ok: true }>;
 
   copyImageToClipboard: (filePath: string) => Promise<{ ok: true } | { ok: false; error: string }>;
+  // Copies raw image bytes (base64, any format nativeImage can decode) to the
+  // OS clipboard. Optional so a renderer served by a newer dev server degrades
+  // gracefully against a main process that predates the handler — callers fall
+  // back to the web clipboard API.
+  copyImageDataToClipboard?: (dataBase64: string) => Promise<{ ok: true } | { ok: false; error: string }>;
 
   // Reveals the file/dir in the OS file browser (Finder on macOS, Explorer
   // on Windows, default file manager on Linux).

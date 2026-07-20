@@ -110,6 +110,7 @@ const api: AgentsFlowApi = {
   removePath: (targetPath) => ipcRenderer.invoke('files:remove', targetPath),
 
   copyImageToClipboard: (filePath) => ipcRenderer.invoke('clipboard:copyImage', filePath),
+  copyImageDataToClipboard: (dataBase64) => ipcRenderer.invoke('clipboard:copyImageData', dataBase64),
   revealInFinder: (targetPath) => ipcRenderer.invoke('files:revealInFinder', targetPath),
   probePath: (baseDir, token) => ipcRenderer.invoke('files:probePath', baseDir, token),
   startFileDrag: (filePath) => ipcRenderer.invoke('files:startDrag', filePath),
