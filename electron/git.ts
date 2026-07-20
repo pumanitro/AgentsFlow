@@ -14,7 +14,14 @@ const REPO_CACHE_TTL_MS = 60_000;
 
 export function invalidateGitCache(cwd: string): void {
   repoCache.delete(cwd);
-  _worktreesCache.delete(cwd);
+  // The worktree cache is keyed on (dir, reference branch), so a single dir can
+  // hold several entries — drop every one of them, not just the default-ref key.
+  // `_publishCache` deliberately needs no invalidation: it is keyed on the two
+  // commit shas it describes, so a moved ref simply produces a different key.
+  const prefix = `${cwd}\u0000`;
+  for (const key of _worktreesCache.keys()) {
+    if (key.startsWith(prefix)) _worktreesCache.delete(key);
+  }
 }
 
 export interface GitEntry {
@@ -313,8 +320,15 @@ export interface WorktreeInfo {
   isMain: boolean;       // the repo's primary working tree
   isCurrent: boolean;    // realpath === the requested dir
   changedCount: number;  // uncommitted (working-tree) file count
-  aligned: boolean;      // green when true, blue otherwise
-  aheadOfMain: number;   // commits on this branch not in main (0 for the main tree)
+  dirty: boolean;        // changedCount > 0
+  // --- publish state, measured against `refBranch` ------------------------
+  // The branch every row was compared against, '' when none could be resolved
+  // (a detached primary working tree with no pinned reference).
+  refBranch: string;
+  ahead: number;         // raw commits here that the ref does not have
+  behind: number;        // commits on the ref that are not here
+  unpublished: number;   // `ahead` minus commits that already landed reworded/rebased
+  published: boolean;    // everything on this branch is in the ref
 }
 
 interface RawWorktree { path: string; head: string; branch?: string; detached: boolean; bare: boolean }
@@ -348,27 +362,193 @@ function realpathOrSelf(p: string): string {
   try { return fs.realpathSync(p); } catch { return p; }
 }
 
-// ~2 s TTL + in-flight coalescing keyed on the requested dir. The Changes
-// sidebar refetches on every file-watcher burst; without this a repo with
-// several worktrees would fan a burst out into (worktrees × git) spawns. The
-// file-watcher clears this alongside the repo-meta cache on ref/index changes.
+/**
+ * How many worktrees are scanned at once.
+ *
+ * Deliberately NOT `Promise.all` over every worktree. Wall-clock is flat across
+ * limits (a 20-worktree repo measured 2332ms unbounded vs 1913ms at 4 — inside
+ * the noise), but the *event-loop* cost is not: spawning twenty gits at once
+ * stalled the main process for p95 1792ms, against 149ms at a limit of 4. That
+ * loop is what carries PTY output to the chat pane, so an unbounded fan-out
+ * shows up as the terminal freezing for a second whenever the sidebar refreshes.
+ * Raising this back to "all of them" buys no speed and costs exactly that.
+ */
+const WORKTREE_SCAN_CONCURRENCY = 4;
+
+/** `Promise.all`-alike that keeps at most `limit` tasks in flight, preserving order. */
+async function mapPooled<T, R>(items: T[], limit: number, fn: (item: T, index: number) => Promise<R>): Promise<R[]> {
+  const out = new Array<R>(items.length);
+  let next = 0;
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (next < items.length) {
+      const i = next++;
+      out[i] = await fn(items[i], i);
+    }
+  }));
+  return out;
+}
+
+interface PublishState { ahead: number; behind: number; unpublished: number; published: boolean }
+
+// Publish state is a pure function of two immutable object ids (the ref's sha
+// and the branch's sha), so unlike the worktree list it can be memoised
+// forever instead of on a TTL — if neither sha moved, the answer cannot have
+// changed. That matters because the accurate answer costs up to two extra git
+// spawns per unpublished worktree, and the Changes sidebar refetches on every
+// file-watcher burst.
+const _publishCache = new Map<string, PublishState>();
+const PUBLISH_CACHE_MAX = 500;
+
+/**
+ * Ahead/behind for every local branch in ONE spawn, via for-each-ref's
+ * `%(ahead-behind:)` (git 2.41+). The per-branch `rev-list` this replaces cost
+ * roughly 9x as much on a 20-worktree repo — 725ms across 28 spawns versus
+ * 80ms in one. Returns null on older git, where the token is not interpolated,
+ * so the caller transparently falls back to per-branch rev-list.
+ */
+async function batchAheadBehind(
+  cwd: string,
+  ref: string,
+): Promise<Map<string, { ahead: number; behind: number }> | null> {
+  const r = await runGit(
+    ['for-each-ref', `--format=%(refname:short) %(ahead-behind:${ref})`, 'refs/heads/'],
+    cwd,
+  );
+  if (r.code !== 0) return null;
+  const map = new Map<string, { ahead: number; behind: number }>();
+  for (const line of r.stdout.split('\n')) {
+    const parts = line.trim().split(/\s+/);
+    if (parts.length < 3) continue;
+    const ahead = parseInt(parts[1], 10);
+    const behind = parseInt(parts[2], 10);
+    if (Number.isNaN(ahead) || Number.isNaN(behind)) return null; // git too old
+    map.set(parts[0], { ahead, behind });
+  }
+  return map.size > 0 ? map : null;
+}
+
+async function publishState(
+  cwd: string,
+  ref: string,
+  refSha: string,
+  rev: string,
+  revSha: string,
+  known?: { ahead: number; behind: number },
+): Promise<PublishState> {
+  const key = `${refSha}\u0000${revSha}`;
+  const hit = _publishCache.get(key);
+  if (hit) return hit;
+
+  let out: PublishState = { ahead: 0, behind: 0, unpublished: 0, published: true };
+  // `known` is this branch's row from the batched for-each-ref pass. Only
+  // detached worktrees, which have no branch ref to batch over, still pay for
+  // an individual rev-list here.
+  const counts = known
+    ? { code: 0, stdout: `${known.behind}\t${known.ahead}` }
+    : await runGit(['rev-list', '--left-right', '--count', `${ref}...${rev}`], cwd);
+  if (counts.code === 0) {
+    const [behind, ahead] = counts.stdout.trim().split(/\s+/).map((n) => parseInt(n, 10) || 0);
+    out = { ahead, behind, unpublished: ahead, published: ahead === 0 };
+
+    if (ahead > 0) {
+      // `ahead` overcounts what is actually left to ship. A commit that reached
+      // the ref by cherry-pick or rebase carries a new sha but the same patch,
+      // so a plain rev-list still calls it "not in the ref". `git cherry`
+      // compares patch-ids and marks those already present with '-'.
+      const cherry = await runGit(['cherry', ref, rev], cwd);
+      if (cherry.code === 0) {
+        const unpublished = cherry.stdout.split('\n').filter((l) => l.startsWith('+')).length;
+        out = { ...out, unpublished, published: unpublished === 0 };
+      }
+      if (!out.published) {
+        // Last check: a branch whose commits net out to no change at all (work
+        // that was later reverted, say) has nothing left to ship even though
+        // `cherry` still counts those commits.
+        //
+        // NOTE this is deliberately narrow, and in particular does NOT detect
+        // squash-merges: `ref...rev` diffs the merge-base against rev, so it
+        // stays non-empty after a squash even though the content did land.
+        // Detecting that reliably needs per-file tree comparison (merge-tree
+        // reports conflicts on rebased branches, so it is not a substitute).
+        // The consequence is conservative — a squash-merged branch reads as
+        // unpublished, never the reverse.
+        const diff = await runGit(['diff', '--quiet', `${ref}...${rev}`], cwd);
+        if (diff.code === 0) out = { ...out, unpublished: 0, published: true };
+      }
+    }
+  }
+
+  // Whole-map eviction rather than LRU bookkeeping: entries are tiny and a repo
+  // only ever has a handful of live (ref, branch) pairs, so the cap is a leak
+  // guard for long sessions, not a hot path.
+  if (_publishCache.size >= PUBLISH_CACHE_MAX) _publishCache.clear();
+  _publishCache.set(key, out);
+  return out;
+}
+
+export interface BranchList {
+  local: string[];   // e.g. 'v3.1.0'
+  remote: string[];  // e.g. 'origin/v3.1.0'
+}
+
+/**
+ * Branches for the reference picker, most-recently-committed first, split by
+ * kind. Remotes are deliberately NOT deduplicated against locals: `v3.1.0` and
+ * `origin/v3.1.0` answer different questions ("is it merged?" vs "is it
+ * pushed?"), and a release branch is exactly where those two diverge.
+ */
+export async function listBranches(cwd: string): Promise<BranchList> {
+  const empty: BranchList = { local: [], remote: [] };
+  try { fs.accessSync(cwd); } catch { return empty; }
+  if (!getRepoMeta(cwd).isRepo) return empty;
+  const r = await runGit(
+    ['for-each-ref', '--sort=-committerdate', '--format=%(refname:short)', 'refs/heads/', 'refs/remotes/'],
+    cwd,
+  );
+  if (r.code !== 0) return empty;
+  const all = r.stdout.split('\n').map((s) => s.trim()).filter(Boolean);
+  const local = new Set<string>();
+  const remote: string[] = [];
+  const localRes = await runGit(
+    ['for-each-ref', '--format=%(refname:short)', 'refs/heads/'],
+    cwd,
+  );
+  if (localRes.code === 0) {
+    for (const b of localRes.stdout.split('\n').map((s) => s.trim())) if (b) local.add(b);
+  }
+  const localOrdered: string[] = [];
+  for (const b of all) {
+    if (local.has(b)) localOrdered.push(b);
+    // `origin/HEAD` is a symbolic pointer at the default branch, not a branch
+    // anyone means to compare against — it would just duplicate origin/main.
+    else if (!/\/HEAD$/.test(b)) remote.push(b);
+  }
+  return { local: localOrdered, remote };
+}
+
+// ~2 s TTL + in-flight coalescing keyed on the requested dir *and* the
+// reference branch. The Changes sidebar refetches on every file-watcher burst;
+// without this a repo with several worktrees would fan a burst out into
+// (worktrees × git) spawns. The file-watcher clears this alongside the
+// repo-meta cache on ref/index changes.
 interface WorktreesCacheEntry { at: number; promise: Promise<WorktreeInfo[]> }
 const _worktreesCache = new Map<string, WorktreesCacheEntry>();
 const WORKTREES_TTL_MS = 2_000;
 
-export function listWorktrees(cwd: string): Promise<WorktreeInfo[]> {
-  const cached = _worktreesCache.get(cwd);
+export function listWorktrees(cwd: string, refBranch?: string): Promise<WorktreeInfo[]> {
+  const key = `${cwd}\u0000${refBranch ?? ''}`;
+  const cached = _worktreesCache.get(key);
   if (cached && Date.now() - cached.at < WORKTREES_TTL_MS) return cached.promise;
-  const promise = listWorktreesImpl(cwd).catch((err) => {
+  const promise = listWorktreesImpl(cwd, refBranch).catch((err) => {
     // On failure don't poison the cache — let the next call retry.
-    _worktreesCache.delete(cwd);
+    _worktreesCache.delete(key);
     throw err;
   });
-  _worktreesCache.set(cwd, { at: Date.now(), promise });
+  _worktreesCache.set(key, { at: Date.now(), promise });
   return promise;
 }
 
-async function listWorktreesImpl(cwd: string): Promise<WorktreeInfo[]> {
+async function listWorktreesImpl(cwd: string, refBranch?: string): Promise<WorktreeInfo[]> {
   try { fs.accessSync(cwd); } catch { return []; }
   if (!getRepoMeta(cwd).isRepo) return [];
 
@@ -377,41 +557,59 @@ async function listWorktreesImpl(cwd: string): Promise<WorktreeInfo[]> {
   const raws = parseWorktreePorcelain(res.stdout).filter((w) => !w.bare);
   if (raws.length === 0) return [];
 
-  // The primary working tree is the first entry; its branch defines "main".
+  // The branch every row is measured against. It defaults to the primary
+  // working tree's branch — which is what this used to compare against
+  // implicitly, under the name "main" — but the user can pin an explicit one,
+  // e.g. a release branch, to see what has and hasn't landed in it. A pinned
+  // branch that has since been deleted falls back to the default rather than
+  // silently reporting everything as unpublished.
   const primary = raws[0];
-  const mainRef = primary.branch; // undefined if the primary is detached
+  let ref = primary.branch;
+  if (refBranch) {
+    // `^{commit}` resolves any ref kind — local branch, remote-tracking branch
+    // (origin/v3.1.0) or tag — so the picker is not limited to local heads.
+    // A ref that no longer resolves leaves `ref` at the repo default rather
+    // than reporting every worktree as unpublished against nothing.
+    const ok = await runGit(['rev-parse', '--verify', '--quiet', `${refBranch}^{commit}`], cwd);
+    if (ok.code === 0) ref = refBranch;
+  }
+  const refShaRes = ref ? await runGit(['rev-parse', ref], cwd) : null;
+  const refSha = refShaRes && refShaRes.code === 0 ? refShaRes.stdout.trim() : '';
   const realCwd = realpathOrSelf(cwd);
 
-  const out = await Promise.all(raws.map(async (w, idx): Promise<WorktreeInfo> => {
-    const isMain = idx === 0;
+  // One spawn covers ahead/behind for every branch, so the per-worktree work
+  // below is left with just its `git status` (plus a `cherry` for the few trees
+  // that actually have unpublished commits).
+  const aheadBehind = ref && refSha ? await batchAheadBehind(cwd, ref) : null;
+
+  const out = await mapPooled(raws, WORKTREE_SCAN_CONCURRENCY, async (w, idx): Promise<WorktreeInfo> => {
     const status = await gitStatus(w.path);
     const changedCount = status.entries.length;
-    const clean = status.isRepo && changedCount === 0;
 
-    let aheadOfMain = 0;
-    if (!isMain && mainRef && w.branch !== mainRef) {
-      const rev = w.branch ?? w.head;
-      const r = await runGit(['rev-list', '--count', `${mainRef}..${rev}`], cwd);
-      if (r.code === 0) aheadOfMain = parseInt(r.stdout.trim(), 10) || 0;
+    // Every tree is compared uniformly, the primary one included — when it sits
+    // on the reference itself that trivially yields 0/0/published, but when the
+    // reference is a release branch "is main itself in it?" is a real question.
+    let ps: PublishState = { ahead: 0, behind: 0, unpublished: 0, published: false };
+    if (ref && refSha) {
+      const known = w.branch ? aheadBehind?.get(w.branch) : undefined;
+      ps = await publishState(cwd, ref, refSha, w.branch ?? w.head, w.head, known);
     }
-
-    // Green requires being fully folded into main AND a clean tree. For the
-    // primary tree "merged into main" is trivially true; for a linked tree we
-    // need mainRef to be known and zero commits ahead.
-    const merged = isMain || (!!mainRef && aheadOfMain === 0);
-    const aligned = merged && clean;
 
     return {
       path: w.path,
       branch: w.branch ?? (w.detached ? 'HEAD' : ''),
       head: w.head.slice(0, 8),
-      isMain,
+      isMain: idx === 0,
       isCurrent: realpathOrSelf(w.path) === realCwd,
       changedCount,
-      aligned,
-      aheadOfMain,
+      dirty: changedCount > 0,
+      refBranch: ref ?? '',
+      ahead: ps.ahead,
+      behind: ps.behind,
+      unpublished: ps.unpublished,
+      published: ps.published,
     };
-  }));
+  });
 
   return out;
 }

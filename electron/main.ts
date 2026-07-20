@@ -47,7 +47,7 @@ import { buildDelegatePrompt } from './registry';
 import { startPeersBridge, type DelegateRequest, type OpenFileRequest, type PeersBridge } from './delegation-bridge';
 import * as pty from './pty-manager';
 import * as fileWatcher from './file-watcher';
-import { gitStatus, listFiles, listWorktrees, removeWorktree } from './git';
+import { gitStatus, listBranches, listFiles, listWorktrees, removeWorktree } from './git';
 import { searchInFiles } from './search';
 import { deleteAttachmentFiles, pastedImagesRoot, prunePastedImages, sweepOrphanAttachments, todayDateSlug } from './attachments';
 import { BridgeHealth, Conversation, FileEntry, PinnedDivider, PinnedItemRef, PinnedTodo, SlashCommand, SpawnRequest, TrackedDirectory } from '../shared/types';
@@ -1041,7 +1041,8 @@ ipcMain.handle('skills:list', async (_e, dirPath: string | null): Promise<SlashC
 });
 
 ipcMain.handle('git:status', async (_e, dirPath: string) => gitStatus(dirPath));
-ipcMain.handle('git:worktrees', async (_e, dirPath: string) => listWorktrees(dirPath));
+ipcMain.handle('git:worktrees', async (_e, dirPath: string, refBranch?: string) => listWorktrees(dirPath, refBranch));
+ipcMain.handle('git:branches', async (_e, dirPath: string) => listBranches(dirPath));
 ipcMain.handle('git:removeWorktree', async (_e, repoDir: string, worktreePath: string, force?: boolean) =>
   removeWorktree(repoDir, worktreePath, force));
 ipcMain.handle('files:list', async (_e, dirPath: string) => listFiles(dirPath));

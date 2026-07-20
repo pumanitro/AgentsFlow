@@ -80,7 +80,8 @@ const api: AgentsFlowApi = {
   },
 
   gitStatus: (dirPath) => ipcRenderer.invoke('git:status', dirPath),
-  listWorktrees: (dirPath) => ipcRenderer.invoke('git:worktrees', dirPath),
+  listWorktrees: (dirPath, refBranch) => ipcRenderer.invoke('git:worktrees', dirPath, refBranch),
+  listBranches: (dirPath) => ipcRenderer.invoke('git:branches', dirPath),
   removeWorktree: (repoDir, worktreePath, force) =>
     ipcRenderer.invoke('git:removeWorktree', repoDir, worktreePath, force),
   listFiles: (dirPath) => ipcRenderer.invoke('files:list', dirPath),

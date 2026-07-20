@@ -99,3 +99,39 @@ export function useDirectoryNumber(
   }, [directoryKey, field]);
   return [value, setValue];
 }
+
+/**
+ * String preference scoped to a tracked directory — e.g. the worktree panel's
+ * reference branch, which is inherently per-repo (`v3.1.0` means nothing in
+ * another project). `null` means "not set", and is stored by removing the key
+ * so it falls back to the caller's default rather than to an empty string.
+ */
+export function useDirectoryString(
+  directoryKey: string | null | undefined,
+  field: string,
+): [string | null, (v: string | null) => void] {
+  const [value, setRaw] = useState<string | null>(null);
+  useEffect(() => {
+    if (!directoryKey || typeof localStorage === 'undefined') {
+      setRaw(null);
+      return;
+    }
+    try {
+      setRaw(localStorage.getItem(`agentsflow:dir:${directoryKey}:${field}`));
+    } catch {
+      setRaw(null);
+    }
+  }, [directoryKey, field]);
+  const setValue = useCallback((v: string | null) => {
+    setRaw(v);
+    if (!directoryKey || typeof localStorage === 'undefined') return;
+    const key = `agentsflow:dir:${directoryKey}:${field}`;
+    try {
+      if (v === null) localStorage.removeItem(key);
+      else localStorage.setItem(key, v);
+    } catch {
+      // best-effort
+    }
+  }, [directoryKey, field]);
+  return [value, setValue];
+}

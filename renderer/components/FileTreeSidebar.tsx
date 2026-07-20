@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api } from '../lib/ipc';
-import { useUIState } from '../lib/ui-state';
-import { FileEntry, GitEntryStatus, GitStatusResult, WorktreeInfo } from '../../shared/types';
+import { useDirectoryString, useUIState } from '../lib/ui-state';
+import { BranchList, FileEntry, GitEntryStatus, GitStatusResult, WorktreeInfo } from '../../shared/types';
 import SearchModal from './SearchModal';
 import NotesPanel from './NotesPanel';
 import {
@@ -86,8 +86,9 @@ function worktreesEqual(a: WorktreeInfo[], b: WorktreeInfo[]): boolean {
   for (let i = 0; i < a.length; i++) {
     const x = a[i];
     const y = b[i];
-    if (x.path !== y.path || x.changedCount !== y.changedCount || x.aligned !== y.aligned
-      || x.aheadOfMain !== y.aheadOfMain || x.branch !== y.branch || x.isCurrent !== y.isCurrent) {
+    if (x.path !== y.path || x.changedCount !== y.changedCount || x.published !== y.published
+      || x.unpublished !== y.unpublished || x.behind !== y.behind || x.refBranch !== y.refBranch
+      || x.branch !== y.branch || x.isCurrent !== y.isCurrent) {
       return false;
     }
   }
@@ -105,6 +106,15 @@ export default function FileTreeSidebar({ dirPath, conversationId, worktreePath,
   // i.e. today's default behaviour. Selection only applies in Changes mode.
   const [worktrees, setWorktrees] = useState<WorktreeInfo[]>([]);
   const [selectedWorktree, setSelectedWorktree] = useState<string | null>(null);
+  // Reference branch the worktree rows are measured against. Persisted per repo
+  // (a release branch name is meaningless in another project); null means "use
+  // the repo default", which the main process resolves to the primary working
+  // tree's branch. Branch list is fetched lazily, only when the picker opens.
+  const [refBranch, setRefBranch] = useDirectoryString(dirPath, 'worktreeRef');
+  const [branches, setBranches] = useState<BranchList>({ local: [], remote: [] });
+  const [refPickerOpen, setRefPickerOpen] = useState(false);
+  const [refFilter, setRefFilter] = useState('');
+  const [showPublished, setShowPublished] = useState(false);
   const activeDir = mode === 'changes' && selectedWorktree ? selectedWorktree : dirPath;
   // Follow the conversation: opening a chat selects the worktree that chat is
   // working in, and switching peers clears the selection. Guarded on the inputs
@@ -174,7 +184,7 @@ export default function FileTreeSidebar({ dirPath, conversationId, worktreePath,
         // preload that predates the handler.
         if (mode === 'changes' && typeof a.listWorktrees === 'function') {
           try {
-            const wts = await a.listWorktrees(dirPath);
+            const wts = await a.listWorktrees(dirPath, refBranch ?? undefined);
             setWorktrees((prev) => (worktreesEqual(prev, wts) ? prev : wts));
           } catch { /* leave last-known list in place */ }
         }
@@ -193,10 +203,39 @@ export default function FileTreeSidebar({ dirPath, conversationId, worktreePath,
         setLoading(false);
       }
     },
-    [mode, dirPath, activeDir],
+    [mode, dirPath, activeDir, refBranch],
   );
 
   useEffect(() => { refresh(); }, [refresh]);
+
+  // Branch list backs the reference picker only, so it is fetched when that
+  // opens rather than on every sidebar refresh.
+  useEffect(() => {
+    if (!refPickerOpen) return;
+    let cancelled = false;
+    (async () => {
+      const a = api();
+      if (typeof a.listBranches !== 'function') return;
+      try {
+        const bs = await a.listBranches(dirPath);
+        if (!cancelled) setBranches(bs);
+      } catch { /* leave the last-known list in place */ }
+    })();
+    return () => { cancelled = true; };
+  }, [refPickerOpen, dirPath]);
+
+  // Close the picker on outside click / Escape.
+  useEffect(() => {
+    if (!refPickerOpen) return;
+    const close = () => setRefPickerOpen(false);
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') { e.stopPropagation(); close(); } };
+    window.addEventListener('click', close);
+    window.addEventListener('keydown', onKey, true);
+    return () => {
+      window.removeEventListener('click', close);
+      window.removeEventListener('keydown', onKey, true);
+    };
+  }, [refPickerOpen]);
 
   // If the selected worktree disappears (removed, or the repo changed), fall
   // back to the current working tree so the view never points at nothing.
@@ -532,6 +571,90 @@ export default function FileTreeSidebar({ dirPath, conversationId, worktreePath,
   const effectiveSelected = selectedWorktree ?? currentWtPath;
   const showWorktrees = mode === 'changes' && worktrees.length > 1;
 
+  // What the rows were *actually* measured against, straight from the data
+  // rather than from `refBranch` — the two diverge when a pinned branch has
+  // since been deleted and the main process fell back to the repo default.
+  const resolvedRef = worktrees[0]?.refBranch ?? refBranch ?? '';
+  const defaultRef = worktrees.find((w) => w.isMain)?.branch ?? '';
+  const visibleBranches = useMemo(() => {
+    const q = refFilter.trim().toLowerCase();
+    const match = (bs: string[]) => (q ? bs.filter((b) => b.toLowerCase().includes(q)) : bs);
+    return { local: match(branches.local), remote: match(branches.remote) };
+  }, [branches, refFilter]);
+  const noBranchMatches = visibleBranches.local.length === 0 && visibleBranches.remote.length === 0;
+
+  // One rule for the whole panel: a worktree needs attention if it holds
+  // anything the reference does not have. That is deliberately broader than
+  // "unmerged commits" — uncommitted edits are not commits at all, so git can
+  // never call them merged, yet they are just as much work that has not
+  // landed. Reporting only the commits let a tree with 69 uncommitted files
+  // wear a "merged" badge, which is what made this panel lie.
+  const needsAction = (w: WorktreeInfo) => !w.published || w.dirty;
+  const actionTrees = useMemo(() => worktrees.filter(needsAction), [worktrees]);
+  const doneTrees = useMemo(() => worktrees.filter((w) => !needsAction(w)), [worktrees]);
+
+  const renderWorktreeRow = (wt: WorktreeInfo) => {
+    const selected = effectiveSelected === wt.path;
+    const label = (wt.isMain ? wt.branch : wt.branch.replace(/^worktree-/, '')) || '(detached)';
+    const removable = !wt.isMain && !wt.isCurrent;
+    const act = needsAction(wt);
+    // Spell the tooltip out in full: the row itself is two compact numbers, so
+    // this is where "why does this need me?" gets answered in words.
+    const reasons: string[] = [];
+    if (wt.unpublished > 0) {
+      // `unpublished < ahead` means some commits reached the ref by rebase or
+      // cherry-pick — worth saying, since the raw ahead count is what you would
+      // otherwise compute by hand and be misled by.
+      const reworked = wt.ahead > wt.unpublished ? ` (${wt.ahead - wt.unpublished} more already landed rebased)` : '';
+      reasons.push(`${wt.unpublished} commit${wt.unpublished === 1 ? '' : 's'} not in ${resolvedRef}${reworked}`);
+    }
+    if (wt.dirty) reasons.push(`${wt.changedCount} uncommitted file${wt.changedCount === 1 ? '' : 's'}`);
+    const dotTitle = !resolvedRef
+      ? 'No reference branch to compare against'
+      : act
+        ? `Needs action — ${reasons.join(' · ')}`
+        : `Nothing outstanding — every commit is in ${resolvedRef} and the tree is clean`
+          + `${wt.behind ? ` (${wt.behind} commit${wt.behind === 1 ? '' : 's'} behind it)` : ''}`;
+    return (
+      <div
+        key={wt.path}
+        onClick={() => setSelectedWorktree(wt.isCurrent ? null : wt.path)}
+        title={wt.path}
+        className={`group w-full flex items-center gap-2 px-3 py-1 cursor-pointer ${selected ? 'bg-accent/25 text-text font-medium' : 'text-text/90 hover:bg-panel2'}`}
+      >
+        {/* One indicator for the whole row: lit means this worktree is holding
+            something the reference does not have. */}
+        <span
+          className={`inline-block w-2 h-2 rounded-full shrink-0 ${act ? 'bg-info animate-pulse' : 'bg-ok/40'}`}
+          title={dotTitle}
+          aria-hidden
+        />
+        <span className={`flex-1 min-w-0 truncate text-[12px] ${act ? '' : 'text-text/50'}`}>{label}</span>
+        {wt.isMain && <span className="text-[9px] uppercase tracking-wider text-muted shrink-0">main</span>}
+        <span className="text-[10px] font-mono shrink-0 flex items-center gap-1.5" title={dotTitle}>
+          {!resolvedRef && <span className="text-muted/70">—</span>}
+          {/* Two counts, never combined into one number: commits and loose
+              files are different units and merging them would be nonsense. */}
+          {wt.unpublished > 0 && (
+            <span className="text-info" title={`${wt.unpublished} commit(s) not in ${resolvedRef}`}>↑{wt.unpublished}</span>
+          )}
+          {wt.dirty && (
+            <span className="text-accent" title={`${wt.changedCount} uncommitted file(s)`}>{wt.changedCount}</span>
+          )}
+          {resolvedRef && !act && <span className="text-muted">done</span>}
+        </span>
+        {removable && (
+          <button
+            onClick={(e) => { e.stopPropagation(); setRemovingWt({ wt }); }}
+            title="Remove worktree"
+            aria-label={`Remove worktree ${label}`}
+            className="shrink-0 text-muted hover:text-err leading-none text-[13px] px-0.5 opacity-0 group-hover:opacity-100 focus:opacity-100"
+          >✕</button>
+        )}
+      </div>
+    );
+  };
+
   return (
     <div className="h-full flex flex-col bg-panel">
       <div className="shrink-0 px-2 py-2 border-b border-border flex items-center gap-1">
@@ -610,44 +733,74 @@ export default function FileTreeSidebar({ dirPath, conversationId, worktreePath,
           <div className="px-3 pt-2 pb-1 text-[10px] uppercase tracking-wider text-muted flex items-center gap-1.5">
             <span>Worktrees</span>
             <span className="text-muted/70">{worktrees.length}</span>
-          </div>
-          <div className="max-h-40 overflow-y-auto pb-1">
-            {worktrees.map((wt) => {
-              const selected = effectiveSelected === wt.path;
-              const label = (wt.isMain ? wt.branch : wt.branch.replace(/^worktree-/, '')) || '(detached)';
-              const removable = !wt.isMain && !wt.isCurrent;
-              const dotTitle = wt.aligned
-                ? 'Aligned with main — merged and clean'
-                : `Work in progress${wt.changedCount ? ` — ${wt.changedCount} uncommitted change${wt.changedCount === 1 ? '' : 's'}` : ''}`
-                  + `${wt.aheadOfMain ? `${wt.changedCount ? ',' : ' —'} ${wt.aheadOfMain} commit${wt.aheadOfMain === 1 ? '' : 's'} not in main` : ''}`;
-              return (
-                <div
-                  key={wt.path}
-                  onClick={() => setSelectedWorktree(wt.isCurrent ? null : wt.path)}
-                  title={wt.path}
-                  className={`group w-full flex items-center gap-2 px-3 py-1 cursor-pointer ${selected ? 'bg-accent/25 text-text font-medium' : 'text-text/90 hover:bg-panel2'}`}
-                >
-                  <span
-                    className={`inline-block w-2 h-2 rounded-full shrink-0 ${wt.aligned ? 'bg-ok' : 'bg-info animate-pulse'}`}
-                    title={dotTitle}
-                    aria-hidden
+            <span className="flex-1" />
+            <div className="relative normal-case tracking-normal" onClick={(e) => e.stopPropagation()}>
+              <button
+                onClick={() => { setRefFilter(''); setRefPickerOpen((v) => !v); }}
+                title={resolvedRef
+                  ? `Comparing every worktree against "${resolvedRef}" — click to change`
+                  : 'No reference branch: the primary working tree is detached. Click to pin one.'}
+                className="flex items-center gap-1 max-w-[130px] px-1.5 py-0.5 rounded border border-border hover:border-accent hover:text-text text-[10px] font-mono"
+              >
+                <span className="text-muted/70 shrink-0">vs</span>
+                <span className="truncate">{resolvedRef || 'none'}</span>
+                <span className="text-muted/70 shrink-0">▾</span>
+              </button>
+              {refPickerOpen && (
+                <div className="absolute right-0 top-full mt-1 z-30 w-56 rounded-md border border-border bg-panel shadow-lg overflow-hidden">
+                  <input
+                    autoFocus
+                    value={refFilter}
+                    onChange={(e) => setRefFilter(e.target.value)}
+                    placeholder="Filter branches…"
+                    className="w-full px-2 py-1.5 text-[11px] bg-panel2 border-b border-border outline-none placeholder:text-muted/60"
                   />
-                  <span className="flex-1 min-w-0 truncate text-[12px]">{label}</span>
-                  {wt.isMain && <span className="text-[9px] uppercase tracking-wider text-muted shrink-0">main</span>}
-                  {wt.changedCount > 0 && (
-                    <span className="text-[10px] text-accent font-mono shrink-0" title={`${wt.changedCount} uncommitted change${wt.changedCount === 1 ? '' : 's'}`}>{wt.changedCount}</span>
-                  )}
-                  {removable && (
+                  <div className="max-h-56 overflow-y-auto py-0.5">
                     <button
-                      onClick={(e) => { e.stopPropagation(); setRemovingWt({ wt }); }}
-                      title="Remove worktree"
-                      aria-label={`Remove worktree ${label}`}
-                      className="shrink-0 text-muted hover:text-err leading-none text-[13px] px-0.5 opacity-0 group-hover:opacity-100 focus:opacity-100"
-                    >✕</button>
-                  )}
+                      onClick={() => { setRefBranch(null); setRefPickerOpen(false); }}
+                      className={`w-full text-left px-2 py-1 text-[11px] hover:bg-panel2 ${refBranch === null ? 'text-accent' : 'text-text/80'}`}
+                    >Repo default{defaultRef ? ` (${defaultRef})` : ''}</button>
+                    {([['Local', visibleBranches.local], ['Remote', visibleBranches.remote]] as const).map(
+                      ([heading, list]) => (list.length === 0 ? null : (
+                        <div key={heading}>
+                          <div className="px-2 pt-1.5 pb-0.5 text-[9px] uppercase tracking-wider text-muted/70">{heading}</div>
+                          {list.map((b) => (
+                            <button
+                              key={b}
+                              onClick={() => { setRefBranch(b); setRefPickerOpen(false); }}
+                              className={`w-full text-left px-2 py-1 text-[11px] font-mono truncate hover:bg-panel2 ${refBranch === b ? 'text-accent' : 'text-text/80'}`}
+                              title={b}
+                            >{b}</button>
+                          ))}
+                        </div>
+                      )),
+                    )}
+                    {noBranchMatches && (
+                      <div className="px-2 py-1.5 text-[11px] text-muted">No matching branches</div>
+                    )}
+                  </div>
                 </div>
-              );
-            })}
+              )}
+            </div>
+          </div>
+          <div className="max-h-56 overflow-y-auto pb-1">
+            {actionTrees.length > 0 && (
+              <div className="px-3 pt-1 pb-0.5 text-[9px] uppercase tracking-wider text-muted/80">
+                Needs action · {actionTrees.length}
+              </div>
+            )}
+            {actionTrees.map(renderWorktreeRow)}
+            {doneTrees.length > 0 && (
+              <button
+                onClick={() => setShowPublished((v) => !v)}
+                className="w-full flex items-center gap-1 px-3 pt-1.5 pb-0.5 text-[9px] uppercase tracking-wider text-muted/80 hover:text-text"
+                title={`Fully in ${resolvedRef || 'the reference'} with a clean working tree`}
+              >
+                <span className="shrink-0">{showPublished ? '▾' : '▸'}</span>
+                <span>Done · {doneTrees.length}</span>
+              </button>
+            )}
+            {showPublished && doneTrees.map(renderWorktreeRow)}
           </div>
         </div>
       )}

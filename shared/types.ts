@@ -251,9 +251,15 @@ export interface AgentsFlowApi {
 
   // Lists every git worktree for the repo that `dirPath` belongs to (the
   // primary working tree plus any linked ones under `.claude/worktrees/`),
-  // each annotated with its uncommitted change count and alignment with main.
+  // each annotated with its uncommitted change count and whether its commits
+  // have landed in `refBranch`. `refBranch` defaults to the primary working
+  // tree's branch; an unknown one falls back to that default.
   // Returns [] when `dirPath` is not a git repo.
-  listWorktrees: (dirPath: string) => Promise<WorktreeInfo[]>;
+  listWorktrees: (dirPath: string, refBranch?: string) => Promise<WorktreeInfo[]>;
+  // Branches for the reference picker, most-recent-commit first, split into
+  // local and remote-tracking. Remotes are not deduplicated against locals —
+  // `v3.1.0` and `origin/v3.1.0` are different questions.
+  listBranches: (dirPath: string) => Promise<BranchList>;
   // Removes a linked worktree (`git worktree remove`). `repoDir` anchors the
   // command inside the repo; `worktreePath` is the worktree to drop. Refuses to
   // remove the primary working tree. Pass `force: true` to remove a worktree
@@ -357,6 +363,12 @@ export interface FileEntry {
   isIgnored: boolean;
 }
 
+// Branches offered by the worktree panel's reference picker.
+export interface BranchList {
+  local: string[];   // e.g. 'v3.1.0'
+  remote: string[];  // e.g. 'origin/v3.1.0'
+}
+
 // One entry in the Changes-view worktree list. The primary working tree and
 // every linked worktree both show up as a WorktreeInfo.
 export interface WorktreeInfo {
@@ -366,10 +378,18 @@ export interface WorktreeInfo {
   isMain: boolean;       // the repo's primary working tree
   isCurrent: boolean;    // path === the directory the sidebar was opened for
   changedCount: number;  // uncommitted (working-tree) file count
-  // Green dot when true (fully merged into main AND clean), blue dot otherwise
-  // (uncommitted/untracked edits, or commits not yet in main).
-  aligned: boolean;
-  aheadOfMain: number;   // commits on this branch not in main (0 for the main tree)
+  dirty: boolean;        // changedCount > 0
+  // --- publish state, measured against `refBranch` ------------------------
+  // The branch every row was compared against, '' when none could be resolved
+  // (a detached primary working tree with no pinned reference).
+  refBranch: string;
+  ahead: number;         // raw commits here that the ref does not have
+  behind: number;        // commits on the ref that are not here
+  // `ahead` minus the commits that already reached the ref by cherry-pick or
+  // rebase (matched on patch-id) — i.e. the work genuinely still outstanding.
+  // Squash-merged branches are not detected and read as unpublished.
+  unpublished: number;
+  published: boolean;    // everything on this branch is in the ref
 }
 
 export interface SearchOptions {

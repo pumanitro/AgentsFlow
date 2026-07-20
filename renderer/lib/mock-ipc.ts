@@ -118,10 +118,11 @@ export function createMockApi(): AgentsFlowApi {
   // Fake worktree set so the Changes-view worktree section renders in the
   // browser demo. Mutable so `removeWorktree` visibly drops a row.
   let mockWorktrees: WorktreeInfo[] = [
-    { path: '/Users/demo/Desktop/LISA', branch: 'master', head: '74dbe3b5', isMain: true, isCurrent: true, changedCount: 3, aligned: false, aheadOfMain: 0 },
-    { path: '/Users/demo/Desktop/LISA/.claude/worktrees/collect-chats-script', branch: 'worktree-collect-chats-script', head: 'cbeb6dc2', isMain: false, isCurrent: false, changedCount: 0, aligned: true, aheadOfMain: 0 },
-    { path: '/Users/demo/Desktop/LISA/.claude/worktrees/dpd-complaint', branch: 'worktree-dpd-complaint', head: 'ce1e91fc', isMain: false, isCurrent: false, changedCount: 2, aligned: false, aheadOfMain: 1 },
-    { path: '/Users/demo/Desktop/LISA/.claude/worktrees/nutrable-chat-script', branch: 'worktree-nutrable-chat-script', head: 'b36dd36a', isMain: false, isCurrent: false, changedCount: 0, aligned: false, aheadOfMain: 2 },
+    { path: '/Users/demo/Desktop/LISA', branch: 'master', head: '74dbe3b5', isMain: true, isCurrent: true, changedCount: 3, dirty: true, refBranch: 'master', ahead: 0, behind: 0, unpublished: 0, published: true },
+    { path: '/Users/demo/Desktop/LISA/.claude/worktrees/collect-chats-script', branch: 'worktree-collect-chats-script', head: 'cbeb6dc2', isMain: false, isCurrent: false, changedCount: 0, dirty: false, refBranch: 'master', ahead: 0, behind: 4, unpublished: 0, published: true },
+    { path: '/Users/demo/Desktop/LISA/.claude/worktrees/dpd-complaint', branch: 'worktree-dpd-complaint', head: 'ce1e91fc', isMain: false, isCurrent: false, changedCount: 2, dirty: true, refBranch: 'master', ahead: 1, behind: 0, unpublished: 1, published: false },
+    // 3 commits ahead but only 2 outstanding — the rebase case the panel exists to get right.
+    { path: '/Users/demo/Desktop/LISA/.claude/worktrees/nutrable-chat-script', branch: 'worktree-nutrable-chat-script', head: 'b36dd36a', isMain: false, isCurrent: false, changedCount: 0, dirty: false, refBranch: 'master', ahead: 3, behind: 2, unpublished: 2, published: false },
   ];
 
   return {
@@ -474,7 +475,16 @@ export function createMockApi(): AgentsFlowApi {
         { path: 'scratch/draft.md', status: 'untracked', staged: false, unstaged: true },
       ],
     }),
-    listWorktrees: async (): Promise<WorktreeInfo[]> => mockWorktrees,
+    // The demo can't recompute publish state, but it must at least echo the
+    // reference back — the panel's chip renders `refBranch` from the data (so a
+    // pinned-but-deleted branch visibly falls back), and a mock that always
+    // said 'master' would look like the picker had failed.
+    listWorktrees: async (_dirPath: string, refBranch?: string): Promise<WorktreeInfo[]> =>
+      mockWorktrees.map((w) => ({ ...w, refBranch: refBranch ?? 'master' })),
+    listBranches: async () => ({
+      local: ['master', 'v3.1.0', 'worktree-dpd-complaint', 'worktree-nutrable-chat-script'],
+      remote: ['origin/master', 'origin/v3.1.0'],
+    }),
     removeWorktree: async (_repoDir: string, worktreePath: string) => {
       const before = mockWorktrees.length;
       mockWorktrees = mockWorktrees.filter((w) => w.path !== worktreePath || w.isMain);
