@@ -104,6 +104,9 @@ export interface SpawnRequest {
   directoryId: string;
   prompt: string;
   attachments?: string[];
+  // Model alias passed straight to `claude --model` (e.g. 'fable', 'opus',
+  // 'sonnet', 'haiku'). Omitted ⇒ the session uses the user's configured default.
+  model?: string;
 }
 
 export interface SpawnResult {

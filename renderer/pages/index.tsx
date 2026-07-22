@@ -388,7 +388,7 @@ export default function Home() {
     }
   };
 
-  const handleSpawn = async (prompt: string, attachments: string[] = []) => {
+  const handleSpawn = async (prompt: string, attachments: string[] = [], model?: string) => {
     if (!selectedDir) return;
     // Snapshot pinned conv ids *before* the spawn so the effect below can focus whichever
     // new conv lands first — the optimistic broadcast usually arrives well before the
@@ -396,7 +396,7 @@ export default function Home() {
     awaitingNewConvRef.current = new Set(
       pinnedItems.filter((it) => it.kind === 'conversation').map((it) => it.id),
     );
-    await api().spawnAgent({ directoryId: selectedDir.id, prompt, attachments });
+    await api().spawnAgent({ directoryId: selectedDir.id, prompt, attachments, model });
     const c = await api().listConversations();
     setConvs(c);
   };

@@ -312,9 +312,13 @@ export async function dispatchBackground(opts: {
   mcpConfigPath?: string;
   // Registry snapshot appended to the session's system prompt at boot.
   appendSystemPrompt?: string;
+  // Model alias/name for `claude --model` (e.g. 'fable', 'opus', 'sonnet').
+  // Omitted ⇒ the CLI falls back to the user's configured default model.
+  model?: string;
 }): Promise<{ daemonShort: string | null; raw: string }> {
   // The prompt must stay the final positional argument.
   const args = ['--bg', '--permission-mode', 'bypassPermissions'];
+  if (opts.model) args.push('--model', opts.model);
   if (opts.mcpConfigPath) args.push('--mcp-config', opts.mcpConfigPath);
   if (opts.appendSystemPrompt) args.push('--append-system-prompt', opts.appendSystemPrompt);
   args.push(opts.prompt);

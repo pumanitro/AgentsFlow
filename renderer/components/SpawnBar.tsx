@@ -11,7 +11,23 @@ interface PastedImage {
 
 interface Props {
   targetDir: TrackedDirectory | null;
-  onSend: (prompt: string, attachments: string[]) => Promise<void>;
+  onSend: (prompt: string, attachments: string[], model: string) => Promise<void>;
+}
+
+// Short model aliases passed straight to `claude --model`. The CLI resolves each
+// to the latest model in that family, so these stay correct as models roll over.
+const MODELS = ['fable', 'opus', 'sonnet', 'haiku'] as const;
+type ModelAlias = (typeof MODELS)[number];
+const MODEL_STORAGE_KEY = 'agentsflow.spawnModel';
+
+function loadModel(): ModelAlias {
+  try {
+    const saved = window.localStorage.getItem(MODEL_STORAGE_KEY);
+    if (saved && (MODELS as readonly string[]).includes(saved)) return saved as ModelAlias;
+  } catch {
+    /* localStorage unavailable — fall through to default */
+  }
+  return 'fable';
 }
 
 // Survives navigation to /session and back. Cleared only after a successful send.
@@ -36,7 +52,41 @@ export default function SpawnBar({ targetDir, onSend }: Props) {
   const [busy, setBusy] = useState(false);
   const [images, setImages] = useState<PastedImage[]>(draft.images);
   const [previewing, setPreviewing] = useState<PastedImage | null>(null);
+  // Start from the deterministic default so the first client render matches the
+  // SSR/exported HTML; the persisted pick is loaded after mount (below).
+  const [model, setModel] = useState<ModelAlias>('fable');
+  const [modelMenuOpen, setModelMenuOpen] = useState(false);
+  const modelMenuRef = useRef<HTMLDivElement | null>(null);
+  const skipFirstModelPersist = useRef(true);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+
+  // Load the saved model after mount. Reading localStorage during render (the
+  // previous useState initializer) mismatched the server-rendered HTML — which
+  // always emits the 'fable' default — and threw a React hydration error.
+  useEffect(() => { setModel(loadModel()); }, []);
+
+  // Remember the picked model across sends and app restarts. Skip the first run
+  // so the mount-time default doesn't clobber a stored value before the hydrate
+  // effect above has swapped it in.
+  useEffect(() => {
+    if (skipFirstModelPersist.current) { skipFirstModelPersist.current = false; return; }
+    try { window.localStorage.setItem(MODEL_STORAGE_KEY, model); } catch { /* ignore */ }
+  }, [model]);
+
+  // Close the model menu on outside-click / Escape.
+  useEffect(() => {
+    if (!modelMenuOpen) return;
+    const onDocClick = (e: MouseEvent) => {
+      if (modelMenuRef.current && !modelMenuRef.current.contains(e.target as Node)) setModelMenuOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setModelMenuOpen(false); };
+    document.addEventListener('mousedown', onDocClick);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('mousedown', onDocClick);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [modelMenuOpen]);
 
   // --- Slash command / skill autocomplete --------------------------------
   const [slashCommands, setSlashCommands] = useState<SlashCommand[]>([]);
@@ -204,7 +254,7 @@ export default function SpawnBar({ targetDir, onSend }: Props) {
     const attachments = validImages.map((i) => i.savedPath);
     setBusy(true);
     try {
-      await onSend(finalPrompt, attachments);
+      await onSend(finalPrompt, attachments, model);
       setPrompt('');
       setCaret(0);
       setImages([]);
@@ -305,12 +355,58 @@ export default function SpawnBar({ targetDir, onSend }: Props) {
             ))}
           </div>
         )}
-        <div className="flex items-end gap-3">
-          <div className="shrink-0 flex items-center gap-2 px-3 py-1.5 rounded-md bg-panel2 border border-border text-xs">
-            <span className="text-muted">Spawn in:</span>
-            <span className={targetDir ? 'text-accent font-medium' : 'text-muted italic'}>
+        <div className="flex items-end gap-2">
+          <div
+            className="shrink-0 flex items-center gap-1.5 px-2 py-1.5 rounded-md bg-panel2 border border-border text-xs max-w-[10rem]"
+            title={targetDir ? `Spawn in ${targetDir.displayName}` : 'Select a directory to spawn in'}
+          >
+            <svg
+              width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+              strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"
+              className={`shrink-0 ${targetDir ? 'text-accent' : 'text-muted'}`}
+            >
+              <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
+            </svg>
+            <span className={`truncate ${targetDir ? 'text-text font-medium' : 'text-muted italic'}`}>
               {targetDir ? targetDir.displayName : 'select a directory'}
             </span>
+          </div>
+          <div className="shrink-0 relative" ref={modelMenuRef}>
+            <button
+              type="button"
+              onClick={() => setModelMenuOpen((v) => !v)}
+              title="Model the spawned agent runs on (claude --model)"
+              aria-haspopup="menu"
+              aria-expanded={modelMenuOpen}
+              className="inline-flex items-center gap-1.5 pl-2.5 pr-2 py-1.5 rounded-md bg-panel2 border border-border text-xs font-medium text-text capitalize outline-none cursor-pointer hover:border-accent/60 focus:border-accent"
+            >
+              <span>{model}</span>
+              <span className="text-muted text-[10px]">▾</span>
+            </button>
+            {modelMenuOpen && (
+              <div
+                role="menu"
+                className="absolute bottom-full left-0 mb-1 z-30 min-w-full rounded-md border border-border bg-panel2 shadow-lg shadow-black/40 py-1"
+              >
+                {MODELS.map((m) => {
+                  const active = m === model;
+                  return (
+                    <button
+                      key={m}
+                      type="button"
+                      role="menuitem"
+                      onClick={() => { setModel(m); setModelMenuOpen(false); }}
+                      className={`w-full text-left pl-2 pr-4 py-1.5 text-xs capitalize flex items-center gap-1.5 ${
+                        active ? 'bg-accent text-bg' : 'text-text hover:bg-panel'
+                      }`}
+                    >
+                      <span className="w-3 shrink-0 text-center">{active ? '✓' : ''}</span>
+                      <span>{m}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            )}
           </div>
           <textarea
             ref={textareaRef}

@@ -411,6 +411,8 @@ async function spawnConversation(opts: {
   pinned: boolean;
   peerAware: boolean;
   delegatedByConversationId?: string;
+  // Model alias passed to `claude --model`; undefined ⇒ CLI default.
+  model?: string;
 }): Promise<{ conversationId: string; sessionId: string; daemonShort: string }> {
   const { dir, prompt } = opts;
   const conversationId = uuid();
@@ -452,7 +454,7 @@ async function spawnConversation(opts: {
 
   const startedBefore = Date.now();
   const claimedSessionIds = new Set(store.getConversations().map((c) => c.sessionId).filter(Boolean));
-  const dispatch = await dispatchBackground({ cwd: dir.path, prompt, mcpConfigPath, appendSystemPrompt });
+  const dispatch = await dispatchBackground({ cwd: dir.path, prompt, mcpConfigPath, appendSystemPrompt, model: opts.model });
   const daemonShortFromOut = dispatch.daemonShort ?? '';
   let resolved = daemonShortFromOut
     ? await resolveSessionByDaemonShort(daemonShortFromOut, 10000)
@@ -498,7 +500,7 @@ ipcMain.handle('convs:spawn', async (_e, req: SpawnRequest): Promise<{ conversat
   if (!dir) throw new Error('directory not found');
   const prompt = req.prompt.trim();
   if (!prompt) throw new Error('prompt required');
-  return spawnConversation({ dir, prompt, attachments: req.attachments, pinned: true, peerAware: true });
+  return spawnConversation({ dir, prompt, attachments: req.attachments, model: req.model, pinned: true, peerAware: true });
 });
 
 // Branch a copy of an existing conversation's session. The fork gets its own
