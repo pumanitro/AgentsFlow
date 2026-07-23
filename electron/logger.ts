@@ -65,8 +65,53 @@ function fmt(args: unknown[]): string {
     .join(' ');
 }
 
-function writeLine(level: string, args: unknown[]): void {
-  if (!logFilePath) return;
+// ---------- Bounding the write volume ----------
+// Every console.* call lands here as a *synchronous* appendFileSync (see
+// rawWrite). That is the right trade at control-plane volume, but it stops
+// being control-plane the instant something starts failing in a loop, and then
+// the logger itself becomes the outage: on 2026-07-23 parcel's watcher emitted
+// "Events were dropped by the FSEvents client" hundreds of times a minute while
+// the perf tracer emitted a SLOW line per degraded git spawn (47k of them in one
+// log), so the main thread sat in write(2) against a 17 MB file that nothing
+// ever rotated — the UI froze and the app had to be killed. Two bounds fix that
+// without giving up the signal:
+//
+//   • Repeat collapsing. Lines of the same *shape* (digits normalised out, so
+//     "SLOW git:worktrees 1901ms" and "…1893ms" share a key) are written a few
+//     times, then suppressed and counted; the tally flushes as one
+//     "repeated ×N" line. A storm costs O(1) writes instead of O(N).
+//   • Size rotation. A rename at MAX_LOG_BYTES keeps the active file small
+//     enough that appends stay cheap, and keeps one previous generation. The
+//     comment at the top of this file has always claimed the log was
+//     "rotating-ish"; it was not, and 17 MB is what that cost.
+//
+// Lines that explain a termination bypass collapsing entirely — those must
+// never be traded away for throughput.
+const MAX_LOG_BYTES = Number(process.env.AGENTSFLOW_MAX_LOG_BYTES) || 8 * 1024 * 1024;
+const REPEAT_BURST = 3;             // identical-shaped lines written before suppression starts
+const REPEAT_WINDOW_MS = 10_000;    // how long a suppressed key keeps accumulating
+const REPEAT_KEY_CAP = 500;         // hard bound on the tracking map
+const NEVER_COLLAPSE = /\[(fatal|stall|signal|lifecycle|power|health)\]/;
+
+let bytesWritten = 0;
+
+function stamp(level: string, msg: string): string {
+  return `${new Date().toISOString()} [${level}] ${msg}\n`;
+}
+
+function rotateIfNeeded(): void {
+  if (bytesWritten < MAX_LOG_BYTES) return;
+  try {
+    fs.renameSync(logFilePath, `${logFilePath}.1`);
+    bytesWritten = 0;
+  } catch {
+    // Rotation failing must not stop logging — keep appending to the current
+    // file, and don't retry on every line.
+    bytesWritten = 0;
+  }
+}
+
+function rawWrite(line: string): void {
   try {
     // Synchronous append — NOT an async WriteStream. The stream buffered writes
     // and silently dropped the last lines when the process exited fast (a quit,
@@ -75,12 +120,129 @@ function writeLine(level: string, args: unknown[]): void {
     // a clean quit whose `before-quit` never reached disk, making a normal
     // restart look like a traceless crash.) appendFileSync guarantees the line
     // is on disk before we return, so the log can be trusted to explain an exit.
-    // Volume here is control-plane only (a few lines/sec), so the per-call cost
-    // is irrelevant.
-    fs.appendFileSync(logFilePath, `${new Date().toISOString()} [${level}] ${fmt(args)}\n`);
+    fs.appendFileSync(logFilePath, line);
+    bytesWritten += Buffer.byteLength(line);
+    rotateIfNeeded();
   } catch {
     /* a broken log file must never take down the app */
   }
+}
+
+/** Digits collapse to '#' so numerically-varying repeats share one key. */
+export function repeatKey(level: string, msg: string): string {
+  return `${level}:${msg.replace(/\d+/g, '#')}`;
+}
+
+interface RepeatState { count: number; windowStart: number; lastMsg: string; level: string }
+
+/** A tally line emitted for a key whose repeats were suppressed. */
+export interface RepeatTally { level: string; msg: string }
+
+/**
+ * Decides, per line, whether it should hit the disk or be folded into a running
+ * tally. Kept as a self-contained factory with an injected clock so the policy
+ * is testable without touching the filesystem or the real `Date.now`.
+ */
+export function createRepeatCollapser(opts: { burst: number; windowMs: number; keyCap: number }) {
+  const repeats = new Map<string, RepeatState>();
+
+  function tally(key: string, st: RepeatState, now: number): RepeatTally | null {
+    repeats.delete(key);
+    const suppressed = st.count - opts.burst;
+    if (suppressed <= 0) return null;
+    const secs = Math.round((now - st.windowStart) / 1000);
+    return { level: st.level, msg: `[agentsflow][log] repeated ×${suppressed} more in ${secs}s: ${st.lastMsg}` };
+  }
+
+  return {
+    /**
+     * Returns whether to write `msg`, plus any tallies that fell due as a result.
+     * Tallies must be written *before* the line itself to keep the log ordered.
+     */
+    record(level: string, msg: string, now: number): { write: boolean; tallies: RepeatTally[] } {
+      const key = repeatKey(level, msg);
+      const st = repeats.get(key);
+      const tallies: RepeatTally[] = [];
+
+      if (!st || now - st.windowStart >= opts.windowMs) {
+        if (st) {
+          const t = tally(key, st, now);
+          if (t) tallies.push(t);
+        }
+        // Bound the map: a pathological spread of unique keys must not grow it
+        // without limit. Draining everything is correct — worst case a few
+        // tallies land early.
+        if (repeats.size >= opts.keyCap) {
+          for (const [k, s] of Array.from(repeats.entries())) {
+            const t = tally(k, s, now);
+            if (t) tallies.push(t);
+          }
+        }
+        repeats.set(key, { count: 1, windowStart: now, lastMsg: msg, level });
+        return { write: true, tallies };
+      }
+
+      st.count++;
+      st.lastMsg = msg;
+      // Past the burst the line is suppressed but still counted; the tally lands
+      // on flush.
+      return { write: st.count <= opts.burst, tallies };
+    },
+
+    /** Tallies for keys whose window has closed. */
+    flushExpired(now: number): RepeatTally[] {
+      const out: RepeatTally[] = [];
+      for (const [key, st] of Array.from(repeats.entries())) {
+        if (now - st.windowStart < opts.windowMs) continue;
+        const t = tally(key, st, now);
+        if (t) out.push(t);
+      }
+      return out;
+    },
+
+    /** Drain every pending tally regardless of window — used on the way out. */
+    flushAll(now: number): RepeatTally[] {
+      const out: RepeatTally[] = [];
+      for (const [key, st] of Array.from(repeats.entries())) {
+        const t = tally(key, st, now);
+        if (t) out.push(t);
+      }
+      return out;
+    },
+  };
+}
+
+const collapser = createRepeatCollapser({
+  burst: REPEAT_BURST,
+  windowMs: REPEAT_WINDOW_MS,
+  keyCap: REPEAT_KEY_CAP,
+});
+
+function writeTallies(tallies: RepeatTally[]): void {
+  for (const t of tallies) rawWrite(stamp(t.level, t.msg));
+}
+
+function flushExpiredRepeats(): void {
+  writeTallies(collapser.flushExpired(Date.now()));
+}
+
+function flushAllRepeats(): void {
+  writeTallies(collapser.flushAll(Date.now()));
+}
+
+function writeLine(level: string, args: unknown[]): void {
+  if (!logFilePath) return;
+  const msg = fmt(args);
+
+  // Termination-attribution lines are always written verbatim, immediately.
+  if (NEVER_COLLAPSE.test(msg)) {
+    rawWrite(stamp(level, msg));
+    return;
+  }
+
+  const { write, tallies } = collapser.record(level, msg, Date.now());
+  writeTallies(tallies);
+  if (write) rawWrite(stamp(level, msg));
 }
 
 export function getLogFilePath(): string {
@@ -138,7 +300,16 @@ export function installCrashLogging(): void {
   const dir = resolveLogDir();
   if (dir) {
     logFilePath = path.join(dir, 'main.log');
+    // Seed the size counter from the file already on disk, so a log that grew
+    // large across previous runs rotates on the next write rather than only
+    // once *this* run has itself written MAX_LOG_BYTES.
+    try { bytesWritten = fs.statSync(logFilePath).size; } catch { bytesWritten = 0; }
   }
+
+  // Drain suppressed repeat tallies on a fixed cadence, so a storm that is still
+  // in progress is visible in the log rather than only after it stops.
+  const repeatFlusher = setInterval(flushExpiredRepeats, REPEAT_WINDOW_MS);
+  repeatFlusher.unref?.();
 
   // Mirror console.* to the file while preserving the original terminal output.
   const levels: Array<{ method: 'log' | 'info' | 'warn' | 'error'; level: string }> = [
@@ -240,7 +411,12 @@ export function installCrashLogging(): void {
   // `before-quit`/`quit`; a `npm run dev` / Ctrl+C teardown shows the signal;
   // and a hard SIGKILL/jetsam shows none of these (→ look for an .ips, then OS
   // memory pressure). SIGKILL can't be caught — its signature is this silence.
-  app.on('before-quit', () => console.log('[agentsflow][lifecycle] before-quit'));
+  // Flush pending tallies first: a storm that was still being suppressed when
+  // the app went down is exactly the storm worth having in the log.
+  app.on('before-quit', () => {
+    flushAllRepeats();
+    console.log('[agentsflow][lifecycle] before-quit');
+  });
   app.on('will-quit', () => console.log('[agentsflow][lifecycle] will-quit'));
   app.on('quit', (_e, code) => console.log(`[agentsflow][lifecycle] quit code=${code}`));
 
@@ -249,6 +425,7 @@ export function installCrashLogging(): void {
       // Installing a handler suppresses Node's default terminate-on-signal, so we
       // must exit ourselves. Run the app's normal teardown (before-quit → quit),
       // with a hard backstop in case quit can't proceed (e.g. loop still wedged).
+      flushAllRepeats();
       console.error(`[agentsflow][signal] received ${sig} — shutting down`);
       try {
         app.quit();

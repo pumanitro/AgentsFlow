@@ -64,6 +64,14 @@ function notify(entry: Entry): void {
   }
 }
 
+function scheduleNotify(entry: Entry): void {
+  if (entry.debounceTimer) clearTimeout(entry.debounceTimer);
+  entry.debounceTimer = setTimeout(() => {
+    entry.debounceTimer = null;
+    notify(entry);
+  }, DEBOUNCE_MS);
+}
+
 function shouldInvalidateGitCache(dirPath: string, eventPath: string): boolean {
   const rel = path.relative(dirPath, eventPath);
   // Anything under .git that signals a ref/index change.
@@ -109,11 +117,25 @@ export async function watch(dirPath: string, win: BrowserWindow): Promise<void> 
     const subscription = await getParcel().subscribe(
       dirPath,
       (err, events) => {
+        const entry = watchers.get(dirPath);
         if (err) {
-          console.error('[agentsflow][file-watcher] callback error', dirPath, err);
+          // The dominant error here is FSEvents' "Events were dropped by the
+          // FSEvents client. File system must be re-scanned." — the kernel queue
+          // overflowed under a burst, so parcel can no longer say *what* changed,
+          // only that it lost track. The subscription itself stays valid, so the
+          // recovery is exactly what the message asks for: treat it as "anything
+          // under this root may have changed" — drop the memoised git state and
+          // push one refresh — instead of returning and leaving the UI pinned to
+          // data that no future event will ever correct.
+          //
+          // (2026-07-23: a busy repo emitted hundreds of these; each one logged
+          // and returned, so the pane silently stopped updating for the rest of
+          // the run while the synchronous log writes piled onto the main thread.)
+          console.error('[agentsflow][file-watcher] event stream dropped — re-scanning', dirPath, err);
+          invalidateGitCache(dirPath);
+          if (entry) scheduleNotify(entry);
           return;
         }
-        const entry = watchers.get(dirPath);
         if (!entry) return;
 
         for (const ev of events) {
@@ -123,11 +145,7 @@ export async function watch(dirPath: string, win: BrowserWindow): Promise<void> 
           }
         }
 
-        if (entry.debounceTimer) clearTimeout(entry.debounceTimer);
-        entry.debounceTimer = setTimeout(() => {
-          entry.debounceTimer = null;
-          notify(entry);
-        }, DEBOUNCE_MS);
+        scheduleNotify(entry);
       },
       { ignore: DEFAULT_IGNORE },
     );

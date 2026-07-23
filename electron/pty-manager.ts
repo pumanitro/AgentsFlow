@@ -214,12 +214,31 @@ function refusePty(win: BrowserWindow, channelId: string, message: string): fals
 // instead of the app aborting. Async because the fork probe must not block the
 // main thread (see forkStarvedErrno) — callers await it before node-pty spawn.
 async function ensurePtyCapacity(win: BrowserWindow, channelId: string, label: string): Promise<boolean> {
-  const live = livePtyCount();
+  let live = livePtyCount();
+  let sys = systemPtyCount();
+
+  // Over either ceiling: reclaim before refusing. The guard used to be a dead
+  // end — once the count was over the line it refused *every* subsequent spawn,
+  // and since refusing frees nothing, the app could never open another terminal
+  // until it was restarted. (2026-07-23: the machine sat at 453/511 ptys — only
+  // 12 of them ours — and from then on every attach failed, which is what made a
+  // recoverable resource squeeze look like a broken app.) Killing the PTYs that
+  // are safely killable first turns the ceiling into something the app can climb
+  // back down from on its own.
+  if (live >= MAX_LIVE_PTYS || (sys > 0 && sys > PTMX_MAX - SYSTEM_PTY_MARGIN)) {
+    const reclaimed = reapIdlePtys({ pressure: true });
+    if (reclaimed > 0) {
+      console.warn(`[agentsflow][pty] ${label} spawn hit the ceiling — reclaimed ${reclaimed} idle pty(s), re-checking`, { live, systemPtys: sys });
+      cachedSystemPtysAt = 0; // the count just changed — don't trust the 1s cache
+      live = livePtyCount();
+      sys = systemPtyCount();
+    }
+  }
+
   if (live >= MAX_LIVE_PTYS) {
     console.error(`[agentsflow][pty] refusing to spawn ${label}: app PTY ceiling reached`, { live, max: MAX_LIVE_PTYS });
     return refusePty(win, channelId, `[${label} spawn refused] too many open terminals in this app (${live}/${MAX_LIVE_PTYS}). Close some sessions or shells, then retry.`);
   }
-  const sys = systemPtyCount();
   if (sys > 0 && sys > PTMX_MAX - SYSTEM_PTY_MARGIN) {
     console.error(`[agentsflow][pty] refusing to spawn ${label}: system PTY budget nearly exhausted`, { systemPtys: sys, ptmxMax: PTMX_MAX, margin: SYSTEM_PTY_MARGIN });
     return refusePty(win, channelId, `[${label} spawn refused] the system is almost out of pseudo-terminals (${sys}/${PTMX_MAX} in use across all apps). Close some terminals here or in other apps, then retry.`);
@@ -244,6 +263,14 @@ async function ensurePtyCapacity(win: BrowserWindow, channelId: string, label: s
 const SHELL_IDLE_TTL_MS = 30 * 60 * 1000;
 const RESUME_IDLE_TTL_MS = 60 * 60 * 1000;
 const REAPER_INTERVAL_MS = 5 * 60 * 1000;
+// Under pressure (a spawn is being refused right now) the TTLs collapse.
+// "Detached and silent for a few minutes" is a much weaker claim than the hour
+// we normally wait — but it is still a strictly safe one: nobody is watching the
+// PTY and nothing has printed on it. Weighed against the alternative, which is
+// refusing every terminal the user opens until they restart the app, it is the
+// better trade.
+const PRESSURE_SHELL_TTL_MS = 2 * 60 * 1000;
+const PRESSURE_RESUME_TTL_MS = 5 * 60 * 1000;
 
 let reaperTimer: ReturnType<typeof setInterval> | null = null;
 function startPtyReaper(): void {
@@ -253,22 +280,30 @@ function startPtyReaper(): void {
   reaperTimer.unref?.();
 }
 
-function reapIdlePtys(): void {
+/** Kills detached, silent PTYs. Returns how many were reclaimed. */
+function reapIdlePtys(opts: { pressure?: boolean } = {}): number {
+  const shellTtl = opts.pressure ? PRESSURE_SHELL_TTL_MS : SHELL_IDLE_TTL_MS;
+  const resumeTtl = opts.pressure ? PRESSURE_RESUME_TTL_MS : RESUME_IDLE_TTL_MS;
+  const why = opts.pressure ? ' (under pty pressure)' : '';
   const now = Date.now();
+  let reclaimed = 0;
   for (const [shellId, s] of Array.from(shells.entries())) {
     if (s.subscribers.size > 0 || s.detachedAt == null) continue;
-    if (now - s.detachedAt < SHELL_IDLE_TTL_MS || now - s.lastDataAt < SHELL_IDLE_TTL_MS) continue;
-    console.log('[agentsflow][pty] reaping idle shell', { shellId, idleMs: now - s.lastDataAt });
+    if (now - s.detachedAt < shellTtl || now - s.lastDataAt < shellTtl) continue;
+    console.log(`[agentsflow][pty] reaping idle shell${why}`, { shellId, idleMs: now - s.lastDataAt });
     try { s.pty.kill(); } catch { /* ignore */ }
     shells.delete(shellId);
+    reclaimed++;
   }
   for (const [sessionId, s] of Array.from(resumeSessions.entries())) {
     if (s.subscribers.size > 0 || s.detachedAt == null) continue;
-    if (now - s.detachedAt < RESUME_IDLE_TTL_MS || now - s.lastDataAt < RESUME_IDLE_TTL_MS) continue;
-    console.log('[agentsflow][pty] reaping idle resume session', { sessionId, idleMs: now - s.lastDataAt });
+    if (now - s.detachedAt < resumeTtl || now - s.lastDataAt < resumeTtl) continue;
+    console.log(`[agentsflow][pty] reaping idle resume session${why}`, { sessionId, idleMs: now - s.lastDataAt });
     try { s.pty.kill(); } catch { /* ignore */ }
     resumeSessions.delete(sessionId);
+    reclaimed++;
   }
+  return reclaimed;
 }
 
 export async function attach(opts: {

@@ -514,6 +514,28 @@ ipcMain.handle('convs:fork', async (_e, conversationId: string): Promise<{ conve
   const src = store.getConversations().find((c) => c.id === conversationId);
   if (!src) throw new Error(`conversation ${conversationId} not found`);
   if (!src.sessionId) throw new Error('source session has no sessionId yet — nothing to fork');
+
+  // Forking is one click, but each fork that gets opened costs a *persistent*
+  // `claude --resume` PTY which lives until it has been both detached and silent
+  // past the reaper's TTL — so a user clicking ⑂ repeatedly (exactly what a
+  // sluggish UI invites) multiplies heavyweight sessions with nothing to stop it.
+  // On 2026-07-23 five forks of one session inside two minutes helped push the
+  // machine to 453/511 ptys. A fork that has never been opened has no content of
+  // its own yet, so it is indistinguishable from the one the next click would
+  // create — hand the existing one back instead of minting a duplicate.
+  const unopened = store.getConversations().find(
+    (c) =>
+      c.forkFromSessionId === src.sessionId &&
+      c.sessionId &&
+      !fs.existsSync(transcriptPath(c.directoryPath, c.sessionId)),
+  );
+  if (unopened) {
+    console.log('[agentsflow] reusing existing un-opened fork instead of creating another', {
+      from: src.id, fromSession: src.sessionId, existing: unopened.id,
+    });
+    return { conversationId: unopened.id };
+  }
+
   const fork: Conversation = {
     id: uuid(),
     sessionId: uuid(),
