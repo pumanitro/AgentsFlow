@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api } from '../lib/ipc';
-import { useDirectoryString, useUIState } from '../lib/ui-state';
+import { useDirectoryNumber, useDirectoryString, useUIState } from '../lib/ui-state';
 import { BranchList, FileEntry, GitEntryStatus, GitStatusResult, WorktreeInfo } from '../../shared/types';
 import SearchModal from './SearchModal';
 import NotesPanel from './NotesPanel';
@@ -35,6 +35,14 @@ function buildNameMatcher(query: string): (node: TreeFile) => boolean {
     return node.name.toLowerCase().includes(lower) || node.path.toLowerCase().includes(lower);
   };
 }
+
+// Worktree list sizing. The list used to be a hard 224px strip; a repo with 20
+// trees spends its life scrolling inside it, so the ceiling is now dragged by
+// the user — up to half the sidebar, which is as far as it can go before the
+// file tree it sits next to stops being usable.
+const MIN_WT_HEIGHT = 64;
+const DEFAULT_WT_HEIGHT = 224;
+const MAX_WT_HEIGHT_RATIO = 0.5;
 
 interface Props {
   dirPath: string;
@@ -115,6 +123,27 @@ export default function FileTreeSidebar({ dirPath, conversationId, worktreePath,
   const [refPickerOpen, setRefPickerOpen] = useState(false);
   const [refFilter, setRefFilter] = useState('');
   const [showPublished, setShowPublished] = useState(false);
+  // How tall the worktree list may grow, and whether it sits above the file
+  // tree or below it. Both are per-repo (like the reference branch): a repo
+  // with 20 worktrees wants a different shape than one with two.
+  const [wtHeight, setWtHeight] = useDirectoryNumber(dirPath, 'worktreeHeight', DEFAULT_WT_HEIGHT);
+  const [wtPlacement, setWtPlacement] = useDirectoryString(dirPath, 'worktreePlacement');
+  const wtAtBottom = wtPlacement === 'bottom';
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  const wtListRef = useRef<HTMLDivElement | null>(null);
+  // The "half the sidebar" ceiling is measured, not assumed — the pane is
+  // resizable in both directions, so a height picked while the window was tall
+  // has to give way when it shrinks.
+  const [paneHeight, setPaneHeight] = useState(0);
+  useEffect(() => {
+    const el = rootRef.current;
+    if (!el || typeof ResizeObserver === 'undefined') return;
+    const measure = () => setPaneHeight(el.getBoundingClientRect().height);
+    measure();
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
   const activeDir = mode === 'changes' && selectedWorktree ? selectedWorktree : dirPath;
   // Follow the conversation: opening a chat selects the worktree that chat is
   // working in, and switching peers clears the selection. Guarded on the inputs
@@ -571,6 +600,40 @@ export default function FileTreeSidebar({ dirPath, conversationId, worktreePath,
   const effectiveSelected = selectedWorktree ?? currentWtPath;
   const showWorktrees = mode === 'changes' && worktrees.length > 1;
 
+  // Ceiling for the list: whatever the user dragged to, never more than half
+  // the pane. Before the first measurement we honour the stored value as-is so
+  // a tall list doesn't visibly snap down and back on mount.
+  const wtListMax = paneHeight > 0
+    ? Math.max(MIN_WT_HEIGHT, Math.min(wtHeight, Math.round(paneHeight * MAX_WT_HEIGHT_RATIO)))
+    : wtHeight;
+
+  const startWtResize = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    const startY = e.clientY;
+    // Start from what is actually on screen, not from the stored ceiling: with
+    // few worktrees the list is shorter than its ceiling, and dragging should
+    // pick up where the divider visibly is.
+    const startH = wtListRef.current?.getBoundingClientRect().height ?? DEFAULT_WT_HEIGHT;
+    const pane = rootRef.current?.getBoundingClientRect().height ?? 0;
+    const maxH = pane > 0 ? Math.max(MIN_WT_HEIGHT, Math.round(pane * MAX_WT_HEIGHT_RATIO)) : startH;
+    const onMove = (ev: MouseEvent) => {
+      // The handle sits on whichever side faces the file tree, so the gesture
+      // inverts when the list is parked at the bottom: there, dragging up grows it.
+      const delta = wtAtBottom ? startY - ev.clientY : ev.clientY - startY;
+      setWtHeight(Math.round(Math.max(MIN_WT_HEIGHT, Math.min(maxH, startH + delta))));
+    };
+    const onUp = () => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+    };
+    document.body.style.cursor = 'row-resize';
+    document.body.style.userSelect = 'none';
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+  }, [setWtHeight, wtAtBottom]);
+
   // What the rows were *actually* measured against, straight from the data
   // rather than from `refBranch` — the two diverge when a pinned branch has
   // since been deleted and the main process fell back to the repo default.
@@ -655,8 +718,110 @@ export default function FileTreeSidebar({ dirPath, conversationId, worktreePath,
     );
   };
 
+  // Drag divider between the worktree list and the file tree. Doubles as the
+  // border between the two sections, so it always sits on the tree-facing side.
+  const wtResizer = (
+    <div
+      onMouseDown={startWtResize}
+      onDoubleClick={() => setWtHeight(DEFAULT_WT_HEIGHT)}
+      role="separator"
+      aria-orientation="horizontal"
+      title="Drag to resize the worktree list · double-click to reset"
+      className="shrink-0 h-1 bg-subtle/70 hover:bg-accent cursor-row-resize"
+    />
+  );
+
+  const worktreeSection = !showWorktrees ? null : (
+    <div className="shrink-0 flex flex-col min-h-0">
+      {wtAtBottom && wtResizer}
+      <div className="px-3 pt-2 pb-1 text-[10px] uppercase tracking-wider text-muted flex items-center gap-1.5">
+        <span>Worktrees</span>
+        <span className="text-muted/70">{worktrees.length}</span>
+        <span className="flex-1" />
+        <button
+          onClick={() => setWtPlacement(wtAtBottom ? null : 'bottom')}
+          title={wtAtBottom
+            ? 'Move the worktree list back above the file tree'
+            : 'Move the worktree list below the file tree'}
+          aria-label={wtAtBottom ? 'Move worktree list to the top' : 'Move worktree list to the bottom'}
+          className="shrink-0 px-1.5 py-0.5 rounded border border-border text-muted hover:text-text hover:border-accent text-[11px] leading-none"
+        >{wtAtBottom ? '↑' : '↓'}</button>
+        <div className="relative normal-case tracking-normal" onClick={(e) => e.stopPropagation()}>
+          <button
+            onClick={() => { setRefFilter(''); setRefPickerOpen((v) => !v); }}
+            title={resolvedRef
+              ? `Comparing every worktree against "${resolvedRef}" — click to change`
+              : 'No reference branch: the primary working tree is detached. Click to pin one.'}
+            className="flex items-center gap-1 max-w-[130px] px-1.5 py-0.5 rounded border border-border hover:border-accent hover:text-text text-[10px] font-mono"
+          >
+            <span className="text-muted/70 shrink-0">vs</span>
+            <span className="truncate">{resolvedRef || 'none'}</span>
+            <span className="text-muted/70 shrink-0">▾</span>
+          </button>
+          {refPickerOpen && (
+            // Parked at the bottom of the pane, a downward menu would fall off
+            // the panel — flip it above the button instead.
+            <div className={`absolute right-0 z-30 w-56 rounded-md border border-border bg-panel shadow-lg overflow-hidden ${wtAtBottom ? 'bottom-full mb-1' : 'top-full mt-1'}`}>
+              <input
+                autoFocus
+                value={refFilter}
+                onChange={(e) => setRefFilter(e.target.value)}
+                placeholder="Filter branches…"
+                className="w-full px-2 py-1.5 text-[11px] bg-panel2 border-b border-border outline-none placeholder:text-muted/60"
+              />
+              <div className="max-h-56 overflow-y-auto py-0.5">
+                <button
+                  onClick={() => { setRefBranch(null); setRefPickerOpen(false); }}
+                  className={`w-full text-left px-2 py-1 text-[11px] hover:bg-panel2 ${refBranch === null ? 'text-accent' : 'text-text/80'}`}
+                >Repo default{defaultRef ? ` (${defaultRef})` : ''}</button>
+                {([['Local', visibleBranches.local], ['Remote', visibleBranches.remote]] as const).map(
+                  ([heading, list]) => (list.length === 0 ? null : (
+                    <div key={heading}>
+                      <div className="px-2 pt-1.5 pb-0.5 text-[9px] uppercase tracking-wider text-muted/70">{heading}</div>
+                      {list.map((b) => (
+                        <button
+                          key={b}
+                          onClick={() => { setRefBranch(b); setRefPickerOpen(false); }}
+                          className={`w-full text-left px-2 py-1 text-[11px] font-mono truncate hover:bg-panel2 ${refBranch === b ? 'text-accent' : 'text-text/80'}`}
+                          title={b}
+                        >{b}</button>
+                      ))}
+                    </div>
+                  )),
+                )}
+                {noBranchMatches && (
+                  <div className="px-2 py-1.5 text-[11px] text-muted">No matching branches</div>
+                )}
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+      <div ref={wtListRef} className="overflow-y-auto pb-1" style={{ maxHeight: wtListMax }}>
+        {actionTrees.length > 0 && (
+          <div className="px-3 pt-1 pb-0.5 text-[9px] uppercase tracking-wider text-muted/80">
+            Needs action · {actionTrees.length}
+          </div>
+        )}
+        {actionTrees.map(renderWorktreeRow)}
+        {doneTrees.length > 0 && (
+          <button
+            onClick={() => setShowPublished((v) => !v)}
+            className="w-full flex items-center gap-1 px-3 pt-1.5 pb-0.5 text-[9px] uppercase tracking-wider text-muted/80 hover:text-text"
+            title={`Fully in ${resolvedRef || 'the reference'} with a clean working tree`}
+          >
+            <span className="shrink-0">{showPublished ? '▾' : '▸'}</span>
+            <span>Done · {doneTrees.length}</span>
+          </button>
+        )}
+        {showPublished && doneTrees.map(renderWorktreeRow)}
+      </div>
+      {!wtAtBottom && wtResizer}
+    </div>
+  );
+
   return (
-    <div className="h-full flex flex-col bg-panel">
+    <div ref={rootRef} className="h-full flex flex-col bg-panel">
       <div className="shrink-0 px-2 py-2 border-b border-border flex items-center gap-1">
         <div className="flex rounded-md border border-border overflow-hidden">
           <button
@@ -728,82 +893,7 @@ export default function FileTreeSidebar({ dirPath, conversationId, worktreePath,
           title="Refresh"
         >{loading ? '…' : '↻'}</button>
       </div>
-      {showWorktrees && (
-        <div className="shrink-0 border-b border-border">
-          <div className="px-3 pt-2 pb-1 text-[10px] uppercase tracking-wider text-muted flex items-center gap-1.5">
-            <span>Worktrees</span>
-            <span className="text-muted/70">{worktrees.length}</span>
-            <span className="flex-1" />
-            <div className="relative normal-case tracking-normal" onClick={(e) => e.stopPropagation()}>
-              <button
-                onClick={() => { setRefFilter(''); setRefPickerOpen((v) => !v); }}
-                title={resolvedRef
-                  ? `Comparing every worktree against "${resolvedRef}" — click to change`
-                  : 'No reference branch: the primary working tree is detached. Click to pin one.'}
-                className="flex items-center gap-1 max-w-[130px] px-1.5 py-0.5 rounded border border-border hover:border-accent hover:text-text text-[10px] font-mono"
-              >
-                <span className="text-muted/70 shrink-0">vs</span>
-                <span className="truncate">{resolvedRef || 'none'}</span>
-                <span className="text-muted/70 shrink-0">▾</span>
-              </button>
-              {refPickerOpen && (
-                <div className="absolute right-0 top-full mt-1 z-30 w-56 rounded-md border border-border bg-panel shadow-lg overflow-hidden">
-                  <input
-                    autoFocus
-                    value={refFilter}
-                    onChange={(e) => setRefFilter(e.target.value)}
-                    placeholder="Filter branches…"
-                    className="w-full px-2 py-1.5 text-[11px] bg-panel2 border-b border-border outline-none placeholder:text-muted/60"
-                  />
-                  <div className="max-h-56 overflow-y-auto py-0.5">
-                    <button
-                      onClick={() => { setRefBranch(null); setRefPickerOpen(false); }}
-                      className={`w-full text-left px-2 py-1 text-[11px] hover:bg-panel2 ${refBranch === null ? 'text-accent' : 'text-text/80'}`}
-                    >Repo default{defaultRef ? ` (${defaultRef})` : ''}</button>
-                    {([['Local', visibleBranches.local], ['Remote', visibleBranches.remote]] as const).map(
-                      ([heading, list]) => (list.length === 0 ? null : (
-                        <div key={heading}>
-                          <div className="px-2 pt-1.5 pb-0.5 text-[9px] uppercase tracking-wider text-muted/70">{heading}</div>
-                          {list.map((b) => (
-                            <button
-                              key={b}
-                              onClick={() => { setRefBranch(b); setRefPickerOpen(false); }}
-                              className={`w-full text-left px-2 py-1 text-[11px] font-mono truncate hover:bg-panel2 ${refBranch === b ? 'text-accent' : 'text-text/80'}`}
-                              title={b}
-                            >{b}</button>
-                          ))}
-                        </div>
-                      )),
-                    )}
-                    {noBranchMatches && (
-                      <div className="px-2 py-1.5 text-[11px] text-muted">No matching branches</div>
-                    )}
-                  </div>
-                </div>
-              )}
-            </div>
-          </div>
-          <div className="max-h-56 overflow-y-auto pb-1">
-            {actionTrees.length > 0 && (
-              <div className="px-3 pt-1 pb-0.5 text-[9px] uppercase tracking-wider text-muted/80">
-                Needs action · {actionTrees.length}
-              </div>
-            )}
-            {actionTrees.map(renderWorktreeRow)}
-            {doneTrees.length > 0 && (
-              <button
-                onClick={() => setShowPublished((v) => !v)}
-                className="w-full flex items-center gap-1 px-3 pt-1.5 pb-0.5 text-[9px] uppercase tracking-wider text-muted/80 hover:text-text"
-                title={`Fully in ${resolvedRef || 'the reference'} with a clean working tree`}
-              >
-                <span className="shrink-0">{showPublished ? '▾' : '▸'}</span>
-                <span>Done · {doneTrees.length}</span>
-              </button>
-            )}
-            {showPublished && doneTrees.map(renderWorktreeRow)}
-          </div>
-        </div>
-      )}
+      {!wtAtBottom && worktreeSection}
       {summary && (
         <div className="shrink-0 px-3 py-1.5 text-[11px] text-muted border-b border-border">{summary}</div>
       )}
@@ -861,6 +951,7 @@ export default function FileTreeSidebar({ dirPath, conversationId, worktreePath,
           />
         )}
       </div>
+      {wtAtBottom && worktreeSection}
       <NotesPanel dirPath={dirPath} onFileOpen={onFileOpen} openedFilePath={openedFilePath} />
       {menu && (
         <div
