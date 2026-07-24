@@ -10,6 +10,7 @@ const api: AgentsFlowApi = {
 
   getMcpServerInfo: () => ipcRenderer.invoke('mcp:info'),
   getBridgeHealth: () => ipcRenderer.invoke('bridge:health'),
+  getUsage: (force?: boolean) => ipcRenderer.invoke('usage:get', force),
 
   listConversations: () => ipcRenderer.invoke('convs:list'),
   spawnAgent: (req: SpawnRequest) => ipcRenderer.invoke('convs:spawn', req),

@@ -183,6 +183,42 @@ export interface McpServerInfo {
   bridge?: BridgeHealth;
 }
 
+// ---- Plan usage meters -----------------------------------------------------
+// One usage limit as shown on Claude's Usage screen, normalised from the
+// `/api/oauth/usage` endpoint's `limits[]`. `group` splits the rolling session
+// window from the weekly windows; `severity` drives the bar colour.
+export interface UsageMeter {
+  // Stable identity for React keys: 'session' | 'weekly_all' | 'weekly:<model>'.
+  key: string;
+  // Human label: 'Current session' | 'All models' | a model name like 'Fable'.
+  label: string;
+  group: 'session' | 'weekly';
+  // Percent of the window consumed, 0–100 (rounded).
+  percent: number;
+  severity: 'normal' | 'warning' | 'danger';
+  // ISO timestamp when this window resets, or null if the API omitted it.
+  resetsAt: string | null;
+  // Whether this is currently the binding limit (per the API).
+  isActive: boolean;
+}
+
+export interface UsageSnapshot {
+  meters: UsageMeter[];
+  // ISO timestamp of when this data was fetched (for the "updated" line).
+  fetchedAt: string;
+  // Plan tag, e.g. 'Max (20x)' — best-effort from the stored subscription info.
+  plan?: string;
+}
+
+export type UsageResult =
+  | { ok: true; snapshot: UsageSnapshot }
+  // `reason` lets the UI pick the right empty state without string-matching:
+  //  - no-auth : no Claude Code credentials on this machine
+  //  - expired : the token was rejected (401/403)
+  //  - network : the request itself failed (offline, DNS, timeout)
+  //  - unknown : reachable but unexpected status/body
+  | { ok: false; reason: 'no-auth' | 'expired' | 'network' | 'unknown'; error: string };
+
 export interface AgentsFlowApi {
   listDirectories: () => Promise<TrackedDirectory[]>;
   addDirectory: () => Promise<TrackedDirectory | null>;
@@ -200,6 +236,12 @@ export interface AgentsFlowApi {
   // Lightweight liveness of the delegation bridge socket — polled for the
   // at-a-glance health dot without rebuilding the whole MCP descriptor.
   getBridgeHealth: () => Promise<BridgeHealth>;
+
+  // Live plan-usage meters (Current session / All models / per-model weekly),
+  // read from the same authenticated endpoint that backs Claude Code's /usage
+  // screen. Pass force=true to bypass the brief server-side cache (manual
+  // refresh). Never throws — failures come back as { ok: false, reason }.
+  getUsage: (force?: boolean) => Promise<UsageResult>;
 
   listConversations: () => Promise<Conversation[]>;
   spawnAgent: (req: SpawnRequest) => Promise<SpawnResult>;

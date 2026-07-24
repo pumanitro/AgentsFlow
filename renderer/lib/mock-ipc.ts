@@ -204,6 +204,19 @@ export function createMockApi(): AgentsFlowApi {
       healthy: true,
     }),
 
+    getUsage: async () => ({
+      ok: true,
+      snapshot: {
+        fetchedAt: new Date().toISOString(),
+        plan: 'Max (20x)',
+        meters: [
+          { key: 'session', label: 'Current session', group: 'session', percent: 63, severity: 'normal', resetsAt: new Date(Date.now() + 4 * 60_000).toISOString(), isActive: false },
+          { key: 'weekly_all', label: 'All models', group: 'weekly', percent: 81, severity: 'warning', resetsAt: new Date(Date.now() + 5 * 864e5).toISOString(), isActive: true },
+          { key: 'weekly:fable', label: 'Fable', group: 'weekly', percent: 50, severity: 'normal', resetsAt: new Date(Date.now() + 5 * 864e5).toISOString(), isActive: false },
+        ],
+      },
+    }),
+
     listConversations: async () => state.conversations,
     spawnAgent: async (req: SpawnRequest) => {
       const dir = state.directories.find((d) => d.id === req.directoryId);

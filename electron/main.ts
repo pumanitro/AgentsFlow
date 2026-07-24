@@ -30,6 +30,7 @@ function resolveIconPath(): string | null {
 const ICON_PATH = resolveIconPath();
 
 import { store } from './store';
+import { getUsage } from './usage';
 import { forkTitle } from '../shared/fork-title';
 import { computeDisplayName, recomputeAllDisplayNames } from './naming';
 import {
@@ -387,6 +388,10 @@ ipcMain.handle('mcp:info', () => ({
 // Lightweight liveness poll for the header health dot — avoids rebuilding the
 // full MCP descriptor (which rescans peers/skills) on every tick.
 ipcMain.handle('bridge:health', () => bridgeHealthSnapshot());
+
+// Live plan-usage meters for the sidebar Usage panel. Read-only against the
+// authenticated `/usage` endpoint; cached briefly inside getUsage().
+ipcMain.handle('usage:get', (_e, force?: boolean) => getUsage(Boolean(force)));
 
 ipcMain.handle('convs:list', () => store.getConversations());
 

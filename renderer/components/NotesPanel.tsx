@@ -277,10 +277,18 @@ export default function NotesPanel({ dirPath, variant = 'peer', onFileOpen, open
 
   return (
     <div
-      className="shrink-0 border-t border-border bg-panel flex flex-col min-h-0"
-      style={open ? { maxHeight: '25%' } : undefined}
+      // Global variant renders as an inset card inside the sidebar's bottom
+      // utility cluster; the peer variant stays docked flush to its sidebar.
+      // The open cap is viewport-based for the card (its wrapper has no fixed
+      // height for a % to resolve against), %-based for the docked variant.
+      className={`shrink-0 bg-panel flex flex-col min-h-0 ${
+        isGlobal ? 'rounded-lg border border-border overflow-hidden' : 'border-t-2 border-border'
+      }`}
+      style={open ? { maxHeight: isGlobal ? '25vh' : '25%' } : undefined}
     >
-      <div className="shrink-0 flex items-center gap-1.5 px-2 py-1.5 hover:bg-panel2">
+      <div className="shrink-0 flex items-center gap-2 px-2 py-2 bg-panel2/60 hover:bg-panel2">
+        {/* Section identity: a green accent tick marks this as the Notes zone. */}
+        <span className="w-1 h-4 rounded-full bg-ok shrink-0" aria-hidden="true" />
         <button
           onClick={() => setOpen(!open)}
           onContextMenu={(e) => openContextMenu(e, null)}

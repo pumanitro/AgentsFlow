@@ -20,6 +20,7 @@ import { BridgeHealth, Conversation, PinnedDivider, PinnedItemRef, PinnedTodo, T
 // client-only — this page is server-rendered by Next, where `api()` throws.
 // FileEditor (CodeMirror / BlockNote) also only loads when a note is previewed.
 const NotesPanel = dynamic(() => import('../components/NotesPanel'), { ssr: false });
+const UsagePanel = dynamic(() => import('../components/UsagePanel'), { ssr: false });
 const FileEditor = dynamic(() => import('../components/FileEditor'), { ssr: false });
 
 type PinnedItem =
@@ -711,8 +712,14 @@ export default function Home() {
         // compact left sidebar, conversations + history on the right.
         <div className="h-full flex">
         <aside className="w-72 shrink-0 border-r border-border flex flex-col min-h-0">
-          <div className="flex-1 min-h-0 overflow-y-auto px-3 py-4">
-          <h2 className="text-xs uppercase tracking-wider text-muted mb-2">Tracked Peers</h2>
+          <div className="flex-1 min-h-0 overflow-y-auto px-3 pb-4">
+          {/* Sticky, color-marked zone header so "these are the peers" reads at a
+              glance and stays labeled while the list scrolls. Orange marker ties
+              it to the peer selection accent. */}
+          <h2 className="sticky top-0 z-10 -mx-3 px-3 py-2.5 mb-1 bg-bg/95 backdrop-blur-sm border-b border-border/40 flex items-center gap-2 text-xs uppercase tracking-wider text-muted">
+            <span className="w-1 h-4 rounded-full bg-accent shrink-0" aria-hidden="true" />
+            Tracked Peers
+          </h2>
           <input
             value={peerQuery}
             onChange={(e) => setPeerQuery(e.target.value)}
@@ -753,14 +760,23 @@ export default function Home() {
             ))}
           </div>
           </div>
-          {/* Global notes — shared across every peer, pinned to the bottom-left.
-              Collapsed by default; open/expanded state persists just like a
-              peer's own notes. Clicking a note opens the quick-look modal. */}
-          <NotesPanel
-            variant="global"
-            onFileOpen={(abs) => setGlobalNoteFile(abs)}
-            openedFilePath={globalNoteFile}
-          />
+          {/* Bottom utility cluster — Usage + Global Notes as INSET CARDS on the
+              darker app background, with real gaps, so they read as a separate
+              docked layer rather than melting into the scrolling peer list. */}
+          <div className="shrink-0 min-h-0 flex flex-col gap-2 px-2 py-2 border-t-2 border-border bg-bg shadow-[0_-10px_18px_-10px_rgba(0,0,0,0.7)]">
+            {/* Live plan-usage meters (Current session / All models / per-model
+                weekly). Polls the same authenticated endpoint that backs Claude
+                Code's /usage screen. */}
+            <UsagePanel />
+            {/* Global notes — shared across every peer. Collapsed by default;
+                open/expanded state persists just like a peer's own notes.
+                Clicking a note opens the quick-look modal. */}
+            <NotesPanel
+              variant="global"
+              onFileOpen={(abs) => setGlobalNoteFile(abs)}
+              openedFilePath={globalNoteFile}
+            />
+          </div>
         </aside>
 
         <div className="flex-1 min-w-0 overflow-y-auto pb-4">
