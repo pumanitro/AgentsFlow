@@ -277,14 +277,12 @@ export default function NotesPanel({ dirPath, variant = 'peer', onFileOpen, open
 
   return (
     <div
-      // Global variant renders as an inset card inside the sidebar's bottom
-      // utility cluster; the peer variant stays docked flush to its sidebar.
-      // The open cap is viewport-based for the card (its wrapper has no fixed
-      // height for a % to resolve against), %-based for the docked variant.
-      className={`shrink-0 bg-panel flex flex-col min-h-0 ${
-        isGlobal ? 'rounded-lg border border-border overflow-hidden' : 'border-t-2 border-border'
-      }`}
-      style={open ? { maxHeight: isGlobal ? '25vh' : '25%' } : undefined}
+      // Both variants render as an inset rounded card inside their sidebar's
+      // bottom utility cluster — one design language across the home page and
+      // the preview page. The open cap is viewport-based because the cluster
+      // wrapper has no fixed height for a % to resolve against.
+      className="shrink-0 bg-panel flex flex-col min-h-0 rounded-lg border border-border overflow-hidden"
+      style={open ? { maxHeight: '25vh' } : undefined}
     >
       <div className="shrink-0 flex items-center gap-2 px-2 py-2 bg-panel2/60 hover:bg-panel2">
         {/* Section identity: a green accent tick marks this as the Notes zone. */}

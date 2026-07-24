@@ -952,7 +952,12 @@ export default function FileTreeSidebar({ dirPath, conversationId, worktreePath,
         )}
       </div>
       {wtAtBottom && worktreeSection}
-      <NotesPanel dirPath={dirPath} onFileOpen={onFileOpen} openedFilePath={openedFilePath} />
+      {/* Same docked utility-cluster treatment as the home sidebar: the notes
+          card sits inset on the darker background behind a strong divider, so
+          the two views share one design language. */}
+      <div className="shrink-0 min-h-0 flex flex-col px-2 py-2 border-t-2 border-border bg-bg shadow-[0_-10px_18px_-10px_rgba(0,0,0,0.7)]">
+        <NotesPanel dirPath={dirPath} onFileOpen={onFileOpen} openedFilePath={openedFilePath} />
+      </div>
       {menu && (
         <div
           className="fixed z-50 min-w-[160px] rounded-md border border-border bg-panel2 shadow-lg py-1 text-text"
