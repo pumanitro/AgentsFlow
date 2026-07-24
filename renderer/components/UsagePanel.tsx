@@ -160,8 +160,12 @@ export default function UsagePanel() {
         >↻</button>
       </div>
 
+      {/* The body is height-capped so the panel can never crowd out what it sits
+          above — the peer list at home, the file tree in a chat. The vh term
+          keeps it honest on short windows; the 240px ceiling keeps it identical
+          on normal ones. */}
       {open && (
-        <div className="flex-1 min-h-0 overflow-y-auto border-t border-border/60 py-1" style={{ maxHeight: 240 }}>
+        <div className="flex-1 min-h-0 overflow-y-auto border-t border-border/60 py-1" style={{ maxHeight: 'min(240px, 28vh)' }}>
           {unavailable ? (
             <div className="px-3 py-3 text-xs text-muted italic">
               Restart the app to enable Usage (preload needs to refresh).

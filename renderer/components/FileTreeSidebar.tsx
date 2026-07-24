@@ -4,6 +4,7 @@ import { useDirectoryNumber, useDirectoryString, useUIState } from '../lib/ui-st
 import { BranchList, FileEntry, GitEntryStatus, GitStatusResult, WorktreeInfo } from '../../shared/types';
 import SearchModal from './SearchModal';
 import NotesPanel from './NotesPanel';
+import UsagePanel from './UsagePanel';
 import {
   TreeFile,
   TreeNode,
@@ -952,10 +953,13 @@ export default function FileTreeSidebar({ dirPath, conversationId, worktreePath,
         )}
       </div>
       {wtAtBottom && worktreeSection}
-      {/* Same docked utility-cluster treatment as the home sidebar: the notes
-          card sits inset on the darker background behind a strong divider, so
-          the two views share one design language. */}
-      <div className="shrink-0 min-h-0 flex flex-col px-2 py-2 border-t-2 border-border bg-bg shadow-[0_-10px_18px_-10px_rgba(0,0,0,0.7)]">
+      {/* Same docked utility-cluster treatment as the home sidebar: Usage above
+          Notes, both inset on the darker background behind a strong divider, so
+          the two views share one design language. Usage matters most while a
+          chat is burning through the limits, so it follows you in here rather
+          than living only on the home screen. */}
+      <div className="shrink-0 min-h-0 flex flex-col gap-2 px-2 py-2 border-t-2 border-border bg-bg shadow-[0_-10px_18px_-10px_rgba(0,0,0,0.7)]">
+        <UsagePanel />
         <NotesPanel dirPath={dirPath} onFileOpen={onFileOpen} openedFilePath={openedFilePath} />
       </div>
       {menu && (
