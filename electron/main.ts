@@ -32,6 +32,7 @@ const ICON_PATH = resolveIconPath();
 import { store } from './store';
 import { getUsage } from './usage';
 import { forkTitle } from '../shared/fork-title';
+import { transcriptExists as transcriptExistsUnder } from './transcript-path';
 import { computeDisplayName, recomputeAllDisplayNames } from './naming';
 import {
   dispatchBackground,
@@ -508,6 +509,13 @@ ipcMain.handle('convs:spawn', async (_e, req: SpawnRequest): Promise<{ conversat
   return spawnConversation({ dir, prompt, attachments: req.attachments, model: req.model, pinned: true, peerAware: true });
 });
 
+// How long a freshly minted fork can absorb further ⑂ clicks on its source
+// before they start minting new forks again. Sized for "nothing happened, click
+// it again" on a laggy UI — a burst lands inside a few seconds — not for a
+// considered second branch minutes later. A fork with an unparseable createdAt
+// scores NaN here and fails the comparison, which mints: the safe direction.
+const FORK_DEDUPE_WINDOW_MS = 30_000;
+
 // Branch a copy of an existing conversation's session. The fork gets its own
 // conversation entry and a pre-assigned session id; the transcript itself is
 // materialized lazily on the fork's first attach, which runs
@@ -528,11 +536,25 @@ ipcMain.handle('convs:fork', async (_e, conversationId: string): Promise<{ conve
   // machine to 453/511 ptys. A fork that has never been opened has no content of
   // its own yet, so it is indistinguishable from the one the next click would
   // create — hand the existing one back instead of minting a duplicate.
+  //
+  // That is a DEBOUNCE, though, and it was first written as a permanent rule:
+  // one live un-opened fork per source blocked every later click on that source,
+  // forever. Deliberately branching the same session twice is legitimate — two
+  // parallel attempts from the same history — and the two failure modes are not
+  // symmetric. Reusing too eagerly silently teleports the user into somebody
+  // else's branch and leaves them no way to fork at all; reusing too rarely
+  // leaves an extra idle row they can see and delete. So bias to minting, and
+  // require all three signals to agree that this click is a repeat of the last:
+  // recent, still seeded-idle (never attached), and no transcript on disk.
+  const cutoff = Date.now() - FORK_DEDUPE_WINDOW_MS;
   const unopened = store.getConversations().find(
     (c) =>
       c.forkFromSessionId === src.sessionId &&
       c.sessionId &&
-      !fs.existsSync(transcriptPath(c.directoryPath, c.sessionId)),
+      Date.parse(c.createdAt) >= cutoff &&
+      c.state === 'idle' &&
+      c.status === 'idle' &&
+      !transcriptExists(c.directoryPath, c.sessionId),
   );
   if (unopened) {
     console.log('[agentsflow] reusing existing un-opened fork instead of creating another', {
@@ -865,13 +887,16 @@ ipcMain.handle('pinned:reorder', (_e, orderedRefs: PinnedItemRef[]) => {
   broadcastPinnedOrder();
 });
 
-// Absolute path of a session's transcript on disk. Claude Code stores them
-// under ~/.claude/projects/<munged-cwd>/<sessionId>.jsonl, where the cwd is
-// munged by replacing every non-alphanumeric character with '-'
-// (e.g. /Users/x/Desktop/App → -Users-x-Desktop-App).
-function transcriptPath(cwd: string, sessionId: string): string {
-  const munged = cwd.replace(/[^a-zA-Z0-9]/g, '-');
-  return path.join(app.getPath('home'), '.claude', 'projects', munged, `${sessionId}.jsonl`);
+// Where Claude Code keeps every session transcript, one dir per project.
+function projectsRoot(): string {
+  return path.join(app.getPath('home'), '.claude', 'projects');
+}
+
+// Has this session materialized a transcript anywhere? Deliberately NOT a plain
+// existsSync of the cwd's project dir — see transcript-path.ts for why a live
+// session's transcript can be somewhere else entirely.
+function transcriptExists(cwd: string, sessionId: string): boolean {
+  return transcriptExistsUnder(projectsRoot(), cwd, sessionId);
 }
 
 ipcMain.handle('term:attach', async (_e, conversationId: string, cols: number, rows: number) => {
@@ -907,7 +932,10 @@ ipcMain.handle('term:attach', async (_e, conversationId: string, cols: number, r
   // crash-looping, which a plain `--resume` refuses). Routed by disk state
   // rather than a one-shot flag, so a fork that failed to boot simply retries
   // on the next attach; once the transcript exists, normal routing takes over.
-  if (conv.forkFromSessionId && !fs.existsSync(transcriptPath(conv.directoryPath, conv.sessionId))) {
+  // The lookup must be location-independent (see transcriptExists): a fork that
+  // entered a worktree keeps its transcript elsewhere, and mistaking that for
+  // "never materialized" would re-fork the source over the top of it.
+  if (conv.forkFromSessionId && !transcriptExists(conv.directoryPath, conv.sessionId)) {
     console.log('[agentsflow] forking session on first attach', { forkFrom: conv.forkFromSessionId, sessionId: conv.sessionId, channelId });
     const replay = await pty.attach({ channelId, sessionId: conv.sessionId, cols, rows, win, mode: 'resume', cwd: conv.directoryPath, forkFrom: conv.forkFromSessionId });
     return { channelId, replay };
