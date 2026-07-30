@@ -217,6 +217,50 @@ export function createMockApi(): AgentsFlowApi {
       },
     }),
 
+    // Account pool. The browser demo has no keychain, so this is a static pool
+    // that exercises the layout (active marker, per-account meters) without
+    // pretending a switch is possible.
+    listAccounts: async () => ({
+      accounts: [
+        { id: 'acct-1', email: 'first@gmail.com', configDir: '/Users/demo/.agentsflow/accounts/first-a1b2c3', accountUuid: 'uuid-1', subscriptionType: 'max', addedAt: new Date(Date.now() - 12 * 864e5).toISOString() },
+        { id: 'acct-2', email: 'second@gmail.com', configDir: '/Users/demo/.agentsflow/accounts/second-d4e5f6', accountUuid: 'uuid-2', subscriptionType: 'max', addedAt: new Date(Date.now() - 3 * 864e5).toISOString() },
+      ],
+      activeId: 'acct-1',
+    }),
+    addAccount: async () => ({ ok: false as const, error: 'Signing in needs the desktop app.' }),
+    probeAccount: async () => ({ status: 'pending' as const }),
+    cancelAddAccount: async () => {},
+    removeAccount: async () => {},
+    switchAccount: async () => ({ ok: false as const, error: 'Switching needs the desktop app.' }),
+    getAccountUsage: async (id: string) => ({
+      ok: true as const,
+      snapshot: {
+        fetchedAt: new Date().toISOString(),
+        plan: 'Max (20x)',
+        meters: [
+          {
+            key: 'session',
+            label: 'Current session',
+            group: 'session' as const,
+            percent: id === 'acct-1' ? 93 : 12,
+            severity: (id === 'acct-1' ? 'danger' : 'normal') as 'danger' | 'normal',
+            resetsAt: new Date(Date.now() + 11 * 60_000).toISOString(),
+            isActive: true,
+          },
+        ],
+      },
+    }),
+    onAccountsUpdated: () => () => undefined,
+    getRotationPolicy: async () => ({
+      policy: { enabled: true, threshold: 95 },
+      status: { lastEvent: null, lastEventAt: null, disabledReason: null },
+    }),
+    setRotationPolicy: async (policy) => ({
+      policy,
+      status: { lastEvent: null, lastEventAt: null, disabledReason: null },
+    }),
+    onRotationStatus: () => () => undefined,
+
     listConversations: async () => state.conversations,
     spawnAgent: async (req: SpawnRequest) => {
       const dir = state.directories.find((d) => d.id === req.directoryId);

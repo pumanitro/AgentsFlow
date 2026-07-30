@@ -47,11 +47,17 @@ function execFileP(cmd: string, args: string[], timeoutMs: number): Promise<stri
 // Read Claude Code's OAuth credentials. Prefer the macOS keychain (where the CLI
 // stores them on darwin); fall back to the plaintext credentials file used on
 // other platforms / older installs.
-async function readCreds(): Promise<OAuthCreds | null> {
+//
+// `service` selects which keychain slot to read. It defaults to the main slot —
+// whichever account is currently active — but a pooled account's own slot can be
+// passed instead, so the Accounts panel can show meters for an account without
+// having to switch into it first. The file fallback only applies to the main
+// slot: a vault account has no plaintext counterpart.
+async function readCreds(service: string = KEYCHAIN_SERVICE): Promise<OAuthCreds | null> {
   // 1) macOS keychain
   if (process.platform === 'darwin') {
     try {
-      const raw = await execFileP('security', ['find-generic-password', '-s', KEYCHAIN_SERVICE, '-w'], 4000);
+      const raw = await execFileP('security', ['find-generic-password', '-s', service, '-w'], 4000);
       const creds = parseCreds(raw);
       if (creds) return creds;
     } catch (err) {
@@ -59,6 +65,7 @@ async function readCreds(): Promise<OAuthCreds | null> {
       console.warn('[agentsflow][usage] keychain read failed', (err as Error)?.message ?? err);
     }
   }
+  if (service !== KEYCHAIN_SERVICE) return null;
   // 2) ~/.claude/.credentials.json fallback
   try {
     const p = path.join(os.homedir(), '.claude', '.credentials.json');
@@ -167,8 +174,8 @@ function normalize(json: any, creds: OAuthCreds, fetchedAt: string): UsageSnapsh
   return { meters, fetchedAt, plan: planLabel(creds) };
 }
 
-async function doFetch(): Promise<UsageResult> {
-  const creds = await readCreds();
+async function doFetch(service: string = KEYCHAIN_SERVICE): Promise<UsageResult> {
+  const creds = await readCreds(service);
   if (!creds) {
     return { ok: false, reason: 'no-auth', error: 'Not signed in to Claude Code (no credentials found).' };
   }
@@ -222,4 +229,38 @@ export async function getUsage(force = false): Promise<UsageResult> {
     })
     .finally(() => { inflight = null; });
   return inflight;
+}
+
+// Same, for one pooled account's own keychain slot. Kept in a separate cache map
+// keyed by service name so N accounts obey the same per-account rate discipline
+// as the main meter instead of multiplying the request rate.
+const byService = new Map<string, { result: UsageResult; atMs: number }>();
+const inflightByService = new Map<string, Promise<UsageResult>>();
+
+export async function getUsageForService(service: string, force = false): Promise<UsageResult> {
+  const hit = byService.get(service);
+  if (!force && hit && Date.now() - hit.atMs < MIN_FETCH_INTERVAL_MS) return hit.result;
+  const running = inflightByService.get(service);
+  if (running) return running;
+  const p = doFetch(service)
+    .then((result) => {
+      if (result.ok || result.reason === 'no-auth' || result.reason === 'expired') {
+        byService.set(service, { result, atMs: Date.now() });
+      } else if (hit && hit.result.ok) {
+        return hit.result;
+      }
+      return result;
+    })
+    .finally(() => { inflightByService.delete(service); });
+  inflightByService.set(service, p);
+  return p;
+}
+
+/**
+ * Drop every cached snapshot. Called right after an account switch so the panel
+ * shows the account you moved to rather than a stale snapshot of the one you left.
+ */
+export function resetUsageCache(): void {
+  cache = null;
+  byService.clear();
 }

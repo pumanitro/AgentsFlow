@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer, IpcRendererEvent } from 'electron';
-import type { AgentsFlowApi, Conversation, OpenFileNavPayload, PinnedDivider, PinnedItemRef, PinnedTodo, SpawnRequest } from '../shared/types';
+import type { AccountsSnapshot, AgentsFlowApi, Conversation, OpenFileNavPayload, PinnedDivider, PinnedItemRef, PinnedTodo, RotationStatus, SpawnRequest } from '../shared/types';
 
 const api: AgentsFlowApi = {
   listDirectories: () => ipcRenderer.invoke('dirs:list'),
@@ -11,6 +11,27 @@ const api: AgentsFlowApi = {
   getMcpServerInfo: () => ipcRenderer.invoke('mcp:info'),
   getBridgeHealth: () => ipcRenderer.invoke('bridge:health'),
   getUsage: (force?: boolean) => ipcRenderer.invoke('usage:get', force),
+
+  listAccounts: () => ipcRenderer.invoke('accounts:list'),
+  addAccount: (email) => ipcRenderer.invoke('accounts:add', email),
+  probeAccount: (pendingId) => ipcRenderer.invoke('accounts:probe', pendingId),
+  cancelAddAccount: (pendingId) => ipcRenderer.invoke('accounts:cancelAdd', pendingId),
+  removeAccount: (id) => ipcRenderer.invoke('accounts:remove', id),
+  switchAccount: (id) => ipcRenderer.invoke('accounts:switch', id),
+  getAccountUsage: (id, force?: boolean) => ipcRenderer.invoke('accounts:usage', id, force),
+  onAccountsUpdated: (cb) => {
+    const listener = (_e: IpcRendererEvent, snapshot: AccountsSnapshot) => cb(snapshot);
+    ipcRenderer.on('accounts:updated', listener);
+    return () => ipcRenderer.removeListener('accounts:updated', listener);
+  },
+
+  getRotationPolicy: () => ipcRenderer.invoke('rotation:get'),
+  setRotationPolicy: (policy) => ipcRenderer.invoke('rotation:set', policy),
+  onRotationStatus: (cb) => {
+    const listener = (_e: IpcRendererEvent, status: RotationStatus) => cb(status);
+    ipcRenderer.on('rotation:status', listener);
+    return () => ipcRenderer.removeListener('rotation:status', listener);
+  },
 
   listConversations: () => ipcRenderer.invoke('convs:list'),
   spawnAgent: (req: SpawnRequest) => ipcRenderer.invoke('convs:spawn', req),

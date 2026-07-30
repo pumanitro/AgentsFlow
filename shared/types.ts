@@ -219,6 +219,72 @@ export type UsageResult =
   //  - unknown : reachable but unexpected status/body
   | { ok: false; reason: 'no-auth' | 'expired' | 'network' | 'unknown'; error: string };
 
+// ---- Account pool ----------------------------------------------------------
+// One Anthropic account in the switchable pool. Each has its own isolated
+// credential home (`configDir`), which Claude Code keys its keychain slot off —
+// so `configDir` is permanent: moving it orphans that account's credentials.
+export interface Account {
+  id: string;
+  // The Gmail address this account signs in with. Also its label in the UI and
+  // the value verified against `claude auth status` after login.
+  email: string;
+  // Vault path passed as CLAUDE_CONFIG_DIR. Permanent — see above.
+  configDir: string;
+  // Identity as reported by the CLI after a successful login. `accountUuid` is
+  // what makes the duplicate guard reliable (two Gmail labels, one real account).
+  accountUuid?: string;
+  orgId?: string;
+  // 'max' | 'pro' | … straight from `claude auth status --json`.
+  subscriptionType?: string;
+  addedAt: string;
+}
+
+export interface AccountsSnapshot {
+  accounts: Account[];
+  // Which account's credentials currently sit in the slot Claude Code reads.
+  // null when the pool has never been switched into (the pre-existing login is
+  // still in place and is not part of the pool).
+  activeId: string | null;
+}
+
+// Started an add: the caller opens a terminal on `shellId` (the login command is
+// already queued to run in it) and then polls `probeAccount(pendingId)`.
+export type AddAccountResult =
+  // `cwd` is where the login terminal opens — the renderer has no way to
+  // resolve a home directory itself, and the shell attach rejects a fake path.
+  | { ok: true; pendingId: string; shellId: string; email: string; cwd: string }
+  | { ok: false; error: string };
+
+// Polled while the login terminal is open. 'pending' means the browser flow has
+// not completed yet; the two rejections tear the half-made vault back down.
+export type ProbeAccountResult =
+  | { status: 'pending' }
+  | { status: 'ok'; account: Account }
+  | { status: 'mismatch'; error: string }
+  | { status: 'duplicate'; error: string };
+
+export type SwitchAccountResult =
+  | { ok: true; account: Account }
+  | { ok: false; error: string };
+
+// Automatic rotation: switch off the active account once its binding limit
+// crosses `threshold`, so an unattended run rolls onto a fresh account instead
+// of hitting the wall. Evaluated in the main process, so it fires with the
+// window closed.
+export interface RotationPolicy {
+  enabled: boolean;
+  // Percent of the binding limit at which to move (default 95).
+  threshold: number;
+}
+
+export interface RotationStatus {
+  // Human-readable account of the last thing rotation did or refused to do.
+  lastEvent: string | null;
+  lastEventAt: string | null;
+  // Set when repeated failures stopped rotation; cleared by re-enabling it.
+  disabledReason: string | null;
+}
+
 export interface AgentsFlowApi {
   listDirectories: () => Promise<TrackedDirectory[]>;
   addDirectory: () => Promise<TrackedDirectory | null>;
@@ -242,6 +308,32 @@ export interface AgentsFlowApi {
   // screen. Pass force=true to bypass the brief server-side cache (manual
   // refresh). Never throws — failures come back as { ok: false, reason }.
   getUsage: (force?: boolean) => Promise<UsageResult>;
+
+  // ---- Account pool ----
+  // The switchable pool of Anthropic accounts. Switching swaps which account's
+  // credentials sit in the keychain slot Claude Code reads — no browser, no
+  // login: sessions already running pick it up on their next keychain read.
+  listAccounts: () => Promise<AccountsSnapshot>;
+  // Starts an add for a Gmail address. Rejects non-Gmail and addresses already
+  // in the pool without touching anything.
+  addAccount: (email: string) => Promise<AddAccountResult>;
+  // Polled while the login terminal is open; finalises the account once the
+  // browser flow lands, or tears the vault down if it authorised the wrong one.
+  probeAccount: (pendingId: string) => Promise<ProbeAccountResult>;
+  // Abandons an in-progress add (modal closed) and removes the partial vault.
+  cancelAddAccount: (pendingId: string) => Promise<void>;
+  removeAccount: (id: string) => Promise<void>;
+  switchAccount: (id: string) => Promise<SwitchAccountResult>;
+  // Usage meters for one pooled account, read with that account's own token —
+  // works whether or not it is the active one.
+  getAccountUsage: (id: string, force?: boolean) => Promise<UsageResult>;
+  onAccountsUpdated: (cb: (snapshot: AccountsSnapshot) => void) => () => void;
+
+  // Automatic rotation at a usage threshold — what makes an unattended
+  // overnight run possible without anyone clicking a switch.
+  getRotationPolicy: () => Promise<{ policy: RotationPolicy; status: RotationStatus }>;
+  setRotationPolicy: (policy: RotationPolicy) => Promise<{ policy: RotationPolicy; status: RotationStatus }>;
+  onRotationStatus: (cb: (status: RotationStatus) => void) => () => void;
 
   listConversations: () => Promise<Conversation[]>;
   spawnAgent: (req: SpawnRequest) => Promise<SpawnResult>;

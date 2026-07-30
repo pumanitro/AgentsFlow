@@ -1,6 +1,7 @@
 import { app, BrowserWindow, clipboard, dialog, ipcMain, nativeImage, powerMonitor, shell } from 'electron';
 import * as path from 'path';
 import * as fs from 'fs';
+import * as os from 'os';
 import { v4 as uuid } from 'uuid';
 import serve from 'electron-serve';
 import { installCrashLogging, notePowerResume, notePowerSuspend, registerHealthProbe } from './logger';
@@ -30,7 +31,9 @@ function resolveIconPath(): string | null {
 const ICON_PATH = resolveIconPath();
 
 import { store } from './store';
-import { getUsage } from './usage';
+import { getUsage, getUsageForService, resetUsageCache } from './usage';
+import * as accounts from './accounts';
+import * as rotation from './rotation';
 import { forkTitle } from '../shared/fork-title';
 import { transcriptExists as transcriptExistsUnder } from './transcript-path';
 import { computeDisplayName, recomputeAllDisplayNames } from './naming';
@@ -53,7 +56,7 @@ import { gitStatus, listBranches, listFiles, listWorktrees, removeWorktree } fro
 import { searchInFiles } from './search';
 import { deleteAttachmentFiles, pastedImagesRoot, prunePastedImages, sweepOrphanAttachments, todayDateSlug } from './attachments';
 import { noteDirForPath, sweepNoteDir, sweepNoteImages } from './note-images';
-import { BridgeHealth, Conversation, FileEntry, PinnedDivider, PinnedItemRef, PinnedTodo, SlashCommand, SpawnRequest, TrackedDirectory } from '../shared/types';
+import { Account, AccountsSnapshot, AddAccountResult, BridgeHealth, Conversation, FileEntry, PinnedDivider, PinnedItemRef, PinnedTodo, ProbeAccountResult, RotationPolicy, SlashCommand, SpawnRequest, SwitchAccountResult, TrackedDirectory, UsageResult } from '../shared/types';
 
 const isDev = process.env.NODE_ENV === 'development';
 const loadURL = isDev ? null : serve({ directory: path.join(__dirname, '..', '..', '..', 'renderer', 'out') });
@@ -240,6 +243,12 @@ app.whenReady().then(() => {
   createWindow();
   startPoller(() => mainWindow);
   perf.startPerfSummary();
+  // Keep every pooled account's refresh token alive so "sign in once" holds
+  // even for an account that has not been switched to in months.
+  accounts.startKeepWarm(() => store.getAccounts());
+  // Watch the active account's meters and switch before it hits the wall. Opt-in
+  // (disabled by default); the loop no-ops until the user enables it.
+  rotation.startRotation(rotationDeps);
 
   // OS sleep/wake: tell the stall detector so the multi-minute gap it sees on
   // resume is logged as a power event, not a "UI frozen" false alarm, and back
@@ -393,6 +402,146 @@ ipcMain.handle('bridge:health', () => bridgeHealthSnapshot());
 // Live plan-usage meters for the sidebar Usage panel. Read-only against the
 // authenticated `/usage` endpoint; cached briefly inside getUsage().
 ipcMain.handle('usage:get', (_e, force?: boolean) => getUsage(Boolean(force)));
+
+// ----- Account pool -----
+// Switching moves an account's credentials into the single keychain slot Claude
+// Code reads, so sessions that are already running pick it up on their next
+// keychain read (the CLI caches those for 30s). No browser, no login.
+
+function accountsSnapshot(): AccountsSnapshot {
+  return { accounts: store.getAccounts(), activeId: store.getActiveAccountId() };
+}
+
+function broadcastAccounts(): void {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('accounts:updated', accountsSnapshot());
+  }
+}
+
+ipcMain.handle('accounts:list', () => accountsSnapshot());
+
+ipcMain.handle('accounts:add', (_e, email: string): AddAccountResult => {
+  const trimmed = (email ?? '').trim();
+  if (!accounts.isGmail(trimmed)) {
+    return { ok: false, error: 'Enter a Gmail address (…@gmail.com).' };
+  }
+  const existing = store.getAccounts();
+  if (existing.some((a) => a.email.toLowerCase() === trimmed.toLowerCase())) {
+    return { ok: false, error: `${trimmed} is already in the pool.` };
+  }
+  try {
+    const entry = accounts.beginAdd(trimmed);
+    // Queue the one-time login so it starts the moment the terminal attaches.
+    pty.queueShellCommand(entry.shellId, accounts.loginCommandFor(entry.configDir, entry.email));
+    return { ok: true, pendingId: entry.pendingId, shellId: entry.shellId, email: entry.email, cwd: os.homedir() };
+  } catch (err) {
+    return { ok: false, error: `Could not prepare the account: ${(err as Error)?.message ?? err}` };
+  }
+});
+
+ipcMain.handle('accounts:probe', async (_e, pendingId: string): Promise<ProbeAccountResult> => {
+  const result = await accounts.probeAdd(pendingId, store.getAccounts());
+  if (result.status === 'ok') {
+    store.addAccount(result.account);
+    // Adding never changes who is signed in. But if this account IS the login
+    // that predates the pool, record that — otherwise the panel would claim
+    // nobody is active until the user switched to the account they are already on.
+    if (
+      !store.getActiveAccountId() &&
+      result.account.accountUuid &&
+      result.account.accountUuid === accounts.currentLoginAccountUuid()
+    ) {
+      store.setActiveAccountId(result.account.id);
+    }
+    broadcastAccounts();
+  }
+  return result;
+});
+
+ipcMain.handle('accounts:cancelAdd', async (_e, pendingId: string) => {
+  const entry = accounts.getPending(pendingId);
+  if (!entry) return;
+  pty.cancelShellCommand(entry.shellId);
+  accounts.clearPending(pendingId);
+  await accounts.destroyVault(entry.configDir);
+});
+
+ipcMain.handle('accounts:remove', async (_e, id: string) => {
+  const account = store.getAccounts().find((a) => a.id === id);
+  if (!account) return;
+  store.removeAccount(id);
+  await accounts.destroyVault(account.configDir);
+  broadcastAccounts();
+});
+
+ipcMain.handle('accounts:switch', async (_e, id: string): Promise<SwitchAccountResult> => {
+  try {
+    const account = await accounts.switchTo(id, {
+      accounts: store.getAccounts(),
+      activeId: store.getActiveAccountId(),
+      onSwitched: (a) => store.setActiveAccountId(a.id),
+    });
+    resetUsageCache();
+    broadcastAccounts();
+    return { ok: true, account };
+  } catch (err) {
+    const error = (err as Error)?.message ?? String(err);
+    console.error('[agentsflow][accounts] switch failed', { id, error });
+    return { ok: false, error };
+  }
+});
+
+ipcMain.handle('accounts:usage', (_e, id: string, force?: boolean) => {
+  const account = store.getAccounts().find((a) => a.id === id);
+  if (!account) {
+    return { ok: false, reason: 'no-auth', error: 'Account not found.' } as const;
+  }
+  return getUsageForService(accounts.serviceNameFor(account.configDir), Boolean(force));
+});
+
+// ----- Automatic rotation -----
+// Runs the same switchTo() the button calls, on a threshold. Lives here rather
+// than in the renderer so an overnight run keeps rotating with the window shut.
+
+function accountUsage(account: Account, force: boolean): Promise<UsageResult> {
+  return getUsageForService(accounts.serviceNameFor(account.configDir), force);
+}
+
+const rotationDeps: rotation.RotationDeps = {
+  getPolicy: () => store.getRotationPolicy(),
+  getAccounts: () => store.getAccounts(),
+  getActiveId: () => store.getActiveAccountId(),
+  getAccountUsage: (account, force) => accountUsage(account, force),
+  getActiveUsage: (force) => getUsage(force),
+  switchTo: async (accountId) => {
+    const account = await accounts.switchTo(accountId, {
+      accounts: store.getAccounts(),
+      activeId: store.getActiveAccountId(),
+      onSwitched: (a) => store.setActiveAccountId(a.id),
+    });
+    resetUsageCache();
+    broadcastAccounts();
+    return account;
+  },
+  onStatus: (status) => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('rotation:status', status);
+    }
+  },
+};
+
+ipcMain.handle('rotation:get', () => ({
+  policy: store.getRotationPolicy(),
+  status: rotation.getStatus(),
+}));
+
+ipcMain.handle('rotation:set', (_e, policy: RotationPolicy) => {
+  const saved = store.setRotationPolicy(policy);
+  // Turning it back on is also how a user clears a failure stop.
+  if (saved.enabled) rotation.clearDisabled();
+  console.log('[agentsflow][rotation] policy updated', saved);
+  return { policy: saved, status: rotation.getStatus() };
+});
 
 ipcMain.handle('convs:list', () => store.getConversations());
 

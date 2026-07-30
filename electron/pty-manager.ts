@@ -514,6 +514,21 @@ function appendBuffer(
   }
 }
 
+// A command to run automatically the first time a given shell is spawned. Used
+// by the account-add flow, which must open a terminal *and* start the one-time
+// `claude auth login` inside it. Registered before the renderer attaches, and
+// written on spawn — so it can't race the user's own typing or a subscriber.
+const pendingShellCommands = new Map<string, string>();
+
+/** Queue `command` to run when shell `shellId` is next spawned (one-shot). */
+export function queueShellCommand(shellId: string, command: string): void {
+  pendingShellCommands.set(shellId, command);
+}
+
+export function cancelShellCommand(shellId: string): void {
+  pendingShellCommands.delete(shellId);
+}
+
 export async function attachShell(opts: {
   shellId: string;
   channelId: string;
@@ -568,6 +583,18 @@ export async function attachShell(opts: {
         safeSend(sub.win, 'terminal:data', sub.channelId, data);
       }
     }));
+    // One-shot startup command (account login). Written after the handlers are
+    // wired so its output is captured in the replay buffer like anything else.
+    const queued = pendingShellCommands.get(opts.shellId);
+    if (queued) {
+      pendingShellCommands.delete(opts.shellId);
+      try {
+        pty.write(`${queued}\r`);
+      } catch (err) {
+        console.warn('[agentsflow][pty] queued shell command failed to write', (err as Error)?.message ?? err);
+      }
+    }
+
     pty.onExit(guardCb('shell onExit', (e) => {
       console.log('[agentsflow][pty] shell onExit', { shellId: opts.shellId, exitCode: e.exitCode, signal: e.signal });
       const s = shells.get(opts.shellId);

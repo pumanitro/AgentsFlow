@@ -5,6 +5,7 @@ import { BranchList, FileEntry, GitEntryStatus, GitStatusResult, WorktreeInfo } 
 import SearchModal from './SearchModal';
 import NotesPanel from './NotesPanel';
 import UsagePanel from './UsagePanel';
+import AccountsPanel from './AccountsPanel';
 import {
   TreeFile,
   TreeNode,
@@ -959,6 +960,7 @@ export default function FileTreeSidebar({ dirPath, conversationId, worktreePath,
           chat is burning through the limits, so it follows you in here rather
           than living only on the home screen. */}
       <div className="shrink-0 min-h-0 flex flex-col gap-2 px-2 py-2 border-t-2 border-border bg-bg shadow-[0_-10px_18px_-10px_rgba(0,0,0,0.7)]">
+        <AccountsPanel />
         <UsagePanel />
         <NotesPanel dirPath={dirPath} onFileOpen={onFileOpen} openedFilePath={openedFilePath} />
       </div>

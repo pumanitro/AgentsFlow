@@ -21,6 +21,7 @@ import { BridgeHealth, Conversation, PinnedDivider, PinnedItemRef, PinnedTodo, T
 // FileEditor (CodeMirror / BlockNote) also only loads when a note is previewed.
 const NotesPanel = dynamic(() => import('../components/NotesPanel'), { ssr: false });
 const UsagePanel = dynamic(() => import('../components/UsagePanel'), { ssr: false });
+const AccountsPanel = dynamic(() => import('../components/AccountsPanel'), { ssr: false });
 const FileEditor = dynamic(() => import('../components/FileEditor'), { ssr: false });
 
 type PinnedItem =
@@ -764,6 +765,10 @@ export default function Home() {
               darker app background, with real gaps, so they read as a separate
               docked layer rather than melting into the scrolling peer list. */}
           <div className="shrink-0 min-h-0 flex flex-col gap-2 px-2 py-2 border-t-2 border-border bg-bg shadow-[0_-10px_18px_-10px_rgba(0,0,0,0.7)]">
+            {/* The switchable Anthropic account pool, directly above the meters
+                it explains: when one account runs dry, click another and every
+                session — running and new — continues on its tokens. */}
+            <AccountsPanel />
             {/* Live plan-usage meters (Current session / All models / per-model
                 weekly). Polls the same authenticated endpoint that backs Claude
                 Code's /usage screen. */}

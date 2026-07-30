@@ -3,7 +3,8 @@ import * as os from 'os';
 import * as path from 'path';
 import { performance } from 'node:perf_hooks';
 import { app } from 'electron';
-import { Conversation, PinnedDivider, PinnedItemRef, PinnedTodo, TrackedDirectory } from '../shared/types';
+import { Account, Conversation, PinnedDivider, PinnedItemRef, PinnedTodo, RotationPolicy, TrackedDirectory } from '../shared/types';
+import { DEFAULT_POLICY } from './rotation';
 import { placePinnedRefAfter, placePinnedRefAtEndOfFirstSection } from './pinned-order';
 import * as perf from './perf';
 
@@ -13,6 +14,11 @@ interface StoreShape {
   dividers: PinnedDivider[];
   todos: PinnedTodo[];
   pinnedOrder: PinnedItemRef[];
+  // The switchable Anthropic account pool. Only identity/bookkeeping lives here
+  // — credentials never leave the keychain (see electron/accounts.ts).
+  accounts: Account[];
+  activeAccountId: string | null;
+  rotationPolicy: RotationPolicy;
 }
 
 let cache: StoreShape | null = null;
@@ -180,6 +186,20 @@ function sanitizePinnedOrder(
   return [...missingDividers, ...missingTodos, ...missing, ...out];
 }
 
+/**
+ * A stored rotation policy is only trusted within sane bounds — a threshold of
+ * 0 would switch accounts on every tick, and 100 would only fire after the wall
+ * has already been hit, which is the thing rotation exists to avoid.
+ */
+function sanitizeRotationPolicy(raw: unknown): RotationPolicy {
+  const p = raw as Partial<RotationPolicy> | undefined;
+  const threshold = Number(p?.threshold);
+  return {
+    enabled: Boolean(p?.enabled),
+    threshold: Number.isFinite(threshold) ? Math.min(99, Math.max(50, Math.round(threshold))) : DEFAULT_POLICY.threshold,
+  };
+}
+
 function load(): StoreShape {
   if (cache) return cache;
   const p = getPath();
@@ -208,7 +228,16 @@ function load(): StoreShape {
   const dividers = sanitizeDividers(parsed.dividers);
   const todos = sanitizeTodos(parsed.todos);
   const pinnedOrder = sanitizePinnedOrder(parsed.pinnedOrder, conversations, dividers, todos);
-  cache = { directories: parsed.directories ?? [], conversations, dividers, todos, pinnedOrder };
+  cache = {
+    directories: parsed.directories ?? [],
+    conversations,
+    dividers,
+    todos,
+    pinnedOrder,
+    accounts: Array.isArray(parsed.accounts) ? parsed.accounts : [],
+    activeAccountId: typeof parsed.activeAccountId === 'string' ? parsed.activeAccountId : null,
+    rotationPolicy: sanitizeRotationPolicy(parsed.rotationPolicy),
+  };
   // Seed from what's already archived so the first flush doesn't needlessly
   // rewrite history.json.
   lastColdIds = new Set(coldRaw.map((c) => (c as any)?.id).filter(Boolean));
@@ -266,6 +295,9 @@ function serializeSplit(s: StoreShape, now: number): { hotJson: string; coldJson
     dividers: s.dividers,
     todos: s.todos,
     pinnedOrder: s.pinnedOrder,
+    accounts: s.accounts,
+    activeAccountId: s.activeAccountId,
+    rotationPolicy: s.rotationPolicy,
     conversations: hot,
   });
   perf.record('store:save', performance.now() - t0);
@@ -413,6 +445,39 @@ export const store = {
     if (count > 0) save();
     return count;
   },
+  getAccounts(): Account[] {
+    return load().accounts;
+  },
+  getActiveAccountId(): string | null {
+    return load().activeAccountId;
+  },
+  addAccount(account: Account): Account {
+    const s = load();
+    s.accounts = [...s.accounts.filter((a) => a.id !== account.id), account];
+    save();
+    return account;
+  },
+  removeAccount(id: string): void {
+    const s = load();
+    s.accounts = s.accounts.filter((a) => a.id !== id);
+    if (s.activeAccountId === id) s.activeAccountId = null;
+    save();
+  },
+  setActiveAccountId(id: string | null): void {
+    const s = load();
+    s.activeAccountId = id;
+    save();
+  },
+  getRotationPolicy(): RotationPolicy {
+    return load().rotationPolicy;
+  },
+  setRotationPolicy(policy: RotationPolicy): RotationPolicy {
+    const s = load();
+    s.rotationPolicy = sanitizeRotationPolicy(policy);
+    save();
+    return s.rotationPolicy;
+  },
+
   getDividers(): PinnedDivider[] {
     return load().dividers;
   },
