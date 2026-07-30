@@ -245,6 +245,11 @@ export interface AccountsSnapshot {
   // null when the pool has never been switched into (the pre-existing login is
   // still in place and is not part of the pool).
   activeId: string | null;
+  // Set only when the active account's sign-in is broken in a way the app cannot
+  // repair by itself. Divergence between the two copies of a token is fixed
+  // silently on a timer; this is reserved for "there is nothing left to restore",
+  // which is the one case that really does need the user.
+  authIssue?: string | null;
 }
 
 // Started an add: the caller opens a terminal on `shellId` (the login command is
@@ -324,6 +329,9 @@ export interface AgentsFlowApi {
   cancelAddAccount: (pendingId: string) => Promise<void>;
   removeAccount: (id: string) => Promise<void>;
   switchAccount: (id: string) => Promise<SwitchAccountResult>;
+  // Re-check (and if possible restore) the active account's sign-in right now.
+  // Happens automatically on a timer; this is the button on the failure banner.
+  repairAccounts: () => Promise<AccountsSnapshot>;
   // Usage meters for one pooled account, read with that account's own token —
   // works whether or not it is the active one.
   getAccountUsage: (id: string, force?: boolean) => Promise<UsageResult>;

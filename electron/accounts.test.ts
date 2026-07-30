@@ -6,10 +6,13 @@ import {
   isGmail,
   mergeOAuthAccount,
   mergeOAuthInto,
+  newerCreds,
   parseAuthStatus,
+  sameCreds,
   serviceNameFor,
   slugForEmail,
 } from './accounts';
+import type { OAuthCredentials } from './accounts';
 import type { Account } from '../shared/types';
 
 function account(over: Partial<Account> = {}): Account {
@@ -191,4 +194,75 @@ test('parseAuthStatus: signed-out and garbage both read as not logged in', () =>
   assert.equal(parseAuthStatus('{"loggedIn":false,"authMethod":"none"}').loggedIn, false);
   assert.equal(parseAuthStatus('not json at all').loggedIn, false);
   assert.equal(parseAuthStatus('').loggedIn, false);
+});
+
+// ---------------------------------------------------------------------------
+// Credential reconciliation
+//
+// The active account's tokens sit in two keychain slots at once, and a refresh
+// kills the token it was bought with. Pick the wrong copy as authoritative and
+// the CLI is left holding a spent refresh token — which it answers by wiping its
+// credentials and printing "Login expired · Please run /login". These two
+// functions are the whole of that decision, so they are worth pinning down.
+// ---------------------------------------------------------------------------
+
+function creds(over: Partial<OAuthCredentials> = {}): OAuthCredentials {
+  return { accessToken: 'access-1', refreshToken: 'refresh-1', expiresAt: 1_000, ...over };
+}
+
+test('sameCreds: identical token pairs need no reconciliation', () => {
+  assert.equal(sameCreds(creds(), creds()), true);
+});
+
+test('sameCreds: a rotated refresh token counts as divergence even at the same access token', () => {
+  // This is the dangerous shape: same access token, so nothing looks wrong until
+  // the refresh that follows is rejected.
+  assert.equal(sameCreds(creds(), creds({ refreshToken: 'refresh-2' })), false);
+});
+
+test('sameCreds: a missing copy is never "the same" as a present one', () => {
+  assert.equal(sameCreds(creds(), null), false);
+  assert.equal(sameCreds(null, creds()), false);
+  // Two empty slots do agree — which is why reconcileActive asks newerCreds()
+  // FIRST. Reaching this predicate with both gone would report an account with
+  // no credentials anywhere as healthy.
+  assert.equal(sameCreds(null, null), true);
+  assert.equal(newerCreds(null, null), 'neither');
+});
+
+test('newerCreds: the later expiry is the copy that was refreshed last', () => {
+  assert.equal(newerCreds(creds({ expiresAt: 2_000 }), creds({ expiresAt: 1_000 })), 'main');
+  assert.equal(newerCreds(creds({ expiresAt: 1_000 }), creds({ expiresAt: 2_000 })), 'vault');
+});
+
+test('newerCreds: the keep-warm bug shape resolves to the vault', () => {
+  // Exactly what used to happen: keep-warm refreshed the ACTIVE account through
+  // its vault, leaving the main slot on the spent token. The live chain is the
+  // vault's, so that is what has to go back into the main slot.
+  const mainStranded = creds({ accessToken: 'old', refreshToken: 'spent', expiresAt: 100 });
+  const vaultLive = creds({ accessToken: 'new', refreshToken: 'live', expiresAt: 900 });
+  assert.equal(newerCreds(mainStranded, vaultLive), 'vault');
+});
+
+test('newerCreds: the CLI having rotated resolves to main, so the vault gets mirrored', () => {
+  const mainRotatedByCli = creds({ accessToken: 'new', refreshToken: 'live', expiresAt: 900 });
+  const vaultStale = creds({ accessToken: 'old', refreshToken: 'spent', expiresAt: 100 });
+  assert.equal(newerCreds(mainRotatedByCli, vaultStale), 'main');
+});
+
+test('newerCreds: a wiped main slot loses to any surviving vault copy', () => {
+  // The CLI clears its own credentials after a rejected refresh. That empty slot
+  // must never win, or the repair would install nothing.
+  assert.equal(newerCreds(null, creds()), 'vault');
+  assert.equal(newerCreds(creds(), null), 'main');
+  assert.equal(newerCreds(null, null), 'neither');
+});
+
+test('newerCreds: ties and unknown expiries defer to main', () => {
+  // When we cannot tell who is newer, the safe answer is the one that cannot
+  // yank a token out from under a session that is running right now.
+  assert.equal(newerCreds(creds({ expiresAt: 500 }), creds({ expiresAt: 500 })), 'main');
+  assert.equal(newerCreds(creds({ expiresAt: undefined }), creds({ expiresAt: undefined })), 'main');
+  // ...but a dated copy still beats an undated one.
+  assert.equal(newerCreds(creds({ expiresAt: undefined }), creds({ expiresAt: 1 })), 'vault');
 });

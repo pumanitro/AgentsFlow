@@ -245,7 +245,12 @@ app.whenReady().then(() => {
   perf.startPerfSummary();
   // Keep every pooled account's refresh token alive so "sign in once" holds
   // even for an account that has not been switched to in months.
-  accounts.startKeepWarm(() => store.getAccounts());
+  accounts.startKeepWarm(() => store.getAccounts(), () => store.getActiveAccountId());
+  // Keep the active account's two copies of its tokens in agreement, and repair
+  // the signed-in slot if it is the stale one. Started before anything can
+  // spawn a session: a launch after the app has been closed for hours is exactly
+  // when the main slot is most likely to be found stranded.
+  accounts.startCredentialSync(credentialSyncDeps);
   // Watch the active account's meters and switch before it hits the wall. Opt-in
   // (disabled by default); the loop no-ops until the user enables it.
   rotation.startRotation(rotationDeps);
@@ -258,6 +263,9 @@ app.whenReady().then(() => {
   powerMonitor.on('lock-screen', () => { notePowerSuspend(); setPollerForeground(false); });
   const onWake = () => {
     notePowerResume();
+    // A machine that slept through the access token's lifetime wakes up in the
+    // same state as a cold launch, so check the login before work resumes.
+    void accounts.syncActiveCredentials(credentialSyncDeps);
     // Only resume fast polling if the window is actually in front on wake.
     if (mainWindow && !mainWindow.isDestroyed() && mainWindow.isVisible() && mainWindow.isFocused()) {
       setPollerForeground(true);
@@ -408,8 +416,11 @@ ipcMain.handle('usage:get', (_e, force?: boolean) => getUsage(Boolean(force)));
 // Code reads, so sessions that are already running pick it up on their next
 // keychain read (the CLI caches those for 30s). No browser, no login.
 
+// Only ever set for the unrepairable case — see AccountsSnapshot.authIssue.
+let authIssue: string | null = null;
+
 function accountsSnapshot(): AccountsSnapshot {
-  return { accounts: store.getAccounts(), activeId: store.getActiveAccountId() };
+  return { accounts: store.getAccounts(), activeId: store.getActiveAccountId(), authIssue };
 }
 
 function broadcastAccounts(): void {
@@ -417,6 +428,72 @@ function broadcastAccounts(): void {
     mainWindow.webContents.send('accounts:updated', accountsSnapshot());
   }
 }
+
+// ----- Credential reconciliation -----
+// The active account's tokens live in two keychain slots at once and only one of
+// them can be current, because refreshing rotates the token. Left alone they
+// drift apart and the CLI ends up holding the spent copy, which it reacts to by
+// wiping its credentials and demanding `/login`. This loop keeps them in step —
+// the fix for having to switch away and back to get working again.
+
+// This runs every minute, and an unresolvable state would otherwise report
+// itself 1440 times a day into the same log file that has frozen the app before.
+let lastReconcileOutcome: string | null = null;
+
+function applyReconcile(account: Account, result: accounts.ReconcileResult): void {
+  const previousIssue = authIssue;
+  const changed = result.outcome !== lastReconcileOutcome;
+  lastReconcileOutcome = result.outcome;
+
+  if (changed && result.outcome !== 'in-sync') {
+    console.log('[agentsflow][accounts] reconcile', { email: account.email, outcome: result.outcome });
+  }
+
+  switch (result.outcome) {
+    case 'in-sync':
+    case 'adopted-main':
+      // Routine. Nothing to tell anyone: this is the loop doing its job.
+      authIssue = null;
+      break;
+
+    case 'repaired-main':
+      // The panel is very likely showing a signed-out Usage meter cached from
+      // while the slot was broken, so drop it rather than make the user wait it out.
+      resetUsageCache();
+      authIssue = null;
+      break;
+
+    case 'foreign':
+      // The keychain, not our JSON, is the truth about who is signed in. If the
+      // login belongs to another pooled account, follow it instead of arguing.
+      if (result.ownerAccountId && result.ownerAccountId !== store.getActiveAccountId()) {
+        console.log('[agentsflow][accounts] the signed-in slot belongs to a different pooled account — following it');
+        store.setActiveAccountId(result.ownerAccountId);
+        resetUsageCache();
+        authIssue = null;
+        broadcastAccounts();
+        return;
+      }
+      authIssue = null;
+      break;
+
+    case 'signed-out':
+    case 'failed':
+      authIssue = result.error;
+      break;
+  }
+
+  // Broadcast on change only — this runs every minute.
+  if (authIssue !== previousIssue || result.outcome === 'repaired-main') {
+    broadcastAccounts();
+  }
+}
+
+const credentialSyncDeps: accounts.SyncDeps = {
+  getAccounts: () => store.getAccounts(),
+  getActiveId: () => store.getActiveAccountId(),
+  onResult: applyReconcile,
+};
 
 ipcMain.handle('accounts:list', () => accountsSnapshot());
 
@@ -489,6 +566,13 @@ ipcMain.handle('accounts:switch', async (_e, id: string): Promise<SwitchAccountR
     console.error('[agentsflow][accounts] switch failed', { id, error });
     return { ok: false, error };
   }
+});
+
+// Force a reconcile now. The loop already does this every minute, so this is
+// only ever "I am looking at the banner and want it checked again this second".
+ipcMain.handle('accounts:repair', async (): Promise<AccountsSnapshot> => {
+  await accounts.syncActiveCredentials(credentialSyncDeps);
+  return accountsSnapshot();
 });
 
 ipcMain.handle('accounts:usage', (_e, id: string, force?: boolean) => {

@@ -19,7 +19,7 @@
 // the path, so moving or renaming a vault dir orphans that account's credentials
 // and forces a fresh login. Never "tidy up" these paths.
 //
-// Two invariants this module must never break:
+// Three invariants this module must never break:
 //   1. The main slot's JSON also holds `mcpOAuth` (tokens for MCP servers, which
 //      are NOT account-scoped). Every write MERGES — only `claudeAiOauth` is
 //      ever replaced. Overwriting wholesale would silently sign the user out of
@@ -27,6 +27,11 @@
 //   2. Before overwriting the main slot we sync it back to the outgoing
 //      account's vault, so a token rotation that happened while it was active is
 //      preserved. Skipping this strands the vault on a dead refresh token.
+//   3. The ACTIVE account's credentials exist in two slots at once — the main
+//      one and its own vault — and a refresh invalidates the token it was bought
+//      with. So only ONE party may ever refresh them: the CLI. We mirror; we do
+//      not rotate behind its back. See "Reconciliation" below, which is the
+//      whole of the fix for the "Login expired · Please run /login" bug.
 //
 // Nothing here logs token material — accounts are identified in logs by email
 // and uuid only.
@@ -433,6 +438,25 @@ export function currentLoginAccountUuid(): string | undefined {
   }
 }
 
+/**
+ * Same, memoised on the file's mtime. `~/.claude.json` is a large file that the
+ * CLI rewrites constantly, and the reconcile loop below asks this question on a
+ * timer — parsing megabytes every tick to answer "still the same account?" is
+ * exactly the kind of thing that shows up in the perf log as a stall.
+ */
+let identityCache: { mtimeMs: number; uuid?: string } | null = null;
+function cachedLoginAccountUuid(): string | undefined {
+  try {
+    const { mtimeMs } = fs.statSync(mainConfigJsonPath());
+    if (identityCache && identityCache.mtimeMs === mtimeMs) return identityCache.uuid;
+    const uuid = currentLoginAccountUuid();
+    identityCache = { mtimeMs, uuid };
+    return uuid;
+  } catch {
+    return undefined;
+  }
+}
+
 /** The command run in the login terminal. One browser round-trip, once ever. */
 export function loginCommandFor(configDir: string, email: string): string {
   const q = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`;
@@ -516,6 +540,15 @@ async function doSwitch(targetId: string, deps: SwitchDeps): Promise<Account> {
   const target = deps.accounts.find((a) => a.id === targetId);
   if (!target) throw new Error('account not found');
 
+  // Switching to the account already in the main slot is a reconcile, not a
+  // switch: its vault copy may well be the older of the two, and installing that
+  // over the CLI's live token would break the very session doing the asking.
+  if (deps.activeId === target.id) {
+    await reconcileActive(target, deps.accounts);
+    deps.onSwitched(target);
+    return target;
+  }
+
   const targetService = serviceNameFor(target.configDir);
   let targetCreds = parseOAuth(await readSlotRaw(targetService));
   if (!targetCreds) {
@@ -524,11 +557,18 @@ async function doSwitch(targetId: string, deps: SwitchDeps): Promise<Account> {
 
   // 1. Sync-back: whatever the CLI rotated into the main slot belongs to the
   //    outgoing account. Losing it would strand that vault on a spent token.
+  //    Only when main is genuinely the newer copy, though — a main slot that has
+  //    gone stale must not be allowed to overwrite live credentials on its way
+  //    out, which would turn one broken account into two.
   const mainBlob = await readSlotRaw(MAIN_SERVICE);
   const mainCreds = parseOAuth(mainBlob);
   const outgoing = deps.activeId ? deps.accounts.find((a) => a.id === deps.activeId) : undefined;
   if (mainCreds && outgoing && outgoing.id !== target.id) {
-    await writeOAuthToSlot(serviceNameFor(outgoing.configDir), mainCreds);
+    const outgoingService = serviceNameFor(outgoing.configDir);
+    const outgoingVault = parseOAuth(await readSlotRaw(outgoingService));
+    if (newerCreds(mainCreds, outgoingVault) === 'main') {
+      await writeOAuthToSlot(outgoingService, mainCreds);
+    }
   }
 
   // 2. Backup — recovery without ever writing a token to disk.
@@ -560,6 +600,201 @@ async function doSwitch(targetId: string, deps: SwitchDeps): Promise<Account> {
   return target;
 }
 
+// ---------------------------------------------------------------------------
+// Reconciliation — keeping the active account's two copies in agreement
+// ---------------------------------------------------------------------------
+//
+// THE BUG THIS EXISTS TO KILL. While an account is active its credentials sit
+// in two keychain slots: the main one, which the Claude Code CLI both reads and
+// WRITES, and its own vault. A refresh mints a new access token *and* rotates
+// the refresh token, invalidating the one it was bought with. So the instant
+// those two copies diverge, one of them holds a refresh token that is already
+// dead server-side — and if that one is the main slot, the CLI's next refresh is
+// rejected, at which point it does not merely fail: it CLEARS its stored
+// credentials and prints "Login expired · Please run /login".
+//
+// That is precisely what the old keep-warm sweep did. It refreshed every pooled
+// account including the active one, through the vault, leaving the CLI holding a
+// spent token — a time bomb armed 60s after every launch (which is why "close
+// and reopen the app" was the reliable way to trigger it) and detonating up to
+// eight hours later when the access token finally expired. The only repair was
+// switching away and back, because doSwitch is the one path that copies the
+// vault's live tokens into the main slot.
+//
+// The rule that makes it safe: FOR THE ACTIVE ACCOUNT THE MAIN SLOT IS THE
+// SOURCE OF TRUTH AND THE VAULT IS A MIRROR. We never rotate its tokens behind
+// the CLI's back — we only copy the newer of the two copies over the older one,
+// in whichever direction that turns out to be, so they can never disagree for
+// longer than one tick.
+
+/** The same login state — same tokens, so neither copy can be the spent one. */
+export function sameCreds(a: OAuthCredentials | null, b: OAuthCredentials | null): boolean {
+  if (!a || !b) return a === b;
+  return a.accessToken === b.accessToken && a.refreshToken === b.refreshToken;
+}
+
+/**
+ * Which copy was refreshed most recently — equivalently, which one's refresh
+ * token is still live. Every refresh mints an access token with a later expiry
+ * and kills the token that bought it, so "later `expiresAt`" is exactly the test.
+ *
+ * Ties and missing expiries go to main. The CLI is the only other writer, and
+ * when we cannot tell who is newer, deferring to it is the answer that cannot
+ * break a session that is running right now.
+ */
+export function newerCreds(
+  main: OAuthCredentials | null,
+  vault: OAuthCredentials | null,
+): 'main' | 'vault' | 'neither' {
+  if (!main && !vault) return 'neither';
+  if (!main) return 'vault';
+  if (!vault) return 'main';
+  return (vault.expiresAt ?? 0) > (main.expiresAt ?? 0) ? 'vault' : 'main';
+}
+
+export type ReconcileResult =
+  /** The two copies already agree — the overwhelmingly common case, and free. */
+  | { outcome: 'in-sync' }
+  /** The CLI rotated the tokens; the vault has been re-mirrored from main. */
+  | { outcome: 'adopted-main' }
+  /** Main was stale or wiped; the live credentials have been put back. */
+  | { outcome: 'repaired-main' }
+  /** Main belongs to a login that is not the account we think is active. */
+  | { outcome: 'foreign'; ownerAccountId?: string }
+  /** Neither copy has credentials left — only a real sign-in fixes this. */
+  | { outcome: 'signed-out'; error: string }
+  /** We knew what to do and could not do it (keychain refused the write). */
+  | { outcome: 'failed'; error: string };
+
+/**
+ * Bring the active account's two copies back into agreement, repairing the main
+ * slot when it is the stale one. This is the "switch away and back" the user had
+ * to do by hand, done automatically and in the correct direction.
+ *
+ * Read-only on the happy path: two keychain reads and nothing else, so it is
+ * cheap enough to run on a timer.
+ */
+let reconcileChain: Promise<void> = Promise.resolve();
+
+export function reconcileActive(account: Account, pool: Account[] = []): Promise<ReconcileResult> {
+  // Serialised: the minute timer and the daily keep-warm sweep both land here,
+  // and each pass is a read-then-write. Interleaving two of them could decide
+  // "vault is newer" against a main slot the other one has already repaired.
+  const run = reconcileChain.then(() => doReconcile(account, pool));
+  reconcileChain = run.then(() => undefined, () => undefined);
+  return run;
+}
+
+async function doReconcile(account: Account, pool: Account[]): Promise<ReconcileResult> {
+  const vaultService = serviceNameFor(account.configDir);
+  const mainBlob = await readSlotRaw(MAIN_SERVICE);
+  const mainCreds = parseOAuth(mainBlob);
+  const vaultCreds = parseOAuth(await readSlotRaw(vaultService));
+
+  const source = newerCreds(mainCreds, vaultCreds);
+  // Tested before the agreement check below: two empty slots technically agree,
+  // and calling that "in sync" would report an account with no credentials
+  // anywhere as perfectly healthy — the one state that does need the user.
+  if (source === 'neither') {
+    return {
+      outcome: 'signed-out',
+      error: `${account.email} has no stored credentials any more. Remove it and add it again.`,
+    };
+  }
+  if (sameCreds(mainCreds, vaultCreds)) return { outcome: 'in-sync' };
+
+  // Only past this point do we write anything, and a write to the wrong account
+  // is worse than the divergence we came to fix — so this is where (and only
+  // where) it is worth reading the recorded identity.
+  const loginUuid = cachedLoginAccountUuid();
+  if (loginUuid && account.accountUuid && loginUuid !== account.accountUuid) {
+    const owner = pool.find((a) => a.accountUuid === loginUuid);
+    return { outcome: 'foreign', ownerAccountId: owner?.id };
+  }
+
+  switch (source) {
+    case 'main':
+      // The CLI refreshed while it was active — adopt that into the vault so a
+      // later switch back to this account does not install a spent token.
+      await writeOAuthToSlot(vaultService, mainCreds!);
+      return { outcome: 'adopted-main' };
+
+    case 'vault': {
+      // Main is stranded (stale, or cleared by the CLI after a rejected
+      // refresh). The vault holds the live chain, so put it back.
+      let creds = vaultCreds!;
+      try {
+        // Hand the CLI something usable *now* rather than something it has to
+        // refresh on first use — it just failed doing exactly that.
+        creds = await ensureFresh(account, creds);
+      } catch (err) {
+        console.warn('[agentsflow][accounts] could not pre-refresh during repair', {
+          email: account.email,
+          error: (err as Error)?.message ?? String(err),
+        });
+      }
+      await writeSlotRaw(MAIN_SERVICE, mergeOAuthInto(mainBlob, creds));
+      const readback = parseOAuth(await readSlotRaw(MAIN_SERVICE));
+      if (!readback || readback.accessToken !== creds.accessToken) {
+        return { outcome: 'failed', error: 'The keychain would not accept the restored credentials.' };
+      }
+      await patchMainConfigIdentity(account.configDir);
+      console.log('[agentsflow][accounts] repaired the signed-in credentials', { email: account.email });
+      return { outcome: 'repaired-main' };
+    }
+  }
+}
+
+// The loop. Runs in the main process so it keeps the login healthy with the
+// window closed — the same reason rotation lives there.
+const SYNC_INTERVAL_MS = 60_000;
+
+export interface SyncDeps {
+  getAccounts: () => Account[];
+  getActiveId: () => string | null;
+  /** Told about every pass, including the boring ones, so policy stays in main.ts. */
+  onResult: (account: Account, result: ReconcileResult) => void;
+}
+
+let syncTimer: NodeJS.Timeout | null = null;
+let syncing = false;
+
+/** One pass. Exported so startup, wake-from-sleep and the UI can force it. */
+export async function syncActiveCredentials(deps: SyncDeps): Promise<ReconcileResult | null> {
+  if (syncing) return null;
+  const activeId = deps.getActiveId();
+  if (!activeId) return null;
+  const account = deps.getAccounts().find((a) => a.id === activeId);
+  if (!account) return null;
+
+  syncing = true;
+  try {
+    const result = await reconcileActive(account, deps.getAccounts());
+    deps.onResult(account, result);
+    return result;
+  } catch (err) {
+    console.warn('[agentsflow][accounts] credential sync failed', (err as Error)?.message ?? err);
+    return null;
+  } finally {
+    syncing = false;
+  }
+}
+
+export function startCredentialSync(deps: SyncDeps): void {
+  if (syncTimer) return;
+  // Immediately, not on the first tick: a launch after the app has been closed
+  // for hours is the single most likely moment to find the main slot stranded,
+  // and sessions spawn seconds later.
+  void syncActiveCredentials(deps);
+  syncTimer = setInterval(() => { void syncActiveCredentials(deps); }, SYNC_INTERVAL_MS);
+  syncTimer.unref?.();
+}
+
+export function stopCredentialSync(): void {
+  if (syncTimer) clearInterval(syncTimer);
+  syncTimer = null;
+}
+
 /** Restore the pre-switch snapshot. The escape hatch if a switch goes wrong. */
 export async function restoreBackup(): Promise<boolean> {
   const backup = await readSlotRaw(BACKUP_SERVICE);
@@ -576,17 +811,56 @@ export async function restoreBackup(): Promise<boolean> {
 let keepWarmTimer: NodeJS.Timeout | null = null;
 
 /**
- * Refresh every pooled account on a daily timer so no refresh token ever lapses
- * into a re-login. An account that is currently active is refreshed through its
- * vault too — the sync-back on the next switch reconciles either way.
+ * The active account is the one this sweep must NOT touch. Its tokens are also
+ * in the main slot, so refreshing them here would invalidate the copy the CLI is
+ * holding — the exact sequence that used to end in "Login expired". Its refresh
+ * token is kept alive by the CLI's own use instead, which is what a refresh
+ * token is for.
+ *
+ * The one case that still needs us: an account left active but unused long
+ * enough for the refresh token's own ~30-day clock to run down. Then we renew it
+ * once and write BOTH copies in the same breath, so they never diverge.
  */
-export async function keepWarm(accounts: Account[]): Promise<void> {
+const ACTIVE_RENEWAL_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
+
+async function keepActiveWarm(account: Account): Promise<void> {
+  const result = await reconcileActive(account);
+  if (result.outcome === 'foreign' || result.outcome === 'signed-out') return;
+
+  const creds = parseOAuth(await readSlotRaw(MAIN_SERVICE));
+  if (!creds?.refreshTokenExpiresAt) return;
+  if (creds.refreshTokenExpiresAt - Date.now() > ACTIVE_RENEWAL_WINDOW_MS) return;
+  // An access token that is still live means the CLI is using this account and
+  // refreshing it perfectly well on its own — so there is nothing to rescue, and
+  // stepping in would only take a token away from a running session. (We also
+  // cannot trust `refreshTokenExpiresAt` to be current: the token endpoint does
+  // not restate it, so our copy decays even as the server extends the real one.
+  // Requiring an idle account keeps that staleness from causing daily churn.)
+  if (!creds.expiresAt || creds.expiresAt > Date.now()) return;
+
+  const fresh = await refreshCredentials(creds);
+  await writeOAuthToSlot(serviceNameFor(account.configDir), fresh);
+  await writeSlotRaw(MAIN_SERVICE, mergeOAuthInto(await readSlotRaw(MAIN_SERVICE), fresh));
+  console.log('[agentsflow][accounts] renewed the active refresh token', { email: account.email });
+}
+
+/**
+ * Refresh every pooled account on a daily timer so no refresh token ever lapses
+ * into a re-login — every account except the active one, which is mirrored
+ * rather than rotated (see keepActiveWarm above and invariant 3 at the top).
+ */
+export async function keepWarm(accounts: Account[], activeId?: string | null): Promise<void> {
   for (const account of accounts) {
     try {
+      if (activeId && account.id === activeId) {
+        await keepActiveWarm(account);
+        continue;
+      }
       const creds = await readAccountCreds(account);
       if (!creds) continue;
       // Deliberately refresh well before expiry so an account that is never
       // switched to still exercises (and therefore extends) its refresh token.
+      // Safe here precisely because nothing else holds a copy of these.
       const fresh = await refreshCredentials(creds);
       await writeOAuthToSlot(serviceNameFor(account.configDir), fresh);
       console.log('[agentsflow][accounts] kept warm', { email: account.email });
@@ -599,9 +873,9 @@ export async function keepWarm(accounts: Account[]): Promise<void> {
   }
 }
 
-export function startKeepWarm(getAccounts: () => Account[]): void {
+export function startKeepWarm(getAccounts: () => Account[], getActiveId: () => string | null): void {
   if (keepWarmTimer) return;
-  const tick = () => { void keepWarm(getAccounts()); };
+  const tick = () => { void keepWarm(getAccounts(), getActiveId()); };
   // First sweep a minute after launch so it never competes with startup work.
   setTimeout(tick, 60_000).unref?.();
   keepWarmTimer = setInterval(tick, KEEP_WARM_INTERVAL_MS);

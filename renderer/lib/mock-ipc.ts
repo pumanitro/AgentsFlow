@@ -232,6 +232,7 @@ export function createMockApi(): AgentsFlowApi {
     cancelAddAccount: async () => {},
     removeAccount: async () => {},
     switchAccount: async () => ({ ok: false as const, error: 'Switching needs the desktop app.' }),
+    repairAccounts: async () => ({ accounts: [], activeId: null, authIssue: null }),
     getAccountUsage: async (id: string) => ({
       ok: true as const,
       snapshot: {

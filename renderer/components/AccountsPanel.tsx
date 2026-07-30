@@ -398,6 +398,7 @@ export default function AccountsPanel() {
   const [email, setEmail] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [repairing, setRepairing] = useState(false);
   const [pending, setPending] = useState<{ pendingId: string; shellId: string; email: string; cwd: string } | null>(null);
   const [policy, setPolicy] = useState<RotationPolicy>({ enabled: false, threshold: 95 });
   const [rotationStatus, setRotationStatus] = useState<RotationStatus | null>(null);
@@ -500,6 +501,19 @@ export default function AccountsPanel() {
     }
   }, [loadAccounts, loadUsage, snapshot.accounts]);
 
+  const repair = useCallback(async () => {
+    setRepairing(true);
+    try {
+      const s = await api().repairAccounts();
+      if (mounted.current) setSnapshot(s);
+      // A successful repair leaves the meters reading "signed out" until they
+      // are re-fetched, which would look like the repair had not worked.
+      if (mounted.current && !s.authIssue) await loadUsage(s.accounts, true);
+    } catch { /* the banner stays up; the loop retries every minute anyway */ } finally {
+      if (mounted.current) setRepairing(false);
+    }
+  }, [loadUsage]);
+
   const remove = useCallback(async (account: Account) => {
     setBusy(true);
     try {
@@ -582,6 +596,22 @@ export default function AccountsPanel() {
                   onRemove={() => remove(account)}
                 />
               ))}
+
+              {/* Divergence between the two stored copies of a token is repaired
+                  silently on a timer; this banner is only for the residue that
+                  needs a human, so it stays absent essentially always. */}
+              {snapshot.authIssue && (
+                <div className="mx-3 my-1.5 px-2 py-1.5 rounded border border-warning/40 bg-warning/10 text-[11px] text-warning leading-relaxed">
+                  <div>{maskEmails(snapshot.authIssue, masked)}</div>
+                  <button
+                    onClick={() => void repair()}
+                    disabled={repairing}
+                    className="mt-1 text-[11px] px-2 py-0.5 rounded border border-warning/50 text-warning hover:bg-warning/15 disabled:opacity-40"
+                  >
+                    {repairing ? 'Checking…' : 'Check again'}
+                  </button>
+                </div>
+              )}
 
               {error && (
                 <div className="mx-3 my-1.5 px-2 py-1.5 rounded border border-danger/40 bg-danger/10 text-[11px] text-danger leading-relaxed">

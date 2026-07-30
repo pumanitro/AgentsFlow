@@ -18,6 +18,7 @@ const api: AgentsFlowApi = {
   cancelAddAccount: (pendingId) => ipcRenderer.invoke('accounts:cancelAdd', pendingId),
   removeAccount: (id) => ipcRenderer.invoke('accounts:remove', id),
   switchAccount: (id) => ipcRenderer.invoke('accounts:switch', id),
+  repairAccounts: () => ipcRenderer.invoke('accounts:repair'),
   getAccountUsage: (id, force?: boolean) => ipcRenderer.invoke('accounts:usage', id, force),
   onAccountsUpdated: (cb) => {
     const listener = (_e: IpcRendererEvent, snapshot: AccountsSnapshot) => cb(snapshot);
