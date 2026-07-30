@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import dynamic from 'next/dynamic';
 import { api } from '../lib/ipc';
+import type { CSSProperties, ReactNode } from 'react';
 import type { Account, AccountsSnapshot, RotationPolicy, RotationStatus, UsageMeter, UsageResult } from '../../shared/types';
 
 const Terminal = dynamic(() => import('./Terminal'), { ssr: false });
@@ -27,6 +29,141 @@ const USAGE_REFRESH_MS = 60_000;
 // How often we ask whether the browser login has landed while the modal is open.
 const PROBE_MS = 2500;
 
+const HINT_WIDTH = 250;
+
+/**
+ * A `ⓘ` affordance for prose that is worth having but not worth three permanent
+ * lines of a narrow sidebar. Opens on hover, and a click pins it open so it can
+ * be read without keeping the pointer parked on the icon.
+ *
+ * The bubble renders into `document.body`: every ancestor here is either a
+ * clipping scroll container or `overflow-hidden`, so an in-flow popover would be
+ * cropped to a sliver.
+ */
+function InfoHint({ label, children }: { label: string; children: ReactNode }) {
+  const anchor = useRef<HTMLButtonElement>(null);
+  const bubble = useRef<HTMLDivElement>(null);
+  const [pinned, setPinned] = useState(false);
+  const [hovering, setHovering] = useState(false);
+  const [at, setAt] = useState<{ top: number; left: number } | null>(null);
+  const shown = pinned || hovering;
+
+  // The bubble sits a few pixels below the icon, so closing on `mouseleave`
+  // alone would slam it shut in the gap on the way to reading it.
+  const closeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const enter = useCallback(() => {
+    if (closeTimer.current) { clearTimeout(closeTimer.current); closeTimer.current = null; }
+    setHovering(true);
+  }, []);
+  const leave = useCallback(() => {
+    if (closeTimer.current) clearTimeout(closeTimer.current);
+    closeTimer.current = setTimeout(() => setHovering(false), 150);
+  }, []);
+  useEffect(() => () => { if (closeTimer.current) clearTimeout(closeTimer.current); }, []);
+
+  // The bubble lives on <body>, so it has to be told where its anchor ended up —
+  // and re-told whenever the sidebar scrolls out from under it.
+  useEffect(() => {
+    if (!shown) { setAt(null); return; }
+    const measure = () => {
+      const r = anchor.current?.getBoundingClientRect();
+      if (!r) return;
+      setAt({
+        top: r.bottom + 6,
+        left: Math.max(8, Math.min(r.left - 4, window.innerWidth - HINT_WIDTH - 8)),
+      });
+    };
+    measure();
+    // `true` so it also follows scrolling of the panel itself, not just the window.
+    window.addEventListener('scroll', measure, true);
+    window.addEventListener('resize', measure);
+    return () => {
+      window.removeEventListener('scroll', measure, true);
+      window.removeEventListener('resize', measure);
+    };
+  }, [shown]);
+
+  // A pinned bubble is dismissed the two ways anything pinned should be:
+  // clicking away from it, or Escape.
+  useEffect(() => {
+    if (!pinned) return;
+    const onDown = (e: MouseEvent) => {
+      const t = e.target as Node;
+      if (anchor.current?.contains(t) || bubble.current?.contains(t)) return;
+      setPinned(false);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') { e.stopPropagation(); setPinned(false); }
+    };
+    window.addEventListener('mousedown', onDown, true);
+    window.addEventListener('keydown', onKey, true);
+    return () => {
+      window.removeEventListener('mousedown', onDown, true);
+      window.removeEventListener('keydown', onKey, true);
+    };
+  }, [pinned]);
+
+  return (
+    <>
+      <button
+        ref={anchor}
+        type="button"
+        onClick={(e) => { e.preventDefault(); setPinned((p) => !p); }}
+        onMouseEnter={enter}
+        onMouseLeave={leave}
+        onFocus={enter}
+        onBlur={leave}
+        aria-label={label}
+        aria-expanded={shown}
+        className={`shrink-0 w-3.5 h-3.5 rounded-full border text-[9px] leading-none flex items-center justify-center ${
+          shown ? 'border-info text-info' : 'border-subtle text-subtle hover:border-info hover:text-info'
+        }`}
+      >
+        i
+      </button>
+      {shown && at && typeof document !== 'undefined' && createPortal(
+        <div
+          ref={bubble}
+          role="tooltip"
+          // Hovering the bubble itself counts as hovering the hint, so reading
+          // it (or selecting its text) does not dismiss it mid-sentence.
+          onMouseEnter={enter}
+          onMouseLeave={leave}
+          className="fixed z-[60] rounded-md border border-border bg-panel2 px-2.5 py-2 text-[10px] text-text leading-relaxed shadow-lg shadow-black/40"
+          style={{ top: at.top, left: at.left, width: HINT_WIDTH }}
+        >
+          {children}
+        </div>,
+        document.body,
+      )}
+    </>
+  );
+}
+
+// Blur, not redaction: the layout stays byte-for-byte identical, so toggling it
+// never reflows the panel out from under you.
+const MASK: CSSProperties = { filter: 'blur(4.5px)' };
+
+const EMAIL_RE = /[^\s@]+@[^\s@]+\.[^\s@,;)]+/g;
+
+/**
+ * Blurs any address inside a sentence, so status lines can go on naming the
+ * account they switched to without putting it on screen.
+ */
+function maskEmails(text: string, masked: boolean): ReactNode {
+  if (!masked || !text.includes('@')) return text;
+  const out: ReactNode[] = [];
+  let last = 0;
+  for (const m of text.matchAll(EMAIL_RE)) {
+    const i = m.index ?? 0;
+    if (i > last) out.push(text.slice(last, i));
+    out.push(<span key={i} style={MASK} className="select-none">{m[0]}</span>);
+    last = i + m[0].length;
+  }
+  out.push(text.slice(last));
+  return out;
+}
+
 const SEVERITY_COLOR: Record<UsageMeter['severity'], string> = {
   normal: '#3b82f6',
   warning: '#fbbf24',
@@ -46,6 +183,7 @@ function AccountRow({
   active,
   usage,
   busy,
+  masked,
   onSwitch,
   onRemove,
 }: {
@@ -53,6 +191,7 @@ function AccountRow({
   active: boolean;
   usage: UsageResult | undefined;
   busy: boolean;
+  masked: boolean;
   onSwitch: () => void;
   onRemove: () => void;
 }) {
@@ -68,10 +207,15 @@ function AccountRow({
         onClick={onSwitch}
         disabled={active || busy}
         className="flex-1 min-w-0 text-left disabled:cursor-default"
-        title={active ? 'This account is signed in' : `Switch to ${account.email}`}
+        // Hover tooltips are a leak of their own: with emails hidden, they say
+        // what the button does without saying whose account it is.
+        title={active ? 'This account is signed in' : masked ? 'Switch to this account' : `Switch to ${account.email}`}
       >
         <div className="flex items-baseline gap-1.5">
-          <span className={`text-[12px] truncate ${active ? 'text-text font-semibold' : 'text-text'}`}>
+          <span
+            className={`text-[12px] truncate ${active ? 'text-text font-semibold' : 'text-text'} ${masked ? 'select-none' : ''}`}
+            style={masked ? MASK : undefined}
+          >
             {account.email}
           </span>
           {active && (
@@ -94,8 +238,8 @@ function AccountRow({
         onClick={onRemove}
         disabled={busy}
         className="shrink-0 opacity-0 group-hover:opacity-100 text-subtle hover:text-danger px-1 rounded disabled:opacity-30"
-        title={`Remove ${account.email} from the pool`}
-        aria-label={`Remove ${account.email}`}
+        title={masked ? 'Remove this account from the pool' : `Remove ${account.email} from the pool`}
+        aria-label={masked ? 'Remove this account' : `Remove ${account.email}`}
       >
         ✕
       </button>
@@ -244,6 +388,10 @@ function AddAccountModal({
 
 export default function AccountsPanel() {
   const [open, setOpen] = usePersistedBool('agentsflow:accounts:open', true);
+  // Screen-sharing privacy: the pool is a list of the user's personal Gmail
+  // addresses sitting permanently in the sidebar. Persisted, so it stays hidden
+  // across restarts once you have decided you want it hidden.
+  const [masked, setMasked] = usePersistedBool('agentsflow:accounts:maskEmails', false);
   const [snapshot, setSnapshot] = useState<AccountsSnapshot>({ accounts: [], activeId: null });
   const [usageById, setUsageById] = useState<Record<string, UsageResult>>({});
   const [adding, setAdding] = useState(false);
@@ -376,10 +524,36 @@ export default function AccountsPanel() {
         >
           <span className="text-muted text-[10px] w-3 shrink-0">{open ? '▼' : '▶'}</span>
           <span className="text-[11px] uppercase tracking-wider text-text font-semibold">Accounts</span>
-          <span className="text-[10px] text-muted truncate">
+          <span
+            className={`text-[10px] text-muted truncate ${masked && activeAccount ? 'select-none' : ''}`}
+            style={masked && activeAccount ? MASK : undefined}
+          >
             {activeAccount ? activeAccount.email : snapshot.accounts.length === 0 ? 'none yet' : 'current login'}
           </span>
         </button>
+        {snapshot.accounts.length > 0 && (
+          <button
+            onClick={() => setMasked(!masked)}
+            className={`shrink-0 p-0.5 rounded ${masked ? 'text-info' : 'text-subtle hover:text-text'}`}
+            title={masked ? 'Show email addresses' : 'Hide email addresses (for screen sharing)'}
+            aria-label={masked ? 'Show email addresses' : 'Hide email addresses'}
+            aria-pressed={masked}
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              {masked ? (
+                <>
+                  <path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24" />
+                  <line x1="1" y1="1" x2="23" y2="23" />
+                </>
+              ) : (
+                <>
+                  <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" />
+                  <circle cx="12" cy="12" r="3" />
+                </>
+              )}
+            </svg>
+          </button>
+        )}
       </div>
 
       {open && (
@@ -403,6 +577,7 @@ export default function AccountsPanel() {
                   active={account.id === snapshot.activeId}
                   usage={usageById[account.id]}
                   busy={busy}
+                  masked={masked}
                   onSwitch={() => switchTo(account.id)}
                   onRemove={() => remove(account)}
                 />
@@ -410,7 +585,7 @@ export default function AccountsPanel() {
 
               {error && (
                 <div className="mx-3 my-1.5 px-2 py-1.5 rounded border border-danger/40 bg-danger/10 text-[11px] text-danger leading-relaxed">
-                  {error}
+                  {maskEmails(error, masked)}
                 </div>
               )}
 
@@ -425,7 +600,10 @@ export default function AccountsPanel() {
                       onChange={(e) => void savePolicy({ ...policy, enabled: e.target.checked })}
                       className="accent-info"
                     />
-                    <span className="text-[11px] text-text">Switch automatically at</span>
+                    {/* The label is the only part allowed to give up room: a
+                        narrow sidebar should clip the sentence, not shove the
+                        threshold or the ⓘ off the edge. */}
+                    <span className="text-[11px] text-text min-w-0 truncate">Switch automatically at</span>
                     <input
                       type="number"
                       min={50}
@@ -435,19 +613,34 @@ export default function AccountsPanel() {
                         const n = Number(e.target.value);
                         if (Number.isFinite(n)) void savePolicy({ ...policy, threshold: n });
                       }}
-                      className="w-11 bg-panel2 border border-border rounded px-1 py-0.5 text-[11px] text-text text-right focus:outline-none focus:border-info"
+                      className="shrink-0 w-11 bg-panel2 border border-border rounded px-1 py-0.5 text-[11px] text-text text-right focus:outline-none focus:border-info"
                     />
-                    <span className="text-[11px] text-muted">%</span>
+                    <span className="shrink-0 text-[11px] text-muted">%</span>
+                    {/* The explainer is one-time knowledge, so it lives behind
+                        the ⓘ rather than costing three lines of sidebar forever. */}
+                    <span className="ml-auto flex items-center" onClick={(e) => e.preventDefault()}>
+                      <InfoHint label="About automatic switching">
+                        Runs in the background even with the window closed, so an overnight run rolls
+                        onto a fresh account instead of hitting the wall.
+                      </InfoHint>
+                    </span>
                   </label>
-                  <p className="mt-1 text-[10px] text-subtle leading-relaxed">
-                    Runs in the background even with the window closed, so an overnight run rolls
-                    onto a fresh account instead of hitting the wall.
-                  </p>
                   {rotationStatus?.disabledReason && (
-                    <p className="mt-1 text-[10px] text-danger leading-relaxed">{rotationStatus.disabledReason}</p>
+                    <p className="mt-1 text-[10px] text-danger leading-relaxed">
+                      {maskEmails(rotationStatus.disabledReason, masked)}
+                    </p>
                   )}
+                  {/* The whole line goes behind the eye, not just the address in
+                      it: "switched to X at 96%" is a readout of the account and
+                      its headroom, which is the thing you are hiding. */}
                   {!rotationStatus?.disabledReason && rotationStatus?.lastEvent && (
-                    <p className="mt-1 text-[10px] text-muted leading-relaxed">{rotationStatus.lastEvent}</p>
+                    <p
+                      className={`mt-1 text-[10px] text-muted leading-relaxed ${masked ? 'select-none' : ''}`}
+                      style={masked ? MASK : undefined}
+                      title={masked ? 'Hidden — use the eye icon to show' : undefined}
+                    >
+                      {rotationStatus.lastEvent}
+                    </p>
                   )}
                 </div>
               )}

@@ -1,6 +1,6 @@
 # Peers Flow
 
-![Peers Flow — pinned conversations with a delegated peer nested under its root, and tracked peers below](./assets/screenshots/peers-flow.png)
+![Peers Flow — tracked peers, a rotating account pool with live plan-usage meters, and pinned conversations grouped under separators](./assets/screenshots/peers-flow.png)
 
 Electron + Next.js desktop UI for **Claude Code's background agents** — track the sessions this app launches, treat them like a to-do list, inspect each one's working tree without leaving the window, and let your agents **delegate work to one another across directories**.
 
@@ -27,6 +27,7 @@ Built to scratch four specific itches working with Claude Code day-to-day:
   - **Files** — full project tree, with the same git colors layered on, ignored files & dirs faded
   - Expand/collapse state is persisted per conversation.
 - **Image paste** — paste an image into the spawn input; it's saved to `<dir>/.agentsflow/images/` and the absolute path is appended to the prompt so Claude can `Read` it. Auto-cleaned when the conversation is removed (and orphan-swept on startup).
+- **Account pool + usage meters** — the sidebar shows live plan usage (session / weekly / per-model) and the Gmail accounts you rotate between, each with its own headroom. Switching is one click and never reopens a browser; **Switch automatically at N%** rolls an overnight run onto a fresh account instead of letting it hit the 5-hour wall. The 👁 toggle blurs every address in the panel for screen sharing.
 - **Help modal** — `ⓘ` button in the top right lists all shortcuts and shows the app version.
 
 ## Requirements

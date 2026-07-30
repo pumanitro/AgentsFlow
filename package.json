@@ -1,6 +1,6 @@
 {
   "name": "agentsflow",
-  "version": "8.0.0",
+  "version": "9.0.0",
   "private": true,
   "description": "Peers Flow — Electron + Next.js desktop UI for Claude Code background agents, with cross-directory peer delegation",
   "main": "dist/electron/electron/main.js",
