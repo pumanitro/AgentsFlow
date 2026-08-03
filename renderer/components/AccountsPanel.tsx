@@ -388,7 +388,7 @@ function AddAccountModal({
 
 export default function AccountsPanel() {
   const [open, setOpen] = usePersistedBool('agentsflow:accounts:open', true);
-  // Screen-sharing privacy: the pool is a list of the user's personal Gmail
+  // Screen-sharing privacy: the pool is a list of the user's personal and work
   // addresses sitting permanently in the sidebar. Persisted, so it stays hidden
   // across restarts once you have decided you want it hidden.
   const [masked, setMasked] = usePersistedBool('agentsflow:accounts:maskEmails', false);
@@ -580,8 +580,8 @@ export default function AccountsPanel() {
             <div className="flex flex-col">
               {snapshot.accounts.length === 0 && (
                 <div className="px-3 py-2 text-[11px] text-muted leading-relaxed">
-                  Add the Gmail accounts you want to rotate between. Each signs in once; switching
-                  after that never opens a browser.
+                  Add the accounts you want to rotate between — personal or work domain. Each signs
+                  in once; switching after that never opens a browser.
                 </div>
               )}
               {snapshot.accounts.map((account) => (
@@ -686,7 +686,7 @@ export default function AccountsPanel() {
                         if (e.key === 'Enter') void startAdd();
                         if (e.key === 'Escape') { setAdding(false); setError(null); }
                       }}
-                      placeholder="you@gmail.com"
+                      placeholder="you@gmail.com or you@company.com"
                       className="flex-1 min-w-0 bg-panel2 border border-border rounded px-2 py-1 text-[12px] text-text placeholder:text-subtle focus:outline-none focus:border-info"
                     />
                     <button
@@ -702,7 +702,7 @@ export default function AccountsPanel() {
                     onClick={() => { setAdding(true); setError(null); }}
                     className="w-full text-left text-[11px] text-muted hover:text-text py-0.5"
                   >
-                    + Add Gmail account
+                    + Add account
                   </button>
                 )}
               </div>

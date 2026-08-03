@@ -499,8 +499,8 @@ ipcMain.handle('accounts:list', () => accountsSnapshot());
 
 ipcMain.handle('accounts:add', (_e, email: string): AddAccountResult => {
   const trimmed = (email ?? '').trim();
-  if (!accounts.isGmail(trimmed)) {
-    return { ok: false, error: 'Enter a Gmail address (…@gmail.com).' };
+  if (!accounts.isEmailAddress(trimmed)) {
+    return { ok: false, error: 'Enter an email address (…@gmail.com, or your work domain).' };
   }
   const existing = store.getAccounts();
   if (existing.some((a) => a.email.toLowerCase() === trimmed.toLowerCase())) {

@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import * as crypto from 'crypto';
 import {
   evaluateLogin,
-  isGmail,
+  isEmailAddress,
   mergeOAuthAccount,
   mergeOAuthInto,
   newerCreds,
@@ -98,17 +98,21 @@ test('mergeOAuthAccount: a vault with no identity leaves the file untouched', ()
 });
 
 // ---------------------------------------------------------------------------
-// Gmail enforcement + vault naming
+// Address validation + vault naming
 // ---------------------------------------------------------------------------
 
-test('isGmail: accepts gmail/googlemail, rejects everything else', () => {
-  assert.ok(isGmail('someone@gmail.com'));
-  assert.ok(isGmail('Someone.Else+tag@googlemail.com'));
-  assert.ok(isGmail('  padded@gmail.com  '));
-  assert.equal(isGmail('someone@anthropic.com'), false);
-  assert.equal(isGmail('someone@gmail.com.evil.co'), false);
-  assert.equal(isGmail('not-an-email'), false);
-  assert.equal(isGmail(''), false);
+test('isEmailAddress: accepts any real domain, rejects malformed input', () => {
+  assert.ok(isEmailAddress('someone@gmail.com'));
+  assert.ok(isEmailAddress('Someone.Else+tag@googlemail.com'));
+  assert.ok(isEmailAddress('  padded@gmail.com  '));
+  // Google Workspace and other custom domains — the case this replaced.
+  assert.ok(isEmailAddress('patryk.janik@abilitie.com'));
+  assert.ok(isEmailAddress('first.last@mail.corp.co.uk'));
+  assert.equal(isEmailAddress('not-an-email'), false);
+  assert.equal(isEmailAddress('someone@localhost'), false);
+  assert.equal(isEmailAddress('someone@company.'), false);
+  assert.equal(isEmailAddress('two words@company.com'), false);
+  assert.equal(isEmailAddress(''), false);
 });
 
 test('slugForEmail: stable, filesystem-safe, and distinct per address', () => {

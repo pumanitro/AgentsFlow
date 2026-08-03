@@ -354,11 +354,15 @@ export function vaultRoot(): string {
   return path.join(os.homedir(), '.agentsflow', 'accounts');
 }
 
-const GMAIL_RE = /^[a-zA-Z0-9._%+-]+@(gmail\.com|googlemail\.com)$/i;
+// Any real address, not just gmail.com: a Google Workspace account signs in
+// through the same Google flow but carries its own domain, and Anthropic logins
+// are not Google-bound anyway. Shape-check only — whether the address can
+// actually authorise is settled by the login itself, not by a regex.
+const EMAIL_RE = /^[a-zA-Z0-9._%+'-]+@(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$/;
 
-/** Gmail-only, as requested — checked before anything is created. */
-export function isGmail(email: string): boolean {
-  return GMAIL_RE.test(email.trim());
+/** Address shape, checked before anything is created. */
+export function isEmailAddress(email: string): boolean {
+  return EMAIL_RE.test(email.trim());
 }
 
 /** Filesystem-safe, collision-resistant vault directory name for an address. */

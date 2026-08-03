@@ -225,13 +225,14 @@ export type UsageResult =
 // so `configDir` is permanent: moving it orphans that account's credentials.
 export interface Account {
   id: string;
-  // The Gmail address this account signs in with. Also its label in the UI and
-  // the value verified against `claude auth status` after login.
+  // The address this account signs in with — any domain, Google Workspace
+  // included. Also its label in the UI and the value verified against
+  // `claude auth status` after login.
   email: string;
   // Vault path passed as CLAUDE_CONFIG_DIR. Permanent — see above.
   configDir: string;
   // Identity as reported by the CLI after a successful login. `accountUuid` is
-  // what makes the duplicate guard reliable (two Gmail labels, one real account).
+  // what makes the duplicate guard reliable (two labels, one real account).
   accountUuid?: string;
   orgId?: string;
   // 'max' | 'pro' | … straight from `claude auth status --json`.
@@ -319,8 +320,8 @@ export interface AgentsFlowApi {
   // credentials sit in the keychain slot Claude Code reads — no browser, no
   // login: sessions already running pick it up on their next keychain read.
   listAccounts: () => Promise<AccountsSnapshot>;
-  // Starts an add for a Gmail address. Rejects non-Gmail and addresses already
-  // in the pool without touching anything.
+  // Starts an add for an email address. Rejects malformed addresses and ones
+  // already in the pool without touching anything.
   addAccount: (email: string) => Promise<AddAccountResult>;
   // Polled while the login terminal is open; finalises the account once the
   // browser flow lands, or tears the vault down if it authorised the wrong one.
