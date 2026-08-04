@@ -6,6 +6,7 @@ import { execFile, execFileSync } from 'child_process';
 import { promisify } from 'util';
 import type { IPty } from 'node-pty';
 import { withUtf8Locale } from './locale';
+import { buildResumeArgs, redactResumeArgs } from './resume-args';
 
 const execFileAsync = promisify(execFile);
 
@@ -324,6 +325,10 @@ export async function attach(opts: {
   // pre-assigned `sessionId`. Forking sidesteps the CLI's residency guard —
   // it works even when `forkFrom` is held by a live (or crash-looping) daemon.
   forkFrom?: string;
+  // Peer awareness (resume/fork only — see attachResume). Ignored in 'attach'
+  // mode, where the daemon already carries what it was spawned with.
+  mcpConfigPath?: string;
+  appendSystemPrompt?: string;
 }): Promise<string> {
   startPtyReaper();
   const mode = opts.mode ?? 'attach';
@@ -395,18 +400,15 @@ async function attachResume(opts: {
   win: BrowserWindow;
   cwd?: string;
   forkFrom?: string;
+  mcpConfigPath?: string;
+  appendSystemPrompt?: string;
 }): Promise<string> {
   let sess = resumeSessions.get(opts.sessionId);
 
   if (!sess) {
-    // Match dispatchBackground: resumed sessions don't inherit the original
-    // session's permission mode, so re-assert bypassPermissions explicitly or
-    // the user lands back in the default/auto mode after detach + reattach.
-    const args = opts.forkFrom
-      ? ['--resume', opts.forkFrom, '--fork-session', '--session-id', opts.sessionId, '--permission-mode', 'bypassPermissions']
-      : ['--resume', opts.sessionId, '--permission-mode', 'bypassPermissions'];
+    const args = buildResumeArgs(opts);
     const cwd = opts.cwd || os.homedir();
-    console.log('[agentsflow][pty] spawning resume', { bin: CLAUDE_BIN, args, cwd, cols: opts.cols, rows: opts.rows });
+    console.log('[agentsflow][pty] spawning resume', { bin: CLAUDE_BIN, args: redactResumeArgs(args), cwd, cols: opts.cols, rows: opts.rows });
     if (!(await ensurePtyCapacity(opts.win, opts.channelId, 'resume'))) return '';
     let pty: IPty;
     try {

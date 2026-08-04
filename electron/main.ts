@@ -1132,6 +1132,33 @@ function transcriptExists(cwd: string, sessionId: string): boolean {
   return transcriptExistsUnder(projectsRoot(), cwd, sessionId);
 }
 
+/**
+ * The peer-awareness flags a session needs when it is (re)started *in this
+ * process* — `claude --resume` / `--fork-session`.
+ *
+ * `--mcp-config` and `--append-system-prompt` are per-INVOCATION flags. A
+ * resume boots a brand-new CLI that reconstructs its system prompt and MCP set
+ * from the current command line, NOT from the transcript, so a resume that
+ * omits them silently drops the whole `peersflow` server: no `open_file`, no
+ * `delegate`, no `list_peers`, and no peer registry in the system prompt. The
+ * chat looks identical, which is why this went unnoticed — the session simply
+ * stops believing Peers Flow can open a file and falls back to `open -a`.
+ *
+ * `claude attach` needs none of this: there the daemon is still the original
+ * spawn and carries the config it was given.
+ */
+function resumePeerAwareness(conv: Conversation): { mcpConfigPath?: string; appendSystemPrompt?: string } {
+  try {
+    return {
+      mcpConfigPath: writeMcpConfigForConversation(conv.id, conv.directoryPath),
+      appendSystemPrompt: buildBootstrapSystemPrompt(store.getDirectories()),
+    };
+  } catch (err) {
+    console.error('[agentsflow] MCP bootstrap failed — resuming without peer awareness', err);
+    return {};
+  }
+}
+
 ipcMain.handle('term:attach', async (_e, conversationId: string, cols: number, rows: number) => {
   console.log('[agentsflow] term:attach received', { conversationId, cols, rows });
   const conv = store.getConversations().find((c) => c.id === conversationId);
@@ -1170,7 +1197,11 @@ ipcMain.handle('term:attach', async (_e, conversationId: string, cols: number, r
   // "never materialized" would re-fork the source over the top of it.
   if (conv.forkFromSessionId && !transcriptExists(conv.directoryPath, conv.sessionId)) {
     console.log('[agentsflow] forking session on first attach', { forkFrom: conv.forkFromSessionId, sessionId: conv.sessionId, channelId });
-    const replay = await pty.attach({ channelId, sessionId: conv.sessionId, cols, rows, win, mode: 'resume', cwd: conv.directoryPath, forkFrom: conv.forkFromSessionId });
+    const replay = await pty.attach({
+      channelId, sessionId: conv.sessionId, cols, rows, win,
+      mode: 'resume', cwd: conv.directoryPath, forkFrom: conv.forkFromSessionId,
+      ...resumePeerAwareness(conv),
+    });
     return { channelId, replay };
   }
 
@@ -1207,7 +1238,11 @@ ipcMain.handle('term:attach', async (_e, conversationId: string, cols: number, r
     replay = await pty.attach({ channelId, sessionId: attachId, cols, rows, win, mode: 'attach' });
   } else {
     console.log('[agentsflow] using --resume', { sessionId: conv.sessionId, cwd: conv.directoryPath, channelId, live, state: conv.state });
-    replay = await pty.attach({ channelId, sessionId: conv.sessionId, cols, rows, win, mode: 'resume', cwd: conv.directoryPath });
+    replay = await pty.attach({
+      channelId, sessionId: conv.sessionId, cols, rows, win,
+      mode: 'resume', cwd: conv.directoryPath,
+      ...resumePeerAwareness(conv),
+    });
   }
   return { channelId, replay };
 });

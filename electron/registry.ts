@@ -279,7 +279,10 @@ export function renderBootstrapPrompt(reg: Registry): string {
   );
   lines.push("- Prefer delegating over reaching into another peer's files directly.");
   lines.push(
-    `- Call \`${qualifiedToolName('open_file')}\` when the user asks you to open / show / display a file in Peers Flow — it brings the file up in the app's file view. Defaults to the peer you're rooted in; pass \`directory\` to target another peer.`,
+    `- Call \`${qualifiedToolName('open_file')}\` when the user asks you to open / show / pull up / display a file — Peers Flow IS the IDE you are running inside, and this is how you open a file in it. It brings the file up in the app's file view. Defaults to the peer you're rooted in; pass \`directory\` to target another peer, and \`line\` to land on a specific line.`,
+  );
+  lines.push(
+    `- Never shell out to \`open -a "Peers Flow" <path>\` for this. That only raises the app window; it does not open the file. \`${qualifiedToolName('open_file')}\` is the only thing that does.`,
   );
   lines.push(
     '- Right BEFORE each `delegate` call, post one short line to the chat stating (a) which peer you are asking and (b) the concrete goal you are handing it — paraphrase the actual `goal` you pass, including the key specifics (what to fetch/do and any names, channels, or constraints). The host shows the call only as "Calling peersflow…", so this line is what gives the user the context of what is being delegated and why.',
