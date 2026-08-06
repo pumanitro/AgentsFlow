@@ -198,8 +198,24 @@ export default function FileTreeSidebar({ dirPath, conversationId, worktreePath,
     return () => window.removeEventListener('keydown', onKey);
   }, []);
 
+  // A worktree scan is NOT the same weight as a git status. Status is one git
+  // spawn against one directory; the scan runs `git status` against EVERY
+  // worktree in the repo (22 of them on a repo like atlas-of-doors) plus a few
+  // ref lookups — ~25 processes, ~0.4-1.5 s. Driving both off the same
+  // file-watcher burst meant a peer with agents writing continuously kept a
+  // permanent git storm running against the very repo those agents were in.
+  //
+  // So they refresh on different clocks: status follows the watcher (it is what
+  // changes, and what the tree renders), while the worktree *list* — which
+  // branch each tree is on, how far ahead it is — moves on human timescales and
+  // refreshes at most this often from the watcher path. An explicit change (peer,
+  // mode, reference branch) still refetches immediately, as does the 30 s
+  // heartbeat, so nothing is ever more than half a minute stale.
+  const WT_MIN_INTERVAL_MS = 15_000;
+  const lastWtFetch = useRef(0);
+
   const refresh = useMemo(
-    () => async () => {
+    () => async (opts: { worktrees?: 'auto' | 'force' } = {}) => {
       setLoading(true);
       try {
         const a = api();
@@ -213,7 +229,9 @@ export default function FileTreeSidebar({ dirPath, conversationId, worktreePath,
         }
         // Worktree overview is Changes-mode only. Silently skipped on an older
         // preload that predates the handler.
-        if (mode === 'changes' && typeof a.listWorktrees === 'function') {
+        const wtDue = opts.worktrees === 'force' || Date.now() - lastWtFetch.current >= WT_MIN_INTERVAL_MS;
+        if (mode === 'changes' && wtDue && typeof a.listWorktrees === 'function') {
+          lastWtFetch.current = Date.now();
           try {
             const wts = await a.listWorktrees(dirPath, refBranch ?? undefined);
             setWorktrees((prev) => (worktreesEqual(prev, wts) ? prev : wts));
@@ -237,7 +255,9 @@ export default function FileTreeSidebar({ dirPath, conversationId, worktreePath,
     [mode, dirPath, activeDir, refBranch],
   );
 
-  useEffect(() => { refresh(); }, [refresh]);
+  // The inputs genuinely changed (peer, mode, selected worktree, reference
+  // branch), so the worktree list has to be refetched regardless of its clock.
+  useEffect(() => { refresh({ worktrees: 'force' }); }, [refresh]);
 
   // Branch list backs the reference picker only, so it is fetched when that
   // opens rather than on every sidebar refresh.
@@ -293,7 +313,18 @@ export default function FileTreeSidebar({ dirPath, conversationId, worktreePath,
   const refreshRef = useRef(refresh);
   useEffect(() => { refreshRef.current = refresh; }, [refresh]);
   const refreshTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Set while the window is hidden and a watcher event was dropped, so becoming
+  // visible again reconciles immediately instead of waiting for the heartbeat.
+  const missedWhileHidden = useRef(false);
   const scheduleRefresh = useCallback((delayMs = 120) => {
+    // Nobody is looking at this pane — the user is in another app or on another
+    // Space. Spawning git for a tree no one can see is exactly the load that
+    // makes the machine slow for the agents that ARE doing work, and the poller
+    // already backs off on the same signal (setPollerForeground). Defer it.
+    if (typeof document !== 'undefined' && document.hidden) {
+      missedWhileHidden.current = true;
+      return;
+    }
     if (refreshTimer.current) clearTimeout(refreshTimer.current);
     refreshTimer.current = setTimeout(() => {
       refreshTimer.current = null;
@@ -301,6 +332,18 @@ export default function FileTreeSidebar({ dirPath, conversationId, worktreePath,
     }, delayMs);
   }, []);
   useEffect(() => () => { if (refreshTimer.current) clearTimeout(refreshTimer.current); }, []);
+
+  // Coming back to the pane: reconcile whatever was skipped while it was hidden.
+  useEffect(() => {
+    if (typeof document === 'undefined') return;
+    const onVisible = () => {
+      if (document.hidden || !missedWhileHidden.current) return;
+      missedWhileHidden.current = false;
+      refreshRef.current({ worktrees: 'force' });
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => document.removeEventListener('visibilitychange', onVisible);
+  }, []);
 
   // Push-based refresh: subscribe to filesystem events for this directory.
   // Replaces the old 4 s polling interval — updates fire ~150 ms after the
@@ -331,7 +374,10 @@ export default function FileTreeSidebar({ dirPath, conversationId, worktreePath,
   // volumes (SMB, NFS, some sync clients). A 30 s tick guarantees we
   // reconcile even when the watcher misses something.
   useEffect(() => {
-    const t = setInterval(() => { refresh(); }, 30_000);
+    const t = setInterval(() => {
+      if (typeof document !== 'undefined' && document.hidden) return;
+      refresh({ worktrees: 'force' });
+    }, 30_000);
     return () => clearInterval(t);
   }, [refresh]);
 
@@ -890,7 +936,7 @@ export default function FileTreeSidebar({ dirPath, conversationId, worktreePath,
           )}
         </button>
         <button
-          onClick={refresh}
+          onClick={() => { void refresh({ worktrees: 'force' }); }}
           className="text-muted hover:text-text px-1.5 py-1 rounded hover:bg-panel2"
           title="Refresh"
         >{loading ? '…' : '↻'}</button>

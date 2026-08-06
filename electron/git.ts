@@ -526,14 +526,23 @@ export async function listBranches(cwd: string): Promise<BranchList> {
   return { local: localOrdered, remote };
 }
 
-// ~2 s TTL + in-flight coalescing keyed on the requested dir *and* the
-// reference branch. The Changes sidebar refetches on every file-watcher burst;
-// without this a repo with several worktrees would fan a burst out into
+// TTL + in-flight coalescing keyed on the requested dir *and* the reference
+// branch. The Changes sidebar refetches on every file-watcher burst; without
+// this a repo with several worktrees would fan a burst out into
 // (worktrees × git) spawns. The file-watcher clears this alongside the
 // repo-meta cache on ref/index changes.
+//
+// The TTL was 2 s, which on a repo being worked by a fleet of agents was
+// indistinguishable from no cache at all: measured 137 scans in 5 minutes — one
+// every 2.19 s, i.e. the TTL expired between every pair of requests, forever.
+// Each scan is ~25 git spawns on a 22-worktree repo (avg 425 ms, peak 1.5 s),
+// so the app was permanently running a git storm against the same repo its
+// agents were trying to work in. 15 s still refreshes the panel faster than a
+// human notices, and the *content* of a worktree row (its changed-file count)
+// comes from the git status the sidebar fetches separately on every burst.
 interface WorktreesCacheEntry { at: number; promise: Promise<WorktreeInfo[]> }
 const _worktreesCache = new Map<string, WorktreesCacheEntry>();
-const WORKTREES_TTL_MS = 2_000;
+const WORKTREES_TTL_MS = Number(process.env.AGENTSFLOW_WORKTREES_TTL_MS) || 15_000;
 
 export function listWorktrees(cwd: string, refBranch?: string): Promise<WorktreeInfo[]> {
   const key = `${cwd}\u0000${refBranch ?? ''}`;

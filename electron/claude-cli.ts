@@ -109,8 +109,24 @@ let _inFlightListAgents: Promise<ListAgentsResult> | null = null;
 // delegation-poll cadence, so neither of those paths ever rides a stale result
 // in steady state — only genuine sub-window bursts coalesce. Failures are never
 // cached, so a transient CLI choke is always re-attempted immediately.
+//
+// The 750 ms floor is calibrated for a healthy machine, where the call costs
+// ~350 ms. Under a large fleet the same call has been measured at 3-18 s, and a
+// freshness window an order of magnitude shorter than the operation it guards
+// stops coalescing anything: callers a second apart each launch another spawn,
+// and each extra spawn makes all the others slower still. So the window also
+// tracks the last observed duration — never re-spawn more often than the call
+// itself takes to return. The poll cadence backs off to several times that
+// duration (see adaptiveFastTickMs in poller.ts), so no polling path ever ends
+// up riding a cached result in steady state.
 const LIST_AGENTS_FRESH_MS = Number(process.env.AGENTSFLOW_LIST_AGENTS_FRESH_MS) || 750;
+const LIST_AGENTS_FRESH_MAX_MS = 20_000;
 let _lastListAgents: { at: number; result: ListAgentsResult } | null = null;
+let _lastListAgentsMs = 0;
+
+function listAgentsFreshWindowMs(): number {
+  return Math.min(LIST_AGENTS_FRESH_MAX_MS, Math.max(LIST_AGENTS_FRESH_MS, _lastListAgentsMs));
+}
 
 /**
  * Some Electron environments truncate the streamed stdout from `claude agents --json`
@@ -127,11 +143,13 @@ let _lastListAgents: { at: number; result: ListAgentsResult } | null = null;
 export function listAgentsResult(): Promise<ListAgentsResult> {
   if (_inFlightListAgents) return _inFlightListAgents;
   const cached = _lastListAgents;
-  if (cached && cached.result.ok && Date.now() - cached.at < LIST_AGENTS_FRESH_MS) {
+  if (cached && cached.result.ok && Date.now() - cached.at < listAgentsFreshWindowMs()) {
     return Promise.resolve(cached.result);
   }
+  const startedAt = Date.now();
   _inFlightListAgents = runListAgentsOnce()
     .then((result) => {
+      _lastListAgentsMs = Date.now() - startedAt;
       // Only remember successful listings; a failed call must not suppress the
       // next real attempt (the poller relies on fresh failures to avoid mutating
       // state on a transient CLI choke).

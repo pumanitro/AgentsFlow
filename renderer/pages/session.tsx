@@ -192,13 +192,31 @@ export default function SessionPage() {
     // New conversation in view → clear any prior "chat ended" notice so the
     // fresh terminal mounts instead of showing the stale Reopen panel.
     setChatExited(false);
+    const a = api();
     const apply = (cs: Conversation[]) => {
       setConv(cs.find((c) => c.id === id) ?? null);
       setChildren(cs.filter((c) => c.delegatedByConversationId === id));
     };
-    api().listConversations().then(apply);
-    const off = api().onConversationsUpdated(apply);
-    return off;
+    a.listConversations().then(apply);
+    const off = a.onConversationsUpdated(apply);
+    // Patches carry only the changed rows; this view cares about exactly two
+    // things — this conversation and its delegated children — so it can pick
+    // them straight out of the patch instead of re-scanning all of history.
+    const offPatch = a.onConversationsPatched?.((changed) => {
+      for (const c of changed) {
+        if (c.id === id) setConv(c);
+        if (c.delegatedByConversationId === id) {
+          setChildren((prev) => {
+            const idx = prev.findIndex((x) => x.id === c.id);
+            if (idx === -1) return [...prev, c];
+            const next = prev.slice();
+            next[idx] = c;
+            return next;
+          });
+        }
+      }
+    }) ?? (() => undefined);
+    return () => { off(); offPatch(); };
   }, [id]);
 
   const goBack = useCallback(() => {

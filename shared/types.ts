@@ -366,6 +366,13 @@ export interface AgentsFlowApi {
   onTerminalExit: (cb: (channelId: string) => void) => () => void;
 
   onConversationsUpdated: (cb: (conversations: Conversation[]) => void) => () => void;
+  /**
+   * Incremental counterpart to `onConversationsUpdated`: carries ONLY the
+   * conversations whose fields changed, which is what a daemon state change
+   * actually amounts to. The full list is reserved for structural changes
+   * (added / removed). Optional so an older preload degrades to full pushes.
+   */
+  onConversationsPatched?: (cb: (changed: Conversation[]) => void) => () => void;
 
   // Fired when something (e.g. the `open_file` MCP tool) asks the app to bring a
   // file up in its file view. The renderer responds by navigating to that

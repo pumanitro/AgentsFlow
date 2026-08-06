@@ -261,9 +261,19 @@ async function ensurePtyCapacity(win: BrowserWindow, channelId: string, label: s
 // silent past a TTL: nobody's watching and nothing's happening. Resume sessions
 // get a longer TTL, and "idle" requires zero output, so an actively printing
 // turn is never reaped — only a quiet, detached (very likely finished) one.
-const SHELL_IDLE_TTL_MS = 30 * 60 * 1000;
-const RESUME_IDLE_TTL_MS = 60 * 60 * 1000;
-const REAPER_INTERVAL_MS = 5 * 60 * 1000;
+const SHELL_IDLE_TTL_MS = Number(process.env.AGENTSFLOW_SHELL_IDLE_TTL_MS) || 30 * 60 * 1000;
+// Lowered 60 min → 10 min. A detached `claude --resume` is not a dormant handle:
+// it is a full Claude TUI process that keeps its MCP servers alive, keeps a PTY
+// off a system-wide budget of 511, and keeps repainting into a main-process
+// buffer through a native callback on the main thread. Eighteen of them were
+// live here (412/511 system PTYs in use) with nobody watching any of them. Ten
+// minutes still makes "close a chat, reopen it" instant, which is the case the
+// long TTL existed for; an hour only benefited a re-open the user had already
+// forgotten about, and cost the whole hour in the meantime.
+const RESUME_IDLE_TTL_MS = Number(process.env.AGENTSFLOW_RESUME_IDLE_TTL_MS) || 10 * 60 * 1000;
+// The reaper only acts on TTLs, so its own period has to be well under the
+// shortest one or a 10-minute TTL takes up to 15 minutes to fire.
+const REAPER_INTERVAL_MS = Number(process.env.AGENTSFLOW_PTY_REAP_INTERVAL_MS) || 2 * 60 * 1000;
 // Under pressure (a spawn is being refused right now) the TTLs collapse.
 // "Detached and silent for a few minutes" is a much weaker claim than the hour
 // we normally wait — but it is still a strictly safe one: nobody is watching the

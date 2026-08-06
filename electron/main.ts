@@ -46,7 +46,7 @@ import {
   readJobState,
   hasLiveDaemon,
 } from './claude-cli';
-import { refreshNow, setPollerForeground, startPoller, stopPoller, syncWatchers, unwatchConversation, watchConversation } from './poller';
+import { refreshNow, setPollerForeground, startPoller, stopPoller, syncWatchers, unwatchConversation, watchConversation, watcherStats } from './poller';
 import { bridgeSocketPath, buildBootstrapSystemPrompt, getMcpServerInfo, writeMcpConfigForConversation } from './mcp-bridge';
 import { buildDelegatePrompt } from './registry';
 import { startPeersBridge, type DelegateRequest, type OpenFileRequest, type PeersBridge } from './delegation-bridge';
@@ -117,6 +117,7 @@ function bridgeHealthSnapshot(): BridgeHealth {
 // and whether the delegation bridge is still reachable.
 registerHealthProbe(() => ({
   ...pty.ptyStats(),
+  ...watcherStats(),
   convs: store.getConversations().length,
   bridgeOk: bridgeHealthSnapshot().healthy,
 }));

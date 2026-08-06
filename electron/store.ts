@@ -6,6 +6,7 @@ import { app } from 'electron';
 import { Account, Conversation, PinnedDivider, PinnedItemRef, PinnedTodo, RotationPolicy, TrackedDirectory } from '../shared/types';
 import { DEFAULT_POLICY } from './rotation';
 import { placePinnedRefAfter, placePinnedRefAtEndOfFirstSection } from './pinned-order';
+import { makeIndexer } from './conv-index';
 import * as perf from './perf';
 
 interface StoreShape {
@@ -360,6 +361,16 @@ function flushToDiskSync(): void {
   }
 }
 
+// ---- Conversation id index ----
+// O(1) id lookup instead of a findIndex over all of history on every daemon
+// state change. See electron/conv-index.ts for why identity-keyed memoization
+// is exactly right here — and for the one thing callers must not do (reorder
+// the array in place).
+const conversationIndexer = makeIndexer<Conversation>();
+function conversationIndex(s: StoreShape): Map<string, number> {
+  return conversationIndexer(s.conversations);
+}
+
 function dropPinnedRef(s: StoreShape, ref: PinnedItemRef): void {
   s.pinnedOrder = s.pinnedOrder.filter((r) => !(r.kind === ref.kind && r.id === ref.id));
 }
@@ -385,6 +396,12 @@ export const store = {
   getConversations(): Conversation[] {
     return load().conversations;
   },
+  /** O(1) lookup by id — see the conversation index note above. */
+  getConversation(id: string): Conversation | null {
+    const s = load();
+    const idx = conversationIndex(s).get(id);
+    return idx === undefined ? null : s.conversations[idx] ?? null;
+  },
   setConversations(convs: Conversation[]): void {
     load().conversations = convs;
     save();
@@ -404,9 +421,10 @@ export const store = {
   },
   updateConversation(id: string, patch: Partial<Conversation>): Conversation | null {
     const s = load();
-    const idx = s.conversations.findIndex((x) => x.id === id);
-    if (idx === -1) return null;
+    const idx = conversationIndex(s).get(id);
+    if (idx === undefined) return null;
     const prev = s.conversations[idx];
+    if (!prev) return null;
     const next = { ...prev, ...patch };
     s.conversations[idx] = next;
     if (patch.pinned !== undefined && patch.pinned !== prev.pinned) {

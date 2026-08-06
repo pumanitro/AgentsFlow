@@ -68,6 +68,13 @@ const api: AgentsFlowApi = {
     ipcRenderer.on('conversations:updated', listener);
     return () => ipcRenderer.removeListener('conversations:updated', listener);
   },
+  // Field-level changes to a handful of rows, rather than the whole ~2.9 MB
+  // history on every daemon heartbeat. See schedulePush in poller.ts.
+  onConversationsPatched: (cb) => {
+    const listener = (_e: IpcRendererEvent, changed: Conversation[]) => cb(changed);
+    ipcRenderer.on('conversations:patched', listener);
+    return () => ipcRenderer.removeListener('conversations:patched', listener);
+  },
   onOpenFile: (cb) => {
     const listener = (_e: IpcRendererEvent, payload: OpenFileNavPayload) => cb(payload);
     ipcRenderer.on('navigate:openFile', listener);

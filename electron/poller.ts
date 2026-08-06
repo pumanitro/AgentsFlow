@@ -128,14 +128,45 @@ async function reapStaleDaemons(convs: Conversation[], liveRows: ClaudeAgentJson
   }
 }
 
-function schedulePush(): void {
+// ---------- Pushing state to the renderer ----------
+// The full conversation list is the whole of history — 1500+ rows, ~2.9 MB once
+// structured-cloned across the IPC boundary — and it used to be re-sent in its
+// entirety on EVERY daemon state.json write. With a dozen agents running that is
+// several full-history clones per second on both sides of the bridge, plus a
+// wholesale replacement of the renderer's `convs` state (which re-derives every
+// memo hanging off it).
+//
+// Nothing about that payload was needed: a state change touches a handful of
+// rows. So field-level changes now ship as a PATCH — just the changed rows — and
+// the full push is reserved for structural changes (a conversation added or
+// removed), where the renderer genuinely has to replace its list. Any patch
+// naming an id the renderer doesn't know makes it ask for a full list, so the
+// two paths can't drift apart.
+const pendingPatch = new Map<string, Conversation>();
+let pendingFull = false;
+
+function schedulePush(changed?: Conversation | Conversation[]): void {
+  if (changed === undefined) {
+    pendingFull = true;
+  } else if (Array.isArray(changed)) {
+    for (const c of changed) pendingPatch.set(c.id, c);
+  } else {
+    pendingPatch.set(changed.id, changed);
+  }
   if (pushScheduled) return;
   pushScheduled = true;
   setImmediate(() => {
     pushScheduled = false;
+    const full = pendingFull;
+    const patch = Array.from(pendingPatch.values());
+    pendingFull = false;
+    pendingPatch.clear();
     const win = getWindowRef?.();
-    if (win && !win.isDestroyed()) {
+    if (!win || win.isDestroyed()) return;
+    if (full) {
       win.webContents.send('conversations:updated', store.getConversations());
+    } else if (patch.length > 0) {
+      win.webContents.send('conversations:patched', patch);
     }
   });
 }
@@ -163,7 +194,10 @@ function applyJobToConversation(
 }
 
 function refreshOneFromFile(conversationId: string): void {
-  const conv = store.getConversations().find((c) => c.id === conversationId);
+  // O(1) — this runs on every state.json write from every live daemon, so the
+  // old linear scan over the full history was the single most-repeated O(n) in
+  // the app (see the conversation index in store.ts).
+  const conv = store.getConversation(conversationId);
   if (!conv) return;
   let { next, changed } = applyJobToConversation(conv);
   // state.json just settled this conversation into a terminal state, but the live
@@ -177,14 +211,49 @@ function refreshOneFromFile(conversationId: string): void {
     changed = true;
   }
   if (changed) {
-    store.updateConversation(conversationId, next);
-    schedulePush();
+    const saved = store.updateConversation(conversationId, next);
+    schedulePush(saved ?? next);
   }
 }
+
+// ---------- Which conversations are worth watching ----------
+// A watcher exists to deliver a *live* state change in real time. A finished
+// conversation has none to deliver, so watching one buys nothing — and there are
+// two separate costs to doing it anyway, both scaling with total history rather
+// than with how much is actually running:
+//
+//  1. Every conversation that ever ran as a daemon and whose ~/.claude/jobs dir
+//     still exists got a real fs.watch handle. Measured on this machine: 719
+//     handles, 1467 of the 1519 conversations in state `done`, 16 actually
+//     working. That is ~700 kernel watch registrations for nothing.
+//
+//  2. Worse, the ~630 whose job dir has since been cleaned up made fs.watch
+//     THROW. The throw was caught and the conversation was never recorded as
+//     watched — so syncWatchers retried all of them on every single tick,
+//     forever: hundreds of throwing syscalls per second, permanently.
+//
+// So: watch only what can still change — a non-terminal conversation, or one
+// the user is looking at right now (an open chat gets real-time updates whatever
+// its recorded state, which also covers a finished session being re-opened).
+// When a conversation settles into a terminal state syncWatchers drops it; if a
+// live row brings it back the next tick re-adds it.
+function shouldWatch(c: Conversation): boolean {
+  if (!c.daemonShort) return false;
+  if (!TERMINAL_STATES.has((c.state || '').toLowerCase())) return true;
+  return hasLiveViewer(c.sessionId || c.daemonShort);
+}
+
+// Backstop for the retry storm above: a conversation whose job dir isn't there
+// yet (a daemon that hasn't booted) must still be retried, but not 200× a
+// minute. Remember the failure and leave it alone for a while.
+const watchFailedAt = new Map<string, number>();
+const WATCH_RETRY_MS = 60_000;
 
 export function watchConversation(c: Conversation): void {
   if (!c.daemonShort) return;
   if (watchers.has(c.id)) return;
+  const failedAt = watchFailedAt.get(c.id);
+  if (failedAt && Date.now() - failedAt < WATCH_RETRY_MS) return;
   const stateFile = jobStatePath(c.daemonShort);
   const jobDir = path.dirname(stateFile);
   const stateFilename = path.basename(stateFile);
@@ -204,11 +273,17 @@ export function watchConversation(c: Conversation): void {
     w.on('error', () => {
       try { w.close(); } catch {}
       watchers.delete(c.id);
+      // Same backoff as a failed fs.watch: without it, syncWatchers would
+      // re-add a watcher that is erroring out on every single tick.
+      watchFailedAt.set(c.id, Date.now());
     });
     watchers.set(c.id, w);
+    watchFailedAt.delete(c.id);
     refreshOneFromFile(c.id);
   } catch {
-    // dir may not exist yet; the fallback poll will catch it
+    // dir may not exist yet (daemon still booting); back off before retrying so
+    // a never-appearing dir can't be probed on every tick for the rest of the run
+    watchFailedAt.set(c.id, Date.now());
   }
 }
 
@@ -221,13 +296,26 @@ export function unwatchConversation(conversationId: string): void {
 
 export function syncWatchers(): void {
   const convs = store.getConversations();
-  const live = new Set(convs.map((c) => c.id));
+  const wanted = new Set<string>();
+  for (const c of convs) if (shouldWatch(c)) wanted.add(c.id);
+  // Drop watchers for conversations that are gone OR have settled — a finished
+  // chat can't produce another state change worth listening for.
   for (const id of Array.from(watchers.keys())) {
-    if (!live.has(id)) unwatchConversation(id);
+    if (!wanted.has(id)) unwatchConversation(id);
   }
   for (const c of convs) {
-    if (!watchers.has(c.id)) watchConversation(c);
+    if (wanted.has(c.id) && !watchers.has(c.id)) watchConversation(c);
   }
+  // Failure memos for conversations that no longer want a watcher are dead
+  // weight; clearing them also means a re-activated chat retries immediately.
+  for (const id of Array.from(watchFailedAt.keys())) {
+    if (!wanted.has(id)) watchFailedAt.delete(id);
+  }
+}
+
+/** Live watcher count, for the health heartbeat. */
+export function watcherStats(): Record<string, number> {
+  return { convWatchers: watchers.size };
 }
 
 // Index the live `claude agents --json` rows once per tick so the per-conversation
@@ -303,7 +391,9 @@ async function fallbackTickImpl(): Promise<void> {
   const convs = store.getConversations();
   if (convs.length === 0) return;
 
+  const listStart = Date.now();
   const result = await perf.timed('poll:listAgents', () => listAgentsResult());
+  noteListAgentsDuration(Date.now() - listStart);
   // On transient CLI failure: don't touch state, don't advance miss counters.
   // The next tick will re-attempt; meanwhile the UI keeps the last good state
   // rather than oscillating to "done" on every flaky list call.
@@ -320,6 +410,9 @@ async function fallbackTickImpl(): Promise<void> {
   }
 
   let anyChange = false;
+  // Only the rows that actually changed are shipped to the renderer (see
+  // schedulePush) — a tick that flips two dots must not re-send all of history.
+  const changedRows: Conversation[] = [];
   let backfillsLeft = BACKFILL_PER_TICK;
   const updated = convs.map((c) => {
     // The indexed live-row lookup is O(1) and cheap, so we do it even for
@@ -338,7 +431,12 @@ async function fallbackTickImpl(): Promise<void> {
       // — clear any stale one (a lingering "busy" would otherwise keep the dot
       // blue) and skip the state.json read entirely.
       missCount.delete(c.id);
-      if (c.status) { anyChange = true; return { ...c, status: '' }; }
+      if (c.status) {
+        anyChange = true;
+        const cleared = { ...c, status: '' };
+        changedRows.push(cleared);
+        return cleared;
+      }
       return c;
     }
     let next = c;
@@ -405,13 +503,13 @@ async function fallbackTickImpl(): Promise<void> {
       const wt = worktreeOf(next, readSessionCwdFromTranscript(next.sessionId) ?? undefined);
       if (wt) { next = { ...next, worktreePath: wt }; changed = true; }
     }
-    if (changed) anyChange = true;
+    if (changed) { anyChange = true; changedRows.push(next); }
     return next;
   });
 
   if (anyChange) {
     store.setConversations(updated);
-    schedulePush();
+    schedulePush(changedRows);
   }
 
   // Reap finished-but-still-running daemons (and their mcp-server children).
@@ -428,10 +526,35 @@ async function fallbackTickImpl(): Promise<void> {
 const FAST_TICK_MS = 5000;
 const SLOW_TICK_MS = 30000;
 
+// ---------- Adaptive cadence ----------
+// `claude agents --json` costs ~350 ms on an idle machine but has been measured
+// at 18 s here with a large fleet running — the CLI has to talk to every daemon,
+// and the machine is busy precisely because those daemons are busy. Polling on a
+// fixed 5 s cadence when the call itself takes seconds means the app spends most
+// of its time inside that subprocess, adding load to a box that is already the
+// bottleneck, for state the file-watchers are delivering anyway.
+//
+// So the cadence follows the observed cost: keep the poll's duty cycle under
+// ~1/DUTY_DIVISOR of wall-clock. Cheap call → unchanged 5 s. Expensive call →
+// back off proportionally, up to a ceiling. Smoothed so one slow sample doesn't
+// pin the poller at its slowest for the rest of the run.
+const DUTY_DIVISOR = 4;
+const MAX_ADAPTIVE_TICK_MS = 60_000;
+let smoothedListMs = 0;
+
+function noteListAgentsDuration(ms: number): void {
+  // EWMA — rises quickly on a genuinely slow call, decays back as things settle.
+  smoothedListMs = smoothedListMs === 0 ? ms : Math.round(smoothedListMs * 0.6 + ms * 0.4);
+}
+
+function adaptiveFastTickMs(): number {
+  return Math.min(MAX_ADAPTIVE_TICK_MS, Math.max(FAST_TICK_MS, smoothedListMs * DUTY_DIVISOR));
+}
+
 function scheduleNextTick(): void {
   if (fallbackTimer) clearTimeout(fallbackTimer);
   const fast = windowForeground && hasActiveConversation(store.getConversations());
-  const interval = fast ? FAST_TICK_MS : SLOW_TICK_MS;
+  const interval = fast ? adaptiveFastTickMs() : SLOW_TICK_MS;
   fallbackTimer = setTimeout(async () => {
     try { await fallbackTick(); } catch { /* swallow */ }
     scheduleNextTick();

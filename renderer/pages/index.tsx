@@ -37,6 +37,10 @@ export default function Home() {
   const router = useRouter();
   const [dirs, setDirs] = useState<TrackedDirectory[]>([]);
   const [convs, setConvs] = useState<Conversation[]>([]);
+  // Latest list, readable from IPC callbacks without re-subscribing them on
+  // every change (the patch handler needs the current rows to merge into).
+  const convsRef = useRef<Conversation[]>(convs);
+  useEffect(() => { convsRef.current = convs; }, [convs]);
   const [dividers, setDividers] = useState<PinnedDivider[]>([]);
   const [todos, setTodos] = useState<PinnedTodo[]>([]);
   const [pinnedOrder, setPinnedOrder] = useState<PinnedItemRef[]>([]);
@@ -134,11 +138,35 @@ export default function Home() {
   }, [globalNoteFile]);
 
   useEffect(() => {
-    const offC = api().onConversationsUpdated((next) => setConvs(next));
-    const offD = api().onDividersUpdated((next) => setDividers(next));
-    const offT = api().onTodosUpdated?.((next) => setTodos(next)) ?? (() => undefined);
-    const offO = api().onPinnedOrderUpdated((next) => setPinnedOrder(next));
-    return () => { offC(); offD(); offT(); offO(); };
+    const a = api();
+    const offC = a.onConversationsUpdated((next) => setConvs(next));
+    // Incremental path: a daemon state change patches the few rows it touched
+    // instead of replacing the whole list (which is all of history — ~2.9 MB —
+    // and re-derives every memo below it). A patch naming a conversation we've
+    // never seen means our list is structurally out of date, so fall back to a
+    // full fetch rather than guessing where the new row belongs.
+    const offP = a.onConversationsPatched?.((changed) => {
+      if (changed.length === 0) return;
+      const byId = new Map(changed.map((c) => [c.id, c]));
+      const prev = convsRef.current;
+      let hit = 0;
+      const next = prev.map((c) => {
+        const patched = byId.get(c.id);
+        if (!patched) return c;
+        hit++;
+        return patched;
+      });
+      if (hit !== byId.size) {
+        // Unknown id in the patch — our list is structurally stale. Resync.
+        void a.listConversations().then(setConvs).catch(() => undefined);
+        return;
+      }
+      setConvs(next);
+    }) ?? (() => undefined);
+    const offD = a.onDividersUpdated((next) => setDividers(next));
+    const offT = a.onTodosUpdated?.((next) => setTodos(next)) ?? (() => undefined);
+    const offO = a.onPinnedOrderUpdated((next) => setPinnedOrder(next));
+    return () => { offC(); offP(); offD(); offT(); offO(); };
   }, []);
 
   const selectedDir = useMemo(() => dirs.find((d) => d.id === selectedDirId) ?? null, [dirs, selectedDirId]);

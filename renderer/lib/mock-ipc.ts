@@ -515,6 +515,10 @@ export function createMockApi(): AgentsFlowApi {
     onTerminalData: (cb) => { listeners.termData.add(cb); return () => listeners.termData.delete(cb); },
     onTerminalExit: (cb) => { listeners.termExit.add(cb); return () => listeners.termExit.delete(cb); },
     onConversationsUpdated: (cb) => { listeners.convs.add(cb); return () => listeners.convs.delete(cb); },
+    // The mock always broadcasts whole lists, so there is nothing to patch —
+    // subscribing is a no-op rather than a missing method (the renderer treats
+    // absence as "old preload" and would keep working either way).
+    onConversationsPatched: () => () => undefined,
     // No real bridge in the browser mock — nothing ever asks to open a file.
     onOpenFile: () => () => undefined,
 
