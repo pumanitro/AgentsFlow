@@ -215,6 +215,40 @@ export default function Terminal({ conversationId, shellId, shellCwd, baseDir, o
       const onContainerMouseDown = () => focusTerm();
       containerRef.current.addEventListener('mousedown', onContainerMouseDown);
 
+      // The canvas renderer publishes nothing to the macOS accessibility tree —
+      // the only AX node a terminal exposes is xterm's hidden helper textarea,
+      // which is empty except in the instant after a paste. Dictation tools
+      // (Wispr Flow) therefore see an editable-but-empty text field and collect
+      // no vocabulary from what is on screen, so terminal-specific words get
+      // transcribed as whatever the generic language model prefers.
+      //
+      // screenReaderMode makes xterm mirror the viewport into real DOM text
+      // that Chromium then publishes over AX. It rebuilds a <div> per row on
+      // every render, so it stays off for the dozens of background terminals
+      // and is enabled only for the one that currently has focus.
+      let a11yOffTimer: number | null = null;
+      const setA11yMirror = (on: boolean) => {
+        try {
+          if (term.options.screenReaderMode !== on) term.options.screenReaderMode = on;
+        } catch {}
+      };
+      const onFocusIn = () => {
+        if (a11yOffTimer !== null) { clearTimeout(a11yOffTimer); a11yOffTimer = null; }
+        setA11yMirror(true);
+      };
+      // Focus moving between elements inside the terminal fires focusout then
+      // focusin. Settle first so that round trip doesn't tear the mirror down
+      // and immediately rebuild it.
+      const onFocusOut = () => {
+        if (a11yOffTimer !== null) clearTimeout(a11yOffTimer);
+        a11yOffTimer = window.setTimeout(() => {
+          a11yOffTimer = null;
+          setA11yMirror(false);
+        }, 150);
+      };
+      containerRef.current.addEventListener('focusin', onFocusIn);
+      containerRef.current.addEventListener('focusout', onFocusOut);
+
       let cid: string;
       let replay = '';
       try {
@@ -360,6 +394,9 @@ export default function Terminal({ conversationId, shellId, shellCwd, baseDir, o
         bufDisp.dispose();
         ro.disconnect();
         container.removeEventListener('mousedown', onContainerMouseDown);
+        container.removeEventListener('focusin', onFocusIn);
+        container.removeEventListener('focusout', onFocusOut);
+        if (a11yOffTimer !== null) clearTimeout(a11yOffTimer);
         container.removeEventListener('wheel', onWheel, { capture: true } as any);
         if (channelId) api().detachTerminal(channelId).catch(() => undefined);
         disposeTerm();
