@@ -281,6 +281,10 @@ export interface RotationPolicy {
   enabled: boolean;
   // Percent of the binding limit at which to move (default 95).
   threshold: number;
+  // When a chat actually hits the wall anyway — the threshold is a prediction
+  // and predictions miss — switch on the spot and tell that chat to carry on,
+  // instead of leaving it parked until someone reads the screen.
+  resumeOnLimit: boolean;
 }
 
 export interface RotationStatus {

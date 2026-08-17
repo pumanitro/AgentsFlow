@@ -253,7 +253,7 @@ export function createMockApi(): AgentsFlowApi {
     }),
     onAccountsUpdated: () => () => undefined,
     getRotationPolicy: async () => ({
-      policy: { enabled: true, threshold: 95 },
+      policy: { enabled: true, threshold: 95, resumeOnLimit: true },
       status: { lastEvent: null, lastEventAt: null, disabledReason: null },
     }),
     setRotationPolicy: async (policy) => ({

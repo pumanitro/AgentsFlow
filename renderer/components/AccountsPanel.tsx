@@ -4,6 +4,7 @@ import dynamic from 'next/dynamic';
 import { api } from '../lib/ipc';
 import type { CSSProperties, ReactNode } from 'react';
 import type { Account, AccountsSnapshot, RotationPolicy, RotationStatus, UsageMeter, UsageResult } from '../../shared/types';
+import { worstMeter } from '../../shared/usage';
 
 const Terminal = dynamic(() => import('./Terminal'), { ssr: false });
 
@@ -171,11 +172,11 @@ const SEVERITY_COLOR: Record<UsageMeter['severity'], string> = {
 };
 
 /** The percent that matters for an account at a glance: its binding limit. */
+// The number shown here has to be the number rotation switches on, or the panel
+// reads "43%" next to an account whose agents are being refused. Both sides now
+// come from one place — see shared/usage.ts for why `isActive` is not it.
 function bindingMeter(result: UsageResult | undefined): UsageMeter | null {
-  if (!result?.ok) return null;
-  const meters = result.snapshot.meters;
-  if (meters.length === 0) return null;
-  return meters.find((m) => m.isActive) ?? meters.reduce((a, b) => (b.percent > a.percent ? b : a));
+  return worstMeter(result);
 }
 
 function AccountRow({
@@ -400,7 +401,7 @@ export default function AccountsPanel() {
   const [busy, setBusy] = useState(false);
   const [repairing, setRepairing] = useState(false);
   const [pending, setPending] = useState<{ pendingId: string; shellId: string; email: string; cwd: string } | null>(null);
-  const [policy, setPolicy] = useState<RotationPolicy>({ enabled: false, threshold: 95 });
+  const [policy, setPolicy] = useState<RotationPolicy>({ enabled: false, threshold: 95, resumeOnLimit: true });
   const [rotationStatus, setRotationStatus] = useState<RotationStatus | null>(null);
   const mounted = useRef(true);
 
@@ -652,6 +653,28 @@ export default function AccountsPanel() {
                       <InfoHint label="About automatic switching">
                         Runs in the background even with the window closed, so an overnight run rolls
                         onto a fresh account instead of hitting the wall.
+                      </InfoHint>
+                    </span>
+                  </label>
+                  {/* The backstop, indented under the threshold it backs up:
+                      thresholds are a forecast, and a chat that hits the wall
+                      anyway would otherwise sit dead until someone looks. */}
+                  <label className="mt-1 flex items-center gap-2 cursor-pointer pl-5">
+                    <input
+                      type="checkbox"
+                      checked={policy.resumeOnLimit}
+                      disabled={!policy.enabled}
+                      onChange={(e) => void savePolicy({ ...policy, resumeOnLimit: e.target.checked })}
+                      className="accent-info disabled:opacity-40"
+                    />
+                    <span className={`text-[11px] min-w-0 truncate ${policy.enabled ? 'text-text' : 'text-subtle'}`}>
+                      Resume chats that hit the limit
+                    </span>
+                    <span className="ml-auto flex items-center" onClick={(e) => e.preventDefault()}>
+                      <InfoHint label="About resuming after a limit">
+                        If a chat is refused with “You’ve hit your session limit”, switch account
+                        straight away and send it “continue”, so it picks up where it stopped instead
+                        of waiting for the window to reset.
                       </InfoHint>
                     </span>
                   </label>

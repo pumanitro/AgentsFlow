@@ -198,6 +198,9 @@ function sanitizeRotationPolicy(raw: unknown): RotationPolicy {
   return {
     enabled: Boolean(p?.enabled),
     threshold: Number.isFinite(threshold) ? Math.min(99, Math.max(50, Math.round(threshold))) : DEFAULT_POLICY.threshold,
+    // Absent in stores written before this existed — those users get the
+    // default (on) rather than silently opting out of the safety net.
+    resumeOnLimit: p?.resumeOnLimit === undefined ? DEFAULT_POLICY.resumeOnLimit : Boolean(p.resumeOnLimit),
   };
 }
 

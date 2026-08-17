@@ -34,6 +34,7 @@ import { store } from './store';
 import { getUsage, getUsageForService, resetUsageCache } from './usage';
 import * as accounts from './accounts';
 import * as rotation from './rotation';
+import * as limitWatch from './limit-watch';
 import { forkTitle } from '../shared/fork-title';
 import { transcriptExists as transcriptExistsUnder } from './transcript-path';
 import { computeDisplayName, recomputeAllDisplayNames } from './naming';
@@ -255,6 +256,9 @@ app.whenReady().then(() => {
   // Watch the active account's meters and switch before it hits the wall. Opt-in
   // (disabled by default); the loop no-ops until the user enables it.
   rotation.startRotation(rotationDeps);
+  // And catch the walls the threshold misses: a chat that reports a rate limit
+  // gets a fresh account and a "continue" rather than sitting dead till morning.
+  limitWatch.startLimitWatch(limitWatchDeps);
 
   // OS sleep/wake: tell the stall detector so the multi-minute gap it sees on
   // resume is logged as a power event, not a "UI frozen" false alarm, and back
@@ -613,6 +617,36 @@ const rotationDeps: rotation.RotationDeps = {
       mainWindow.webContents.send('rotation:status', status);
     }
   },
+};
+
+// ----- The wall that got hit anyway -----
+// Same switch, triggered by a chat's own rate-limit error instead of by a
+// meter. Lives beside rotation because it shares the switch, the policy and the
+// status line — see limit-watch.ts for why a forecast alone isn't enough.
+const limitWatchDeps: limitWatch.LimitWatchDeps = {
+  getPolicy: () => store.getRotationPolicy(),
+  getConversations: () => store.getConversations(),
+  rotate: () => rotation.runOnce(rotationDeps, { urgent: true }),
+  nudge: (conv, text) => {
+    // Snapshotted BEFORE anything is typed: the receipt for this nudge is a
+    // user turn that wasn't in the transcript a moment ago.
+    //
+    // Zero means the transcript could not be read (or holds no user turn yet),
+    // and then "a user turn exists" proves nothing — it would match the
+    // session's own opening prompt. Every chat this path rescues has a
+    // transcript deep enough to have one, since that is where its rate-limit
+    // error was found, so a zero here is an anomaly and gets no false receipt.
+    const before = limitWatch.lastUserTurnAt(conv);
+    return pty.sendToSession({
+      sessionId: conv.sessionId,
+      // Mirrors term:attach's rule: the daemon short id when there is one, else
+      // the session id's own 8-char prefix.
+      attachId: conv.daemonShort || conv.sessionId.slice(0, 8),
+      text,
+      verify: before > 0 ? () => limitWatch.lastUserTurnAt(conv) > before : undefined,
+    });
+  },
+  onEvent: (message) => rotation.recordEvent(rotationDeps, message),
 };
 
 ipcMain.handle('rotation:get', () => ({

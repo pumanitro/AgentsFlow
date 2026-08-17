@@ -32,16 +32,26 @@ export function transcriptPath(root: string, cwd: string, sessionId: string): st
 // that fork did. So fall back to scanning the whole tree for the session id —
 // ~120 dirs in practice, one stat each, and only on the miss path (~10ms).
 export function transcriptExists(root: string, cwd: string, sessionId: string): boolean {
-  if (fs.existsSync(transcriptPath(root, cwd, sessionId))) return true;
+  return findTranscript(root, cwd, sessionId) !== null;
+}
+
+/** Same search, returning the path — for readers, not just existence checks. */
+export function findTranscript(root: string, cwd: string, sessionId: string): string | null {
+  const direct = transcriptPath(root, cwd, sessionId);
+  if (fs.existsSync(direct)) return direct;
   let dirs: string[];
   try {
     dirs = fs.readdirSync(root);
   } catch {
-    return false;
+    return null;
   }
   // A worktree of this cwd munges to `<munged-cwd>--claude-worktrees-<name>`, so
   // that subtree is by far the likeliest home — look there before everywhere else.
   const own = mungeCwd(cwd);
   dirs.sort((a, b) => Number(b.startsWith(own)) - Number(a.startsWith(own)));
-  return dirs.some((d) => fs.existsSync(path.join(root, d, `${sessionId}.jsonl`)));
+  for (const d of dirs) {
+    const p = path.join(root, d, `${sessionId}.jsonl`);
+    if (fs.existsSync(p)) return p;
+  }
+  return null;
 }

@@ -139,8 +139,14 @@ const PTMX_MAX = (() => {
 })();
 
 function livePtyCount(): number {
-  return claudeChannels.size + resumeSessions.size + shells.size;
+  return claudeChannels.size + resumeSessions.size + shells.size + headlessPtys.size;
 }
+
+// Short-lived PTYs with no viewer (the limit-watch nudge). Counted above so
+// they can never sneak past the capacity guard, but deliberately NOT in
+// claudeChannels: they have no channelId, no window, and nothing may route
+// renderer traffic to them.
+const headlessPtys = new Set<IPty>();
 
 // Live system-wide unix98 pty count, via devfs slave nodes (`/dev/ttysNNN`).
 // Cached briefly so a burst of spawns doesn't readdir on every call. Returns 0
@@ -204,9 +210,13 @@ async function forkStarvedErrno(): Promise<string | null> {
   }
 }
 
-function refusePty(win: BrowserWindow, channelId: string, message: string): false {
-  safeSend(win, 'terminal:data', channelId, `\r\n\x1b[31m${message}\x1b[0m\r\n`);
-  safeSend(win, 'terminal:exit', channelId);
+// `win` is null for PTYs nobody is watching (the headless nudge below): there is
+// no channel to report a refusal on, so the refusal is logged and swallowed.
+function refusePty(win: BrowserWindow | null, channelId: string, message: string): false {
+  if (win) {
+    safeSend(win, 'terminal:data', channelId, `\r\n\x1b[31m${message}\x1b[0m\r\n`);
+    safeSend(win, 'terminal:exit', channelId);
+  }
   return false;
 }
 
@@ -214,7 +224,7 @@ function refusePty(win: BrowserWindow, channelId: string, message: string): fals
 // channel (mirroring the spawn-failure path) so the renderer surfaces it
 // instead of the app aborting. Async because the fork probe must not block the
 // main thread (see forkStarvedErrno) — callers await it before node-pty spawn.
-async function ensurePtyCapacity(win: BrowserWindow, channelId: string, label: string): Promise<boolean> {
+async function ensurePtyCapacity(win: BrowserWindow | null, channelId: string, label: string): Promise<boolean> {
   let live = livePtyCount();
   let sys = systemPtyCount();
 
@@ -394,6 +404,7 @@ export function ptyStats(): Record<string, number> {
     attachPtys: claudeChannels.size,
     resumePtys: resumeSessions.size,
     shellPtys: shells.size,
+    nudgePtys: headlessPtys.size,
     systemPtys: systemPtyCount(),
     ptmxMax: PTMX_MAX,
   };
@@ -659,6 +670,194 @@ export function hasLiveViewer(sessionId: string): boolean {
     if (ch.sessionId === sessionId) return true;
   }
   return false;
+}
+
+// ---------- Typing into a session nobody is watching ----------
+// The account pool can take a walled agent's account away and give it a fresh
+// one, but the agent doesn't retry on its own — it has already ended its turn
+// on "You've hit your session limit". Something has to send the next message,
+// and the CLI offers no headless way to do it (`claude agents` manages
+// sessions; it cannot post to one). So we do exactly what a person does: open
+// the session and type.
+//
+// Two paths, because the app may already have the session open:
+//   • a live in-app PTY (an open chat, or a `--resume` we own) → write into it,
+//     costing nothing and appearing in the terminal the user is looking at;
+//   • otherwise a throwaway `claude attach` PTY, closed as soon as the message
+//     is in. The daemon keeps running either way — an attach viewer is just a
+//     viewer.
+
+// `claude attach` replays the transcript before it accepts input, so we wait
+// for the output to go quiet rather than guessing a fixed delay — a 90 MB
+// transcript takes a lot longer to replay than an empty one. The floor matters
+// as much as the quiet window: the TUI emits its opening burst, then goes
+// silent while it finishes wiring up input, and typing into that gap is exactly
+// how a keystroke gets dropped.
+const NUDGE_QUIET_MS = 1500;
+const NUDGE_SETTLE_MIN_MS = 4000;
+const NUDGE_SETTLE_MAX_MS = 30_000;
+// Enter goes separately from the text: a single write of "continue\r" can land
+// as a bracketed paste, where the \r becomes a newline in the composer rather
+// than a submit — the message would sit there typed but never sent.
+const NUDGE_SUBMIT_DELAY_MS = 750;
+// How long to wait for proof the turn was accepted before trying again.
+const NUDGE_CONFIRM_MS = 12_000;
+// Let the daemon read the submitted turn before the viewer goes away.
+const NUDGE_DRAIN_MS = 2000;
+
+export type NudgeResult =
+  | { ok: true; via: 'open-chat' | 'headless' }
+  | { ok: false; error: string };
+
+/**
+ * Send `text` to a Claude session as a user turn, with or without a viewer.
+ *
+ * `sessionId` is the full id (used to find a PTY this app already holds);
+ * `attachId` is the daemon short id `claude attach` wants.
+ *
+ * `verify` is what makes this trustworthy rather than hopeful. Driving a TUI
+ * through a PTY is a timing bet, and it loses: measured against a live daemon,
+ * the text reached the composer and the Enter that followed 250 ms later did
+ * nothing — the call reported success and the session sat there with a message
+ * typed and unsent, which for an unattended rescue is worse than a clean
+ * failure. So the caller supplies a check for "the turn actually landed", and
+ * this retries — Enter first, since the likeliest state is text sitting in the
+ * composer — until it is satisfied or out of attempts.
+ */
+export async function sendToSession(opts: {
+  sessionId: string;
+  attachId: string;
+  text: string;
+  /** True once the message is visibly accepted. Polled; must be cheap. */
+  verify?: () => boolean;
+}): Promise<NudgeResult> {
+  const text = opts.text.trim();
+  if (!text) return { ok: false, error: 'nothing to send' };
+
+  // 1) A PTY we already own — the chat is open, or a resume session is live.
+  const existing = findLivePtyForSession(opts.sessionId);
+  if (existing) {
+    try {
+      const landed = await typeAndConfirm(existing, text, opts.verify);
+      if (!landed) return { ok: false, error: 'the open session did not accept the message' };
+      console.log('[agentsflow][nudge] sent through the open session', { sessionId: opts.sessionId, text });
+      return { ok: true, via: 'open-chat' };
+    } catch (err) {
+      return { ok: false, error: `writing to the open session failed: ${(err as Error)?.message ?? err}` };
+    }
+  }
+
+  // 2) Headless attach.
+  if (!opts.attachId) return { ok: false, error: 'no daemon id to attach to' };
+  if (!(await ensurePtyCapacity(null, '', 'nudge'))) {
+    return { ok: false, error: 'no PTY capacity to open the session' };
+  }
+
+  let pty: IPty;
+  try {
+    pty = getPty().spawn(CLAUDE_BIN, ['attach', opts.attachId], {
+      name: 'xterm-256color',
+      cols: 120,
+      rows: 40,
+      cwd: os.homedir(),
+      env: env(),
+    });
+  } catch (err) {
+    return { ok: false, error: `could not open the session: ${(err as Error)?.message ?? err}` };
+  }
+  headlessPtys.add(pty);
+  console.log('[agentsflow][nudge] opened a headless viewer', { attachId: opts.attachId, pid: pty.pid });
+
+  let lastDataAt = Date.now();
+  let sawData = false;
+  let exited = false;
+  pty.onData(guardCb('nudge onData', () => { lastDataAt = Date.now(); sawData = true; }));
+  pty.onExit(guardCb('nudge onExit', () => { exited = true; headlessPtys.delete(pty); }));
+
+  const startedAt = Date.now();
+  while (!exited && Date.now() - startedAt < NUDGE_SETTLE_MAX_MS) {
+    const settled = sawData && Date.now() - lastDataAt > NUDGE_QUIET_MS;
+    if (settled && Date.now() - startedAt > NUDGE_SETTLE_MIN_MS) break;
+    await delay(200);
+  }
+  // An attach that exits on its own found no daemon to attach to — the session
+  // is cold. Resuming it would be a different (and much heavier) operation, so
+  // say so rather than pretending the message went anywhere.
+  if (exited) {
+    headlessPtys.delete(pty);
+    return { ok: false, error: 'the session is no longer running (attach exited)' };
+  }
+  if (!sawData) {
+    killHeadless(pty);
+    return { ok: false, error: 'the session never opened (no output from attach)' };
+  }
+
+  let landed: boolean;
+  try {
+    landed = await typeAndConfirm(pty, text, opts.verify);
+  } catch (err) {
+    killHeadless(pty);
+    return { ok: false, error: `typing into the session failed: ${(err as Error)?.message ?? err}` };
+  }
+  await delay(NUDGE_DRAIN_MS);
+  killHeadless(pty);
+  if (!landed) return { ok: false, error: 'the session did not accept the message' };
+  console.log('[agentsflow][nudge] sent through a headless viewer', { attachId: opts.attachId, text });
+  return { ok: true, via: 'headless' };
+}
+
+/**
+ * Type, submit, and make sure it took. Without a `verify` there is nothing to
+ * check against, so the first attempt is taken on trust — the callers that care
+ * (limit-watch) always pass one.
+ */
+async function typeAndConfirm(p: IPty, text: string, verify?: () => boolean): Promise<boolean> {
+  p.write(text);
+  await delay(NUDGE_SUBMIT_DELAY_MS);
+  p.write('\r');
+  if (!verify) { await delay(NUDGE_SUBMIT_DELAY_MS); return true; }
+  if (await waitFor(verify, NUDGE_CONFIRM_MS)) return true;
+
+  // Most likely state: the text is sitting in the composer and only the submit
+  // was lost. A bare Enter sends it; on an empty composer it does nothing.
+  console.warn('[agentsflow][nudge] no turn appeared — pressing enter again');
+  p.write('\r');
+  if (await waitFor(verify, NUDGE_CONFIRM_MS)) return true;
+
+  // Otherwise the keystrokes never arrived at all. Retype from scratch.
+  console.warn('[agentsflow][nudge] still nothing — retyping the message');
+  p.write(text);
+  await delay(NUDGE_SUBMIT_DELAY_MS);
+  p.write('\r');
+  return waitFor(verify, NUDGE_CONFIRM_MS);
+}
+
+async function waitFor(predicate: () => boolean, timeoutMs: number): Promise<boolean> {
+  const until = Date.now() + timeoutMs;
+  while (Date.now() < until) {
+    try { if (predicate()) return true; } catch { /* treat a throwing check as "not yet" */ }
+    await delay(400);
+  }
+  return false;
+}
+
+function findLivePtyForSession(sessionId: string): IPty | null {
+  if (!sessionId) return null;
+  const resume = resumeSessions.get(sessionId);
+  if (resume) return resume.pty;
+  for (const ch of claudeChannels.values()) {
+    if (ch.sessionId === sessionId) return ch.pty;
+  }
+  return null;
+}
+
+function killHeadless(p: IPty): void {
+  headlessPtys.delete(p);
+  try { p.kill(); } catch { /* already gone */ }
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((r) => { setTimeout(r, ms); });
 }
 
 export function killShell(shellId: string): void {

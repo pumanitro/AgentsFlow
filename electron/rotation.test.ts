@@ -24,7 +24,7 @@ function usage(meters: UsageMeter[]): UsageResult {
 // Which number decides an account's fate
 // ---------------------------------------------------------------------------
 
-test('bindingPercent: prefers the limit the API flags as binding', () => {
+test('bindingPercent: the worst meter decides, whatever the API flags', () => {
   const r = usage([
     meter({ key: 'session', percent: 40, isActive: false }),
     meter({ key: 'weekly_all', group: 'weekly', percent: 91, isActive: true }),
@@ -38,6 +38,24 @@ test('bindingPercent: falls back to the worst meter when none is flagged', () =>
     meter({ key: 'weekly_all', group: 'weekly', percent: 30 }),
   ]);
   assert.equal(bindingPercent(r), 96);
+});
+
+// The regression that let an overnight run hit the wall with switching ON.
+// Every account the API was asked about reported the SAME shape: is_active on
+// the weekly limit, never on the 5-hour session window. Preferring the flagged
+// meter therefore made the threshold structurally blind to the one wall that
+// actually stops an agent working.
+test('bindingPercent: a full session window is not hidden by a calm weekly one', () => {
+  const r = usage([
+    meter({ key: 'session', percent: 100, isActive: false }),
+    meter({ key: 'weekly_all', group: 'weekly', percent: 43, isActive: true }),
+    meter({ key: 'weekly:fable', group: 'weekly', percent: 54, isActive: false }),
+  ]);
+  assert.equal(bindingPercent(r), 100);
+  assert.equal(
+    decide({ activePercent: bindingPercent(r), candidates: [{ accountId: 'b', percent: 20 }], threshold: 95 }).action,
+    'switch',
+  );
 });
 
 test('bindingPercent: unreadable usage is null, never 0', () => {
@@ -140,7 +158,7 @@ function harness(opts: {
   const switched: string[] = [];
   const accounts = Object.keys(opts.percentById).map(account);
   const deps: RotationDeps = {
-    getPolicy: () => ({ enabled: true, threshold: 95, ...opts.policy }),
+    getPolicy: () => ({ enabled: true, threshold: 95, resumeOnLimit: true, ...opts.policy }),
     getAccounts: () => accounts,
     getActiveId: () => (opts.activeId === undefined ? 'a' : opts.activeId),
     getAccountUsage: async (acct) => usage([meter({ percent: opts.percentById[acct.id], isActive: true })]),
@@ -177,6 +195,42 @@ test('runOnce: the cooldown prevents a second switch straight after the first', 
   await runOnce(deps);
   await runOnce(deps);
   assert.deepEqual(switched, ['b'], 'only the first pass may switch');
+});
+
+test('runOnce: an urgent pass switches through the cooldown', async () => {
+  // A chat reporting HTTP 429 is proof, not a meter hovering on a boundary —
+  // making it wait out the cooldown is what leaves it parked for ten minutes
+  // with a fresh account sitting right there.
+  __resetForTests();
+  const { deps, switched } = harness({ percentById: { a: 97, b: 9, c: 12 } });
+  await runOnce(deps);
+  assert.deepEqual(switched, ['b']);
+  const urgent = await runOnce(deps, { urgent: true });
+  assert.equal(urgent.switched, true);
+  assert.deepEqual(switched, ['b', 'b']);
+});
+
+test('runOnce: urgency does not override the headroom rule or the failure stop', async () => {
+  __resetForTests();
+  const nowhere = harness({ percentById: { a: 99, b: 97 } });
+  assert.equal((await runOnce(nowhere.deps, { urgent: true })).switched, false);
+  assert.deepEqual(nowhere.switched, []);
+
+  __resetForTests();
+  const broken = harness({
+    percentById: { a: 99, b: 5 },
+    switchImpl: async () => { throw new Error('keychain write could not be verified'); },
+  });
+  for (let i = 0; i < 4; i++) await runOnce(broken.deps, { urgent: true });
+  assert.equal(broken.switched.length, 3, 'the failure stop still applies');
+});
+
+test('runOnce: reports what it decided so a caller can act on it', async () => {
+  __resetForTests();
+  const { deps } = harness({ percentById: { a: 20, b: 9 } });
+  const outcome = await runOnce(deps);
+  assert.equal(outcome.switched, false);
+  assert.match(outcome.reason, /below 95%/);
 });
 
 test('runOnce: disabled policy is inert', async () => {
