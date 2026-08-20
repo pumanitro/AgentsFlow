@@ -18,7 +18,7 @@ import { execFileSync } from 'child_process';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { keepWarm, reconcileActive, serviceNameFor } from './accounts';
+import { freshenAccountToken, keepWarm, reconcileActive, serviceNameFor } from './accounts';
 import type { OAuthCredentials } from './accounts';
 import type { Account } from '../shared/types';
 
@@ -140,5 +140,142 @@ describe('credential reconciliation (keychain)', { skip: keychainUsable() ? fals
 
     assert.equal(read(MAIN).claudeAiOauth.refreshToken, 'refresh-ACTIVE');
     assert.equal(read(VAULT).claudeAiOauth.refreshToken, 'refresh-ACTIVE');
+  });
+
+  // -------------------------------------------------------------------------
+  // Proving a refresh was NOT attempted
+  // -------------------------------------------------------------------------
+  // "The tokens are unchanged" is too weak to guard these paths: a refresh of a
+  // token this suite invented would be REJECTED, so nothing gets written and the
+  // assertion holds whether or not the guard fired. The observable that actually
+  // separates the two is whether the endpoint was called at all — which every
+  // one of these paths reports by warning when it fails.
+  //
+  // It is also what keeps the file's no-network promise under a regression:
+  // every credential below either has no refresh token (so refreshCredentials
+  // throws before opening a socket) or belongs to a case that must not refresh.
+
+  /** Runs `fn`, reporting whether a refresh was attempted, by the warning it logs. */
+  async function watchRefreshes<T>(marker: string, fn: () => Promise<T>): Promise<{ result: T; tried: boolean }> {
+    const realWarn = console.warn;
+    let tried = false;
+    console.warn = (...args: unknown[]) => {
+      if (String(args[0] ?? '').includes(marker)) tried = true;
+    };
+    try {
+      return { result: await fn(), tried };
+    } finally {
+      console.warn = realWarn;
+    }
+  }
+
+  const attempted = async (fn: () => Promise<boolean>) => {
+    const { result, tried } = await watchRefreshes('token freshen failed', fn);
+    return { minted: result, tried };
+  };
+
+  test('keep-warm spares the signed-in account even with no active id recorded', async () => {
+    // `activeId && account.id === activeId` fails OPEN: with no id recorded the
+    // branch above never runs and the signed-in account arrives in the standby
+    // path like any other. Nothing re-records the id on its own, so this state
+    // persists — and every sweep would spend the CLI's refresh token.
+    const live = { accessToken: 'active-token', expiresAt: FAR };
+    write(MAIN, { claudeAiOauth: live });
+    write(VAULT, { claudeAiOauth: live });
+
+    const { tried } = await watchRefreshes('keep-warm failed', () => keepWarm([account], null));
+
+    assert.equal(tried, false, 'the CLI is holding this refresh token — the sweep must not spend it');
+    assert.equal(read(MAIN).claudeAiOauth.accessToken, 'active-token');
+    assert.equal(read(VAULT).claudeAiOauth.accessToken, 'active-token');
+  });
+
+  // -------------------------------------------------------------------------
+  // On-demand freshening — the standby account rotation could not see
+  // -------------------------------------------------------------------------
+
+  /** A fresh id per case: the module throttles retries per account for 10 minutes. */
+  const standby = (id: string): Account => ({ ...account, id, email: `${id}@gmail.com` });
+
+  test('freshen: a healthy standby token is left alone', async () => {
+    write(MAIN, { claudeAiOauth: creds('someone-else', 'refresh-OTHER', 0) });
+    write(VAULT, { claudeAiOauth: creds('standby', 'refresh-STANDBY', 0) });
+
+    const { minted, tried } = await attempted(() => freshenAccountToken(standby('healthy')));
+
+    assert.equal(minted, false);
+    assert.equal(tried, false, 'a token good for 30 days must not be re-minted');
+    assert.equal(read(VAULT).claudeAiOauth.refreshToken, 'refresh-STANDBY');
+  });
+
+  test('freshen: an expired standby token is taken to the refresh endpoint', async () => {
+    // The overnight bug: this token is hours dead, the usage endpoint rejects
+    // it, and rotation reads the account as having no headroom.
+    write(MAIN, { claudeAiOauth: creds('someone-else', 'refresh-OTHER', 0) });
+    write(VAULT, { claudeAiOauth: { accessToken: 'dead', expiresAt: Date.now() - 3600_000 } });
+
+    const { minted, tried } = await attempted(() => freshenAccountToken(standby('expired')));
+
+    assert.equal(tried, true, 'an expired standby token must be re-minted, not ignored');
+    assert.equal(minted, false, 'no refresh token here, so the attempt fails — harmlessly');
+  });
+
+  test('freshen: an unknown expiry counts as stale rather than healthy', async () => {
+    // isExpiring() answers false when expiresAt is absent. Reading that as
+    // "healthy" is how an account stays invisible to rotation forever.
+    write(MAIN, { claudeAiOauth: creds('someone-else', 'refresh-OTHER', 0) });
+    write(VAULT, { claudeAiOauth: { accessToken: 'no-expiry-recorded' } });
+
+    const { tried } = await attempted(() => freshenAccountToken(standby('no-expiry')));
+
+    assert.equal(tried, true);
+  });
+
+  test('freshen: the account holding the main slot is refused, whatever the caller believed', async () => {
+    // The safety net. The caller here is wrong — it has passed the account the
+    // CLI is actually running on — and the answer must still be "no".
+    const live: OAuthCredentials = { accessToken: 'active-token', expiresAt: Date.now() - 3600_000 };
+    write(MAIN, { claudeAiOauth: live });
+    write(VAULT, { claudeAiOauth: live });
+
+    const { minted, tried } = await attempted(() => freshenAccountToken(standby('is-really-active'), { force: true }));
+
+    assert.equal(minted, false);
+    assert.equal(tried, false, 'the CLI is holding this refresh token — re-minting it ends in "Login expired"');
+    assert.equal(read(MAIN).claudeAiOauth.accessToken, 'active-token');
+  });
+
+  test('freshen: distrusting the stored expiry re-mints a token that only looks healthy', async () => {
+    // What a rejection from the endpoint means: our bookkeeping is wrong. The
+    // expiry here is 30 days out and the token is still to be replaced.
+    write(MAIN, { claudeAiOauth: creds('someone-else', 'refresh-OTHER', 0) });
+    write(VAULT, { claudeAiOauth: { accessToken: 'looks-fine', expiresAt: FAR } });
+
+    const plain = await attempted(() => freshenAccountToken(standby('lying-expiry')));
+    assert.equal(plain.tried, false, 'without the rejection, the stored expiry is believed');
+
+    const distrusted = await attempted(() =>
+      freshenAccountToken(standby('lying-expiry-2'), { distrustStoredExpiry: true }));
+    assert.equal(distrusted.tried, true, 'the endpoint outranks our own expiry');
+  });
+
+  test('freshen: a rejection-driven pass does not ride a plain one already in flight', async () => {
+    // Sharing an in-flight pass is only right when it answers the same
+    // question. The plain pass believes the stored expiry and returns "nothing
+    // needed doing"; handing that answer to a caller who just watched the
+    // endpoint REJECT the token silently skips the re-mint. The second call
+    // below is issued in the same tick, so the first is guaranteed in flight.
+    write(MAIN, { claudeAiOauth: creds('someone-else', 'refresh-OTHER', 0) });
+    write(VAULT, { claudeAiOauth: { accessToken: 'looks-fine', expiresAt: FAR } });
+
+    const acct = standby('concurrent');
+    const { tried } = await attempted(async () => {
+      const plain = freshenAccountToken(acct);
+      const rejected = freshenAccountToken(acct, { distrustStoredExpiry: true });
+      const [, second] = await Promise.all([plain, rejected]);
+      return second;
+    });
+
+    assert.equal(tried, true, 'the rejection-driven pass must still reach the endpoint');
   });
 });

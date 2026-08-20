@@ -128,6 +128,31 @@ test('decide: unreadable active usage does nothing rather than guessing', () => 
   assert.match(d.reason, /unreadable/);
 });
 
+// The night of 2026-08-20: three standby tokens expired, one account full, and
+// the log said only "no other account is below 95%" — indistinguishable from a
+// genuinely exhausted pool. Blind and full must read differently.
+test('decide: exhaustion counts unreadable accounts instead of hiding them', () => {
+  const d = decide({
+    activePercent: 100,
+    candidates: [
+      { accountId: 'b', percent: null },
+      { accountId: 'c', percent: null },
+      { accountId: 'd', percent: 96 },
+    ],
+    threshold: 95,
+  });
+  assert.equal(d.action, 'exhausted');
+  assert.match(d.reason, /1 at\/above 95%/);
+  assert.match(d.reason, /2 unreadable/);
+});
+
+test('decide: an all-readable exhausted pool keeps the plain percentage message', () => {
+  const d = decide({ activePercent: 99, candidates: [{ accountId: 'b', percent: 96 }], threshold: 95 });
+  assert.equal(d.action, 'exhausted');
+  assert.match(d.reason, /no other account is below 95%/);
+  assert.doesNotMatch(d.reason, /unreadable/);
+});
+
 test('decide: no candidates at all is exhausted, not a crash', () => {
   const d = decide({ activePercent: 99, candidates: [], threshold: 95 });
   assert.equal(d.action, 'exhausted');

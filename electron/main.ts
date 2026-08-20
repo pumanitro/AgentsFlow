@@ -585,15 +585,41 @@ ipcMain.handle('accounts:usage', (_e, id: string, force?: boolean) => {
   if (!account) {
     return { ok: false, reason: 'no-auth', error: 'Account not found.' } as const;
   }
-  return getUsageForService(accounts.serviceNameFor(account.configDir), Boolean(force));
+  return accountUsage(account, Boolean(force));
 });
 
 // ----- Automatic rotation -----
 // Runs the same switchTo() the button calls, on a threshold. Lives here rather
 // than in the renderer so an overnight run keeps rotating with the window shut.
 
-function accountUsage(account: Account, force: boolean): Promise<UsageResult> {
-  return getUsageForService(accounts.serviceNameFor(account.configDir), force);
+async function accountUsage(account: Account, force: boolean): Promise<UsageResult> {
+  const service = accounts.serviceNameFor(account.configDir);
+  // A standby account's access token dies hours after the daily keep-warm
+  // sweep, so freshen it just before reading. Never the active account, whose
+  // refresh token the running CLI is holding — and an unknown active id proves
+  // nothing about which account that is, so it means "leave every one alone".
+  const activeId = store.getActiveAccountId();
+  if (account.id === activeId) return getUsageForService(service, force);
+  // No recorded active account is a state that does not self-heal, so it must
+  // not simply disable freshening — that would restore the overnight blindness
+  // permanently. Fall back to the login's own identity, and act only on a
+  // positive "this is not it".
+  if (!activeId && !accounts.provablyNotTheLogin(account)) return getUsageForService(service, force);
+
+  await accounts.freshenAccountToken(account, { force });
+  const result = await getUsageForService(service, force);
+  // A network blip is not a token problem, and an account with no credentials
+  // at all cannot be refreshed into having some. Only spend a re-mint on a
+  // reply that could actually be an expired token.
+  if (result.ok || result.reason === 'network' || result.reason === 'no-auth') return result;
+
+  // The stored expiry said the token was fine and the endpoint disagreed. The
+  // endpoint is the authority (it answers an expired token with 429, which is
+  // indistinguishable from real rate-limiting), so re-mint once on its word:
+  // without this, an account whose expiry bookkeeping is wrong stays invisible
+  // to rotation indefinitely — the very failure this whole path exists to end.
+  const reminted = await accounts.freshenAccountToken(account, { force: true, distrustStoredExpiry: true });
+  return reminted ? getUsageForService(service, true) : result;
 }
 
 const rotationDeps: rotation.RotationDeps = {

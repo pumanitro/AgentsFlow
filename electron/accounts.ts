@@ -263,6 +263,138 @@ export async function ensureFresh(account: Account, creds: OAuthCredentials): Pr
 }
 
 // ---------------------------------------------------------------------------
+// On-demand freshen — how a STANDBY account stays readable around the clock
+// ---------------------------------------------------------------------------
+// Access tokens live only a few hours; the daily keep-warm sweep exists for the
+// 30-day refresh token, not for them. So by night every standby account's token
+// is dead, the usage endpoint rejects it, and rotation reads "no other account
+// is below 95%" while accounts with real headroom sit unreadable (2026-08-20).
+// Refreshing at the moment a meter is about to be read closes that hole.
+//
+// MUST NOT re-mint the ACTIVE account's token: the CLI holds the main-slot copy
+// of its refresh token, and rotating it under a running session is the exact
+// sequence that ends in "Login expired". The active vault stays fresh via
+// mirroring instead. Callers pass their idea of which account is active, but
+// the invariant does not rely on them — an account whose credentials ARE the
+// ones in the main slot is refused here, whatever the caller believed.
+
+// A refresh that failed must not be retried on every 60s tick all night.
+const FRESHEN_RETRY_MS = 10 * 60 * 1000;
+
+/** A pass in flight, tagged with whether it doubts the stored expiry. */
+interface FreshenRun { p: Promise<boolean>; distrust: boolean }
+
+const freshenInflight = new Map<string, FreshenRun>();
+const freshenFailedAt = new Map<string, number>();
+const freshenDistrustedAt = new Map<string, number>();
+
+/**
+ * Whether these are the credentials the CLI is running on — the one account
+ * whose refresh token must never be re-minted behind its back.
+ *
+ * Asked two ways because either alone has a hole. Identity is definitive but
+ * absent for an account added before the pool recorded uuids; the token
+ * comparison catches the mirrored copy but not one that has already diverged
+ * (the CLI rotated main and our vault copy is stale). Together they cover
+ * every case a caller's `activeId` could be wrong about.
+ */
+async function holdsMainSlot(account: Account, creds: OAuthCredentials): Promise<boolean> {
+  const signedInAs = cachedLoginAccountUuid();
+  if (signedInAs && account.accountUuid === signedInAs) return true;
+  return sameCreds(parseOAuth(await readSlotRaw(MAIN_SERVICE)), creds);
+}
+
+/**
+ * Positive proof that this account is NOT the login the CLI is running on.
+ *
+ * For the caller that has no recorded active account and must still decide.
+ * Absence of proof is never proof: an unknown uuid on either side answers
+ * false, which callers must read as "leave this one alone". Token equality is
+ * deliberately not consulted here — it goes stale the moment the CLI rotates
+ * its own copy, and a stale comparison is exactly how the active account gets
+ * mistaken for a standby one.
+ */
+export function provablyNotTheLogin(account: Account): boolean {
+  const signedInAs = cachedLoginAccountUuid();
+  return Boolean(signedInAs && account.accountUuid && account.accountUuid !== signedInAs);
+}
+
+export interface FreshenOptions {
+  /** Retry through the post-failure back-off (a manual refresh, an urgent pass). */
+  force?: boolean;
+  /**
+   * Re-mint even though the stored expiry still looks valid. For use after the
+   * server has actually rejected the token — a rejection outranks our own
+   * bookkeeping, which is the only witness `isExpiring` consults.
+   */
+  distrustStoredExpiry?: boolean;
+}
+
+/**
+ * Make a standby account's access token usable if it isn't. Returns whether a
+ * new token was actually minted, so a caller can tell "nothing needed doing"
+ * from "try that read again".
+ *
+ * Failures are swallowed: the caller is about to read usage, and a failed
+ * refresh simply leaves that read unreadable — as it was before, minus the
+ * silence in the log.
+ */
+export function freshenAccountToken(account: Account, opts: FreshenOptions = {}): Promise<boolean> {
+  const { force = false, distrustStoredExpiry = false } = opts;
+  const running = freshenInflight.get(account.id);
+  if (running) {
+    // Sharing a pass in flight is right only when it answers the same question.
+    // A plain freshen BELIEVES the stored expiry, which is the one thing a
+    // rejection-driven pass exists to doubt — riding it would return its
+    // "nothing needed doing" and silently skip the re-mint that the endpoint
+    // just told us was needed. Wait for it instead, then ask properly.
+    if (!distrustStoredExpiry || running.distrust) return running.p;
+    return running.p.then((minted) => (minted ? true : freshenAccountToken(account, opts)));
+  }
+  if (!force && Date.now() - (freshenFailedAt.get(account.id) ?? 0) < FRESHEN_RETRY_MS) {
+    return Promise.resolve(false);
+  }
+  // Distrusting the stored expiry means nothing else limits the rate, so this
+  // path carries its own back-off: otherwise a token the server keeps refusing
+  // for some other reason would be re-minted on every tick all night.
+  if (distrustStoredExpiry && Date.now() - (freshenDistrustedAt.get(account.id) ?? 0) < FRESHEN_RETRY_MS) {
+    return Promise.resolve(false);
+  }
+
+  const p = (async () => {
+    try {
+      const creds = await readAccountCreds(account);
+      if (!creds) return false;
+      // No stored expiry at all means we cannot forecast; treat that as stale
+      // rather than as healthy, or the account stays invisible forever.
+      if (!distrustStoredExpiry && creds.expiresAt && !isExpiring(creds)) return false;
+
+      // The safety net for the invariant above, independent of any caller.
+      if (await holdsMainSlot(account, creds)) return false;
+
+      if (distrustStoredExpiry) freshenDistrustedAt.set(account.id, Date.now());
+      const fresh = await refreshCredentials(creds);
+      await writeOAuthToSlot(serviceNameFor(account.configDir), fresh);
+      freshenFailedAt.delete(account.id);
+      console.log('[agentsflow][accounts] freshened a standby token', {
+        email: account.email,
+        afterRejection: distrustStoredExpiry,
+      });
+      return true;
+    } catch (err) {
+      freshenFailedAt.set(account.id, Date.now());
+      console.warn('[agentsflow][accounts] token freshen failed — meters stay unreadable', {
+        email: account.email,
+        error: (err as Error)?.message ?? String(err),
+      });
+      return false;
+    }
+  })().finally(() => { freshenInflight.delete(account.id); });
+  freshenInflight.set(account.id, { p, distrust: distrustStoredExpiry });
+  return p;
+}
+
+// ---------------------------------------------------------------------------
 // ~/.claude.json — swap the recorded account identity alongside the tokens
 // ---------------------------------------------------------------------------
 
@@ -862,6 +994,10 @@ export async function keepWarm(accounts: Account[], activeId?: string | null): P
       }
       const creds = await readAccountCreds(account);
       if (!creds) continue;
+      // "Not the active id" is not the same as "nobody else holds these": with
+      // no active id recorded, the branch above never runs and the signed-in
+      // account arrives here like any other. Ask the login itself instead.
+      if (await holdsMainSlot(account, creds)) continue;
       // Deliberately refresh well before expiry so an account that is never
       // switched to still exercises (and therefore extends) its refresh token.
       // Safe here precisely because nothing else holds a copy of these.

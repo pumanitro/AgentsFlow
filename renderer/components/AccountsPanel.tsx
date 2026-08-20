@@ -222,11 +222,20 @@ function AccountRow({
           {active && (
             <span className="text-[9px] uppercase tracking-wider text-info shrink-0">active</span>
           )}
-          {meter && (
+          {meter ? (
             <span className="ml-auto text-[11px] font-mono shrink-0" style={{ color }}>
               {meter.percent}%
             </span>
-          )}
+          ) : usage ? (
+            // Blind is not fine: an account whose meters cannot be read is
+            // exactly the account rotation can never switch to.
+            <span
+              className="ml-auto text-[11px] font-mono shrink-0 text-warning"
+              title={usage.ok ? 'No meters returned' : `Meters unreadable — ${usage.error}`}
+            >
+              ?
+            </span>
+          ) : null}
         </div>
         <div className="mt-1 h-1 rounded-full overflow-hidden" style={{ backgroundColor: 'rgba(255,255,255,0.08)' }}>
           <div

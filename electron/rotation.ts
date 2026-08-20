@@ -83,9 +83,25 @@ export function decide(opts: {
     .sort((a, b) => a.percent - b.percent);
 
   if (withHeadroom.length === 0) {
+    const unreadable = candidates.filter((c) => c.percent === null).length;
+    if (unreadable === 0) {
+      return {
+        action: 'exhausted',
+        reason: `active at ${activePercent}%, but no other account is below ${threshold}%`,
+      };
+    }
+    // "Full" and "meters we cannot read" are different emergencies — the second
+    // one the user can fix (or upstream freshening should have prevented), so
+    // it must not hide behind a message about percentages, which is how a night
+    // of expired standby tokens read as "everything is full" (2026-08-20).
+    const full = candidates.length - unreadable;
+    const parts = [
+      full > 0 ? `${full} at/above ${threshold}%` : null,
+      `${unreadable} unreadable`,
+    ].filter(Boolean);
     return {
       action: 'exhausted',
-      reason: `active at ${activePercent}%, but no other account is below ${threshold}%`,
+      reason: `active at ${activePercent}%, but no other account is usable — ${parts.join(', ')}`,
     };
   }
   const best = withHeadroom[0];

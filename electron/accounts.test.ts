@@ -1,6 +1,9 @@
 import { strict as assert } from 'node:assert';
 import { test } from 'node:test';
 import * as crypto from 'crypto';
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
 import {
   evaluateLogin,
   isEmailAddress,
@@ -8,6 +11,7 @@ import {
   mergeOAuthInto,
   newerCreds,
   parseAuthStatus,
+  provablyNotTheLogin,
   sameCreds,
   serviceNameFor,
   slugForEmail,
@@ -269,4 +273,63 @@ test('newerCreds: ties and unknown expiries defer to main', () => {
   assert.equal(newerCreds(creds({ expiresAt: undefined }), creds({ expiresAt: undefined })), 'main');
   // ...but a dated copy still beats an undated one.
   assert.equal(newerCreds(creds({ expiresAt: undefined }), creds({ expiresAt: 1 })), 'vault');
+});
+
+// ---------------------------------------------------------------------------
+// "Is this definitely NOT the account the CLI is signed in as?"
+// ---------------------------------------------------------------------------
+// The question asked when no active account is recorded — a state that does not
+// self-heal, so answering it wrongly is not a transient. Wrong in one direction
+// re-mints the running session's refresh token and ends in "Login expired";
+// wrong in the other leaves every standby account unreadable and rotation
+// parked all night. Only a positive, identity-based "not it" may say yes.
+
+/** Runs `fn` with $HOME pointed at a throwaway dir holding this `.claude.json`. */
+function withLogin<T>(config: unknown | null, fn: () => T): T {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'agentsflow-home-'));
+  if (config !== null) fs.writeFileSync(path.join(home, '.claude.json'), JSON.stringify(config));
+  const realHome = process.env.HOME;
+  process.env.HOME = home;
+  try {
+    return fn();
+  } finally {
+    if (realHome === undefined) delete process.env.HOME;
+    else process.env.HOME = realHome;
+    try { fs.rmSync(home, { recursive: true, force: true }); } catch { /* ignore */ }
+  }
+}
+
+const signedIn = (uuid: string) => ({ oauthAccount: { accountUuid: uuid } });
+
+test('provablyNotTheLogin: a different uuid than the login is proof', () => {
+  assert.equal(
+    withLogin(signedIn('uuid-LOGIN'), () => provablyNotTheLogin(account({ accountUuid: 'uuid-OTHER' }))),
+    true,
+  );
+});
+
+test('provablyNotTheLogin: the login itself is never "not the login"', () => {
+  assert.equal(
+    withLogin(signedIn('uuid-LOGIN'), () => provablyNotTheLogin(account({ accountUuid: 'uuid-LOGIN' }))),
+    false,
+  );
+});
+
+test('provablyNotTheLogin: an unknown uuid on either side abstains', () => {
+  // Absence of proof is not proof. Both of these must fail SAFE — refusing to
+  // touch an account we cannot identify — rather than defaulting to "standby".
+  assert.equal(
+    withLogin(signedIn('uuid-LOGIN'), () => provablyNotTheLogin(account({ accountUuid: undefined }))),
+    false,
+    'an account with no recorded uuid could be the login',
+  );
+  assert.equal(
+    withLogin({ oauthAccount: {} }, () => provablyNotTheLogin(account({ accountUuid: 'uuid-OTHER' }))),
+    false,
+    'a login we cannot identify could be any account',
+  );
+});
+
+test('provablyNotTheLogin: no config file at all abstains rather than throwing', () => {
+  assert.equal(withLogin(null, () => provablyNotTheLogin(account({ accountUuid: 'uuid-OTHER' }))), false);
 });
