@@ -435,4 +435,34 @@ export function installCrashLogging(): void {
       setTimeout(() => process.exit(0), 1500).unref?.();
     });
   }
+
+  // A voluntary exit (exit()/app.exit()) still runs 'exit' listeners even when
+  // the quit lifecycle above was cut short; a kill by signal runs nothing. This
+  // line therefore separates "the app chose to exit" from "something killed it"
+  // — the distinction the 2026-08-20 incident report could not make (both quits
+  // that day show before-quit and then silence). Only synchronous work is legal
+  // in an 'exit' listener, which rawWrite is.
+  process.on('exit', (code) => {
+    rawWrite(stamp('INFO', `[agentsflow][lifecycle] process exit code=${code}`));
+  });
+
+  // Orphan watch. Launched from a terminal (`npm run dev`), the app's parent is
+  // the electron CLI wrapper. If that stack dies without signalling us (the
+  // 2026-08-20 incident: concurrently/next died, tree-kill never reached the
+  // GUI binary), the app silently reparents to launchd (ppid 1) and lives on as
+  // a zombie wired to a dead dev server — the window then white-screens on its
+  // next load with no trace anywhere. Packaged launches start with ppid 1, so
+  // the watch disarms itself there.
+  if (process.ppid !== 1) {
+    const orphanMon = setInterval(() => {
+      if (process.ppid !== 1) return;
+      clearInterval(orphanMon);
+      console.error(
+        '[agentsflow][lifecycle] parent process died — the app is now orphaned. ' +
+          'If it was started by `npm run dev`, the dev server on :3030 is gone and ' +
+          'the window will show the reconnect page on its next load.',
+      );
+    }, 5000);
+    orphanMon.unref?.();
+  }
 }

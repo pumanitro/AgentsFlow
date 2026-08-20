@@ -154,6 +154,45 @@ const timedIpcHandle: IpcHandleFn = (channel, listener) =>
   );
 ipcMain.handle = timedIpcHandle;
 
+/**
+ * Shown in place of a silent white window when the main frame fails to load —
+ * the signature of the `npm run dev` stack dying under the app (`:3030`
+ * connection refused) and of broken packaged builds. For http targets the page
+ * re-probes the original URL and navigates back by itself the moment the
+ * server answers again.
+ */
+function failLoadPage(url: string, desc: string, code: number): string {
+  const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  const isDevServer = url.startsWith('http://localhost:3030');
+  const title = isDevServer ? 'Dev server is down' : 'Window failed to load';
+  const hint = isDevServer
+    ? 'The <code>npm run dev</code> stack behind this window is gone. Restart it — this window reconnects on its own.'
+    : 'Check main.log for the <code>[fatal]</code> line with this failure.';
+  return `<!doctype html><html><head><meta charset="utf-8"><title>${title}</title></head>
+<body style="margin:0;display:flex;align-items:center;justify-content:center;height:100vh;background:#0f1115;color:#e6e9ef;font:15px/1.6 -apple-system,BlinkMacSystemFont,sans-serif">
+<div style="max-width:560px;padding:0 32px">
+<h1 style="font-size:22px;margin:0 0 12px;color:#ff6b6b">${title}</h1>
+<p style="margin:0 0 8px">${hint}</p>
+<p style="margin:0 0 20px;color:#8b93a7;word-break:break-all"><code>${esc(url)}</code> — ${esc(desc)} (${code})</p>
+<button id="retry" style="padding:8px 20px;font-size:14px;font-weight:600;color:#0f1115;background:#e6e9ef;border:none;border-radius:6px;cursor:pointer">Retry now</button>
+<span id="status" style="margin-left:12px;color:#8b93a7"></span>
+</div>
+<script>
+  const target = ${JSON.stringify(url)};
+  document.getElementById('retry').addEventListener('click', () => location.replace(target));
+  if (/^https?:/.test(target)) {
+    document.getElementById('status').textContent = 'retrying automatically…';
+    setInterval(async () => {
+      try {
+        await fetch(target, { mode: 'no-cors', cache: 'no-store' });
+        location.replace(target);
+      } catch { /* still down */ }
+    }, 3000);
+  }
+</script>
+</body></html>`;
+}
+
 function createWindow() {
   const win = new BrowserWindow({
     width: 1200,
@@ -208,6 +247,16 @@ function createWindow() {
     loadURL!(win);
   }
   mainWindow = win;
+  // A failed main-frame load used to leave a silent white window with no log
+  // line anywhere — what a dead dev server looks like to the user. -3
+  // (ERR_ABORTED) is ordinary navigation churn, not a failure.
+  win.webContents.on('did-fail-load', (_e, code, desc, failedUrl, isMainFrame) => {
+    if (!isMainFrame || code === -3) return;
+    console.error(`[agentsflow][fatal] window failed to load ${failedUrl}: ${desc} (${code})`);
+    win
+      .loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(failLoadPage(failedUrl, desc, code))}`)
+      .catch(() => undefined);
+  });
   // Renderer-side stalls are observable from the main process even when the
   // renderer itself is wedged — pure diagnosis signal for a freeze report.
   win.webContents.on('unresponsive', () => console.error('[agentsflow][stall] renderer unresponsive'));
@@ -324,6 +373,7 @@ app.whenReady().then(() => {
 });
 
 app.on('window-all-closed', () => {
+  console.log('[agentsflow][lifecycle] window-all-closed');
   stopPoller();
   pty.detachAll();
   fileWatcher.unwatchAll().catch(() => undefined);
