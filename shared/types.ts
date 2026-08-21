@@ -238,6 +238,11 @@ export interface Account {
   // 'max' | 'pro' | … straight from `claude auth status --json`.
   subscriptionType?: string;
   addedAt: string;
+  // Set (to a human-readable reason) while this account's stored sign-in is
+  // known dead — its refresh token was rejected by the token server, so nothing
+  // short of a fresh login brings it back. Runtime-only: filled into snapshots
+  // by the main process, never persisted.
+  needsLogin?: string;
 }
 
 export interface AccountsSnapshot {

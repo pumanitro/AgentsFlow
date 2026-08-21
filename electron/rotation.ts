@@ -19,9 +19,20 @@
 // The threshold is a PREDICTION, and predictions miss: the meters lag, the
 // usage endpoint 429s under a five-account poll, and a burst can cross 95→100
 // inside one tick. So limit-watch.ts calls in here with `urgent` the moment a
-// chat actually reports a rate-limit wall — same policy, same switch, but on
-// proof rather than a forecast (and past the cooldown, because a 429 is not a
-// meter hovering on a boundary).
+// chat actually reports a rate-limit wall — same switch, but on proof rather
+// than a forecast (and past the cooldown, because a 429 is not a meter hovering
+// on a boundary).
+//
+// Proof outranks the meter. The night of 2026-08-21 a chat reported "You've hit
+// your session limit" while the active account's worst meter read 43%, and the
+// urgent pass still answered "active at 43% (below 90%)" — walls exist that no
+// row of `limits[]` reports. So a forced pass (a wall, or a login that has been
+// unreadable for minutes) no longer asks the active meter's permission at all;
+// it only asks whether there is somewhere readable to go. The same night the
+// active login was revoked server-side and its meters went unreadable for 87
+// minutes; "unreadable active ⇒ do nothing" held rotation still with four
+// healthy accounts beside it. Blindness about the TARGET is a reason not to
+// switch; blindness about the SOURCE is, after a grace, the reason to.
 
 import type { Account, RotationPolicy, RotationStatus, UsageResult } from '../shared/types';
 import { bindingPercent } from '../shared/usage';
@@ -35,6 +46,19 @@ const TICK_MS = 60_000;
 const COOLDOWN_MS = 5 * 60 * 1000;
 // After this many consecutive failed switches we stop trying and surface it.
 const MAX_CONSECUTIVE_FAILURES = 3;
+// How long the active account's meters may stay unreadable before that, by
+// itself, is treated as "this login is broken — move". Long enough to ride out
+// a 429 burst from the usage endpoint; short enough that a revoked token costs
+// minutes, not the night. A switch only happens if some OTHER account reads
+// fine, which is what separates a broken login from the endpoint being down.
+const BLIND_SWITCH_AFTER_MS = 5 * 60 * 1000;
+// An account a chat just proved full is not a target for a while, whatever its
+// meter claims — the meter is what was wrong. Without this an urgent switch
+// a→b followed by a wall on b would pick a straight back.
+const PROVEN_FULL_MS = 30 * 60 * 1000;
+
+// Injectable clock — the grace periods above are the point of several tests.
+let now: () => number = () => Date.now();
 
 export const DEFAULT_POLICY: RotationPolicy = {
   enabled: false,
@@ -63,20 +87,30 @@ export type RotationDecision =
  * An account whose meters we could not read is never chosen. Switching blind at
  * 3am onto an account that might also be exhausted just burns the cooldown and
  * leaves the user worse off than a clear "everything is full" message.
+ *
+ * `force` is the one way past the active meter: a short statement of what is
+ * KNOWN to be wrong with the active account ("a chat hit the wall", "login
+ * unreadable for 6 min"). With it set, the meter is reported but not consulted
+ * — the decision is purely whether a readable account with headroom exists.
  */
 export function decide(opts: {
   activePercent: number | null;
   candidates: CandidateUsage[];
   threshold: number;
+  force?: string | null;
 }): RotationDecision {
-  const { activePercent, candidates, threshold } = opts;
+  const { activePercent, candidates, threshold, force = null } = opts;
 
-  if (activePercent === null) {
-    return { action: 'none', reason: 'active account usage unreadable' };
+  if (!force) {
+    if (activePercent === null) {
+      return { action: 'none', reason: 'active account usage unreadable' };
+    }
+    if (activePercent < threshold) {
+      return { action: 'none', reason: `active at ${activePercent}% (below ${threshold}%)` };
+    }
   }
-  if (activePercent < threshold) {
-    return { action: 'none', reason: `active at ${activePercent}% (below ${threshold}%)` };
-  }
+  const meter = activePercent === null ? 'meter unreadable' : `meter at ${activePercent}%`;
+  const active = force ? `${force} (${meter})` : `active at ${activePercent}%`;
 
   const withHeadroom = candidates
     .filter((c): c is { accountId: string; percent: number } => c.percent !== null && c.percent < threshold)
@@ -87,7 +121,7 @@ export function decide(opts: {
     if (unreadable === 0) {
       return {
         action: 'exhausted',
-        reason: `active at ${activePercent}%, but no other account is below ${threshold}%`,
+        reason: `${active}, but no other account is below ${threshold}%`,
       };
     }
     // "Full" and "meters we cannot read" are different emergencies — the second
@@ -101,14 +135,14 @@ export function decide(opts: {
     ].filter(Boolean);
     return {
       action: 'exhausted',
-      reason: `active at ${activePercent}%, but no other account is usable — ${parts.join(', ')}`,
+      reason: `${active}, but no other account is usable — ${parts.join(', ')}`,
     };
   }
   const best = withHeadroom[0];
   return {
     action: 'switch',
     targetId: best.accountId,
-    reason: `active at ${activePercent}% → switching to the account at ${best.percent}%`,
+    reason: `${active} → switching to the account at ${best.percent}%`,
   };
 }
 
@@ -169,13 +203,18 @@ export type RunOutcome =
  * waiting on real timers. An unattended feature that retries a broken switch
  * every minute all night is the failure mode worth having tests for.
  *
- * `urgent` is the limit-watch path: a chat has hit a real 429, so the meters
- * are re-read past their cache and the cooldown does not apply. Everything else
- * — the failure stop, the headroom requirement, never choosing an account whose
+ * `urgent` is the limit-watch path: a chat has hit a real wall, so the meters
+ * are re-read past their cache, the cooldown does not apply, and the active
+ * meter is not consulted (see `decide`'s `force`). `cause` names the proof for
+ * the log and status line; it defaults to the wall. Everything else — the
+ * failure stop, the headroom requirement, never choosing an account whose
  * usage we could not read — is identical, because those guards exist to stop
  * thrashing and a real wall does not make thrashing safe.
  */
-export async function runOnce(deps: RotationDeps, opts: { urgent?: boolean } = {}): Promise<RunOutcome> {
+export async function runOnce(
+  deps: RotationDeps,
+  opts: { urgent?: boolean; cause?: string } = {},
+): Promise<RunOutcome> {
   const urgent = Boolean(opts.urgent);
   if (running) return { switched: false, reason: 'a pass is already running' };
   const policy = deps.getPolicy();
@@ -184,7 +223,7 @@ export async function runOnce(deps: RotationDeps, opts: { urgent?: boolean } = {
 
   const accounts = deps.getAccounts();
   if (accounts.length < 2) return { switched: false, reason: 'only one account in the pool' };
-  if (!urgent && Date.now() - lastSwitchAt < COOLDOWN_MS) {
+  if (!urgent && now() - lastSwitchAt < COOLDOWN_MS) {
     return { switched: false, reason: 'switched too recently' };
   }
 
@@ -203,17 +242,33 @@ export async function runOnce(deps: RotationDeps, opts: { urgent?: boolean } = {
     // Unreadable usage is the one "do nothing" that is worth saying out loud:
     // it looks identical to a healthy account from outside, and it is how a
     // 429'd usage endpoint silently parks rotation for a whole night. Said
-    // once per spell, not once a minute.
+    // once per spell, not once a minute — and after BLIND_SWITCH_AFTER_MS of
+    // it, no longer a "do nothing" at all.
     if (activePercent === null) noteUnreadable(activeUsage);
     else clearUnreadable();
 
+    const blindFor = activePercent === null && unreadableSince ? now() - unreadableSince : 0;
+    const force = urgent
+      ? (opts.cause ?? 'a chat hit the wall')
+      : blindFor >= BLIND_SWITCH_AFTER_MS
+        ? `active login unreadable for ${Math.round(blindFor / 60_000)} min`
+        : null;
+
     const others = accounts.filter((a) => a.id !== activeId);
-    const preview = decide({ activePercent, candidates: others.map((a) => ({ accountId: a.id, percent: null })), threshold: policy.threshold });
+    const preview = decide({
+      activePercent,
+      candidates: others.map((a) => ({ accountId: a.id, percent: null })),
+      threshold: policy.threshold,
+      force,
+    });
     if (preview.action === 'none') return { switched: false, reason: preview.reason };
 
-    // Only now is it worth spending a request per candidate.
+    // Only now is it worth spending a request per candidate. An account a chat
+    // proved full recently is reported as full, whatever its meter says now —
+    // the meter is the thing that was wrong about it.
     const candidates: CandidateUsage[] = await Promise.all(
       others.map(async (a) => {
+        if (now() - (provenFullAt.get(a.id) ?? 0) < PROVEN_FULL_MS) return { accountId: a.id, percent: 100 };
         try {
           return { accountId: a.id, percent: bindingPercent(await deps.getAccountUsage(a, urgent)) };
         } catch {
@@ -222,7 +277,7 @@ export async function runOnce(deps: RotationDeps, opts: { urgent?: boolean } = {
       }),
     );
 
-    const decision = decide({ activePercent, candidates, threshold: policy.threshold });
+    const decision = decide({ activePercent, candidates, threshold: policy.threshold, force });
     if (decision.action === 'none') return { switched: false, reason: decision.reason };
 
     if (decision.action === 'exhausted') {
@@ -235,11 +290,16 @@ export async function runOnce(deps: RotationDeps, opts: { urgent?: boolean } = {
     }
 
     const target = accounts.find((a) => a.id === decision.targetId)!;
-    console.log('[agentsflow][rotation] auto-switching', { to: target.email, reason: decision.reason, urgent });
+    console.log('[agentsflow][rotation] auto-switching', { to: target.email, reason: decision.reason, urgent, forced: Boolean(force) });
     try {
       await deps.switchTo(target.id);
-      lastSwitchAt = Date.now();
+      lastSwitchAt = now();
       consecutiveFailures = 0;
+      // A wall is proof about the account we are leaving; a blind spell is
+      // about a login we are no longer on. Neither carries over to the target.
+      if (urgent && activeId) provenFullAt.set(activeId, now());
+      unreadableSince = 0;
+      unreadableReason = '';
       setStatus(deps, { lastEvent: `Switched to ${target.email} — ${decision.reason}`, disabledReason: null });
       return { switched: true, account: target, reason: decision.reason };
     } catch (err) {
@@ -273,18 +333,26 @@ export async function runOnce(deps: RotationDeps, opts: { urgent?: boolean } = {
 
 let unreadableSince = 0;
 let unreadableReason = '';
+// Accounts a chat has proved full, by when — see PROVEN_FULL_MS.
+const provenFullAt = new Map<string, number>();
 
 function noteUnreadable(result: Awaited<ReturnType<RotationDeps['getActiveUsage']>> | null): void {
   const reason = result && !result.ok ? `${result.reason}: ${result.error}` : 'no meters returned';
-  if (unreadableSince && reason === unreadableReason) return;
-  unreadableSince = Date.now();
+  // The spell started when the meters first went dark, not when the error text
+  // last changed — a 429 that turns into a 401 is the same outage, and the
+  // blind-switch grace must not restart on it.
+  if (!unreadableSince) unreadableSince = now();
+  if (reason === unreadableReason) return;
   unreadableReason = reason;
-  console.warn('[agentsflow][rotation] active account usage is unreadable — the threshold cannot fire', { reason });
+  console.warn('[agentsflow][rotation] active account usage is unreadable — switching after a grace if another account reads fine', {
+    reason,
+    graceMs: BLIND_SWITCH_AFTER_MS,
+  });
 }
 
 function clearUnreadable(): void {
   if (!unreadableSince) return;
-  console.log('[agentsflow][rotation] usage readable again', { blindForMs: Date.now() - unreadableSince });
+  console.log('[agentsflow][rotation] usage readable again', { blindForMs: now() - unreadableSince });
   unreadableSince = 0;
   unreadableReason = '';
 }
@@ -308,5 +376,12 @@ export function __resetForTests(): void {
   consecutiveFailures = 0;
   unreadableSince = 0;
   unreadableReason = '';
+  provenFullAt.clear();
+  now = () => Date.now();
   status = { lastEvent: null, lastEventAt: null, disabledReason: null };
+}
+
+/** Test seam: drive the clock the grace periods are measured on. */
+export function __setNowForTests(fn: () => number): void {
+  now = fn;
 }

@@ -9,6 +9,7 @@ import { store } from './store';
 import { Conversation } from '../shared/types';
 import { effectiveState, deriveDescription, reconcileLiveState, deriveLiveDescription, findLiveRow } from './derive-state';
 import * as perf from './perf';
+import { nextReapDelayMs } from './reap-backoff';
 
 let fallbackTimer: NodeJS.Timeout | null = null;
 const watchers = new Map<string, fs.FSWatcher>();
@@ -89,12 +90,20 @@ const ABANDON_GRACE_MS = Number(process.env.AGENTSFLOW_DAEMON_ABANDON_GRACE_MS) 
 // minutes (each reap is a cheap fire-and-forget `claude stop`).
 const MAX_REAPS_PER_TICK = 10;
 let reapInFlight = false;
+// A daemon that survives `claude stop` is retried on a backoff, not every tick:
+// one that shrugged off the first stop will shrug off the next thirty, and each
+// attempt is a `claude` launch against the shared login (see reap-backoff.ts).
+const reapAttempts = new Map<string, { attempts: number; notBefore: number }>();
 
 async function reapStaleDaemons(convs: Conversation[], liveRows: ClaudeAgentJsonRow[]): Promise<void> {
   if (reapInFlight || liveRows.length === 0) return;
   reapInFlight = true;
   try {
     const now = Date.now();
+    // A daemon that is gone has been reaped (or died) — its backoff goes with it.
+    for (const short of Array.from(reapAttempts.keys())) {
+      if (!liveRows.some((r) => r.sessionId.startsWith(short))) reapAttempts.delete(short);
+    }
     let reaped = 0;
     for (const c of convs) {
       if (reaped >= MAX_REAPS_PER_TICK) break;
@@ -102,6 +111,8 @@ async function reapStaleDaemons(convs: Conversation[], liveRows: ClaudeAgentJson
       // Only a daemon that's actually still running is worth (and possible) to reap.
       const row = liveRows.find((r) => r.sessionId.startsWith(c.daemonShort));
       if (!row) continue;
+      const pending = reapAttempts.get(c.daemonShort);
+      if (pending && now < pending.notBefore) continue;
       if (hasLiveViewer(c.sessionId || row.sessionId)) continue;
       // Never interrupt an in-progress turn or a session still booting.
       const status = (row.status || '').toLowerCase();
@@ -120,8 +131,13 @@ async function reapStaleDaemons(convs: Conversation[], liveRows: ClaudeAgentJson
       if (!quietAt && row.startedAt) quietAt = row.startedAt;
       if (quietAt && now - quietAt < grace) continue;
       reaped++;
-      console.log('[agentsflow][reaper] stopping lingering daemon', { short: c.daemonShort, reason: terminal ? 'terminal' : 'abandoned', state, status, title: c.title });
-      try { await stopAgent(c.daemonShort); } catch { /* best-effort; next tick retries */ }
+      const attempt = (pending?.attempts ?? 0) + 1;
+      reapAttempts.set(c.daemonShort, { attempts: attempt, notBefore: now + nextReapDelayMs(attempt) });
+      console.log('[agentsflow][reaper] stopping lingering daemon', {
+        short: c.daemonShort, reason: terminal ? 'terminal' : 'abandoned', state, status, title: c.title,
+        attempt, retryInMs: nextReapDelayMs(attempt),
+      });
+      try { await stopAgent(c.daemonShort); } catch { /* best-effort; retried on the backoff */ }
     }
   } finally {
     reapInFlight = false;

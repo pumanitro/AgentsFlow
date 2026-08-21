@@ -230,7 +230,7 @@ export async function refreshCredentials(creds: OAuthCredentials): Promise<OAuth
 
   const resp = await httpPostForm(TOKEN_URL, form);
   if (resp.status < 200 || resp.status >= 300) {
-    throw new Error(`token refresh rejected (HTTP ${resp.status})`);
+    throw new TokenRefreshError(resp.status);
   }
   let json: any;
   try {
@@ -253,10 +253,113 @@ export async function refreshCredentials(creds: OAuthCredentials): Promise<OAuth
   };
 }
 
+/** The token endpoint said no. `rejected` separates a dead token from weather. */
+export class TokenRefreshError extends Error {
+  constructor(public readonly status: number) {
+    super(`token refresh rejected (HTTP ${status})`);
+    this.name = 'TokenRefreshError';
+  }
+  /**
+   * 400/401 from the token endpoint means the refresh token itself is no
+   * good — spent, revoked, or past its 30 days. Nothing on our side changes
+   * that. 5xx, 429 and timeouts are the endpoint's problem and may pass.
+   */
+  get rejected(): boolean {
+    return this.status === 400 || this.status === 401;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Revocation — knowing when an account is DEAD rather than merely unreadable
+// ---------------------------------------------------------------------------
+// A refresh token is single-use. When several processes share one (every
+// `claude` daemon on the active login holds the same copy) and two of them
+// refresh close together, the second use trips the server's reuse detection
+// and the entire token family is revoked: every access token answers "401
+// OAuth access token has been revoked" and every refresh answers 400. That is
+// what happened at 03:47 on 2026-08-21. For 85 minutes afterwards the repair
+// loop below re-wrote the dead vault copy into the main slot once a minute, the
+// account's row showed "?", and rotation — which never chooses an account it
+// cannot read — had nothing to say. The pool knew the account was unusable
+// and had no word for it.
+//
+// This gives it the word. A rejected refresh is a strike; three strikes, or
+// one strike against a copy whose access token has already expired (so there
+// is nothing usable left anywhere), marks the account revoked. A revoked
+// account is shown as "sign in again", is never written into the main slot,
+// and — when it is the active one — is switched away from at once.
+const REVOKED_AFTER_STRIKES = 3;
+
+const refreshStrikes = new Map<string, number>();
+const revokedById = new Map<string, string>();
+type RevokedListener = (account: Account, reason: string) => void;
+const revokedListeners = new Set<RevokedListener>();
+
+/** Pure: whether a run of rejections amounts to "this account is dead". */
+export function revocationVerdict(opts: { strikes: number; accessTokenExpired: boolean }): boolean {
+  return opts.strikes >= REVOKED_AFTER_STRIKES || opts.accessTokenExpired;
+}
+
+export function isRevoked(accountId: string): boolean {
+  return revokedById.has(accountId);
+}
+
+export function revokedReason(accountId: string): string | undefined {
+  return revokedById.get(accountId);
+}
+
+/** Forget a revocation — on removal, or when the login is seen working again. */
+export function clearRevoked(accountId: string): void {
+  refreshStrikes.delete(accountId);
+  revokedById.delete(accountId);
+}
+
+export function onAccountRevoked(cb: RevokedListener): () => void {
+  revokedListeners.add(cb);
+  return () => { revokedListeners.delete(cb); };
+}
+
+function markRevoked(account: Account, reason: string): void {
+  revokedById.set(account.id, reason);
+  console.warn('[agentsflow][accounts] account revoked — it needs a fresh sign-in', { email: account.email, reason });
+  for (const cb of revokedListeners) {
+    try { cb(account, reason); } catch (err) { console.warn('[agentsflow][accounts] revoked listener threw', (err as Error)?.message ?? err); }
+  }
+}
+
+/**
+ * `refreshCredentials` with the strike accounting. Every refresh in this module
+ * goes through here so a dead account is recognised wherever it is first met —
+ * a standby freshen, a switch target, or the repair of the active slot.
+ */
+async function refreshFor(account: Account, creds: OAuthCredentials): Promise<OAuthCredentials> {
+  try {
+    const fresh = await refreshCredentials(creds);
+    refreshStrikes.delete(account.id);
+    if (revokedById.delete(account.id)) {
+      console.log('[agentsflow][accounts] account is signed in again', { email: account.email });
+    }
+    return fresh;
+  } catch (err) {
+    if (err instanceof TokenRefreshError && err.rejected && !revokedById.has(account.id)) {
+      const strikes = (refreshStrikes.get(account.id) ?? 0) + 1;
+      refreshStrikes.set(account.id, strikes);
+      const accessTokenExpired = Boolean(creds.expiresAt && creds.expiresAt < Date.now());
+      if (revocationVerdict({ strikes, accessTokenExpired })) {
+        markRevoked(
+          account,
+          `${account.email}'s sign-in was revoked (the token server rejected its refresh token${accessTokenExpired ? ' and its access token has expired' : ` ${strikes}×`}). Remove it and add it again.`,
+        );
+      }
+    }
+    throw err;
+  }
+}
+
 /** Refresh-if-needed, persisting any rotation back into the account's vault. */
 export async function ensureFresh(account: Account, creds: OAuthCredentials): Promise<OAuthCredentials> {
   if (!isExpiring(creds)) return creds;
-  const fresh = await refreshCredentials(creds);
+  const fresh = await refreshFor(account, creds);
   await writeOAuthToSlot(serviceNameFor(account.configDir), fresh);
   console.log('[agentsflow][accounts] refreshed token', { email: account.email });
   return fresh;
@@ -373,20 +476,27 @@ export function freshenAccountToken(account: Account, opts: FreshenOptions = {})
       if (await holdsMainSlot(account, creds)) return false;
 
       if (distrustStoredExpiry) freshenDistrustedAt.set(account.id, Date.now());
-      const fresh = await refreshCredentials(creds);
+      const wasRevoked = revokedById.has(account.id);
+      const fresh = await refreshFor(account, creds);
       await writeOAuthToSlot(serviceNameFor(account.configDir), fresh);
       freshenFailedAt.delete(account.id);
       console.log('[agentsflow][accounts] freshened a standby token', {
         email: account.email,
         afterRejection: distrustStoredExpiry,
+        recovered: wasRevoked,
       });
       return true;
     } catch (err) {
       freshenFailedAt.set(account.id, Date.now());
-      console.warn('[agentsflow][accounts] token freshen failed — meters stay unreadable', {
-        email: account.email,
-        error: (err as Error)?.message ?? String(err),
-      });
+      // A revoked account is already on the status line and in the panel; the
+      // retry that keeps checking whether it came back does not need to say so
+      // every ten minutes.
+      if (!revokedById.has(account.id)) {
+        console.warn('[agentsflow][accounts] token freshen failed — meters stay unreadable', {
+          email: account.email,
+          error: (err as Error)?.message ?? String(err),
+        });
+      }
       return false;
     }
   })().finally(() => { freshenInflight.delete(account.id); });
@@ -795,6 +905,8 @@ export type ReconcileResult =
   | { outcome: 'adopted-main' }
   /** Main was stale or wiped; the live credentials have been put back. */
   | { outcome: 'repaired-main' }
+  /** Main is stale or wiped AND the vault copy is dead too — only a sign-in fixes this. */
+  | { outcome: 'revoked'; error: string }
   /** Main belongs to a login that is not the account we think is active. */
   | { outcome: 'foreign'; ownerAccountId?: string }
   /** Neither copy has credentials left — only a real sign-in fixes this. */
@@ -853,11 +965,22 @@ async function doReconcile(account: Account, pool: Account[]): Promise<Reconcile
       // The CLI refreshed while it was active — adopt that into the vault so a
       // later switch back to this account does not install a spent token.
       await writeOAuthToSlot(vaultService, mainCreds!);
+      // Newer credentials in the main slot are a working login — for an account
+      // we had given up on, that is the user having run /login again.
+      if (revokedById.has(account.id)) {
+        clearRevoked(account.id);
+        console.log('[agentsflow][accounts] account is signed in again', { email: account.email });
+      }
       return { outcome: 'adopted-main' };
 
     case 'vault': {
       // Main is stranded (stale, or cleared by the CLI after a rejected
-      // refresh). The vault holds the live chain, so put it back.
+      // refresh). The vault holds the live chain, so put it back — unless that
+      // chain is known dead, in which case writing it would only hand the CLI
+      // a token that 401s, and we would be back here next minute.
+      if (revokedById.has(account.id)) {
+        return { outcome: 'revoked', error: revokedById.get(account.id)! };
+      }
       let creds = vaultCreds!;
       try {
         // Hand the CLI something usable *now* rather than something it has to
@@ -868,6 +991,9 @@ async function doReconcile(account: Account, pool: Account[]): Promise<Reconcile
           email: account.email,
           error: (err as Error)?.message ?? String(err),
         });
+        if (revokedById.has(account.id)) {
+          return { outcome: 'revoked', error: revokedById.get(account.id)! };
+        }
       }
       await writeSlotRaw(MAIN_SERVICE, mergeOAuthInto(mainBlob, creds));
       const readback = parseOAuth(await readSlotRaw(MAIN_SERVICE));
@@ -974,7 +1100,7 @@ async function keepActiveWarm(account: Account): Promise<void> {
   // Requiring an idle account keeps that staleness from causing daily churn.)
   if (!creds.expiresAt || creds.expiresAt > Date.now()) return;
 
-  const fresh = await refreshCredentials(creds);
+  const fresh = await refreshFor(account, creds);
   await writeOAuthToSlot(serviceNameFor(account.configDir), fresh);
   await writeSlotRaw(MAIN_SERVICE, mergeOAuthInto(await readSlotRaw(MAIN_SERVICE), fresh));
   console.log('[agentsflow][accounts] renewed the active refresh token', { email: account.email });
@@ -1001,7 +1127,7 @@ export async function keepWarm(accounts: Account[], activeId?: string | null): P
       // Deliberately refresh well before expiry so an account that is never
       // switched to still exercises (and therefore extends) its refresh token.
       // Safe here precisely because nothing else holds a copy of these.
-      const fresh = await refreshCredentials(creds);
+      const fresh = await refreshFor(account, creds);
       await writeOAuthToSlot(serviceNameFor(account.configDir), fresh);
       console.log('[agentsflow][accounts] kept warm', { email: account.email });
     } catch (err) {

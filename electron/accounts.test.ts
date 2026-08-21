@@ -12,9 +12,11 @@ import {
   newerCreds,
   parseAuthStatus,
   provablyNotTheLogin,
+  revocationVerdict,
   sameCreds,
   serviceNameFor,
   slugForEmail,
+  TokenRefreshError,
 } from './accounts';
 import type { OAuthCredentials } from './accounts';
 import type { Account } from '../shared/types';
@@ -332,4 +334,38 @@ test('provablyNotTheLogin: an unknown uuid on either side abstains', () => {
 
 test('provablyNotTheLogin: no config file at all abstains rather than throwing', () => {
   assert.equal(withLogin(null, () => provablyNotTheLogin(account({ accountUuid: 'uuid-OTHER' }))), false);
+});
+
+// ---------------------------------------------------------------------------
+// Revocation — when "unreadable" becomes "dead"
+// ---------------------------------------------------------------------------
+// 2026-08-21, 03:49–05:14: the active account's refresh token was rejected
+// with HTTP 400 on every one of 85 minute-ticks, and the app's only reaction
+// was to write the same dead credentials back into the keychain each time.
+
+test('TokenRefreshError: 400 and 401 from the token endpoint are rejections', () => {
+  assert.equal(new TokenRefreshError(400).rejected, true);
+  assert.equal(new TokenRefreshError(401).rejected, true);
+  assert.match(new TokenRefreshError(400).message, /token refresh rejected \(HTTP 400\)/);
+});
+
+test('TokenRefreshError: 429, 5xx and the like are weather, not a verdict', () => {
+  assert.equal(new TokenRefreshError(429).rejected, false);
+  assert.equal(new TokenRefreshError(500).rejected, false);
+  assert.equal(new TokenRefreshError(503).rejected, false);
+  assert.equal(new TokenRefreshError(0).rejected, false);
+});
+
+test('revocationVerdict: three rejections in a row mean the account is dead', () => {
+  assert.equal(revocationVerdict({ strikes: 1, accessTokenExpired: false }), false);
+  assert.equal(revocationVerdict({ strikes: 2, accessTokenExpired: false }), false);
+  assert.equal(revocationVerdict({ strikes: 3, accessTokenExpired: false }), true);
+  assert.equal(revocationVerdict({ strikes: 7, accessTokenExpired: false }), true);
+});
+
+test('revocationVerdict: one rejection with nothing usable left is enough', () => {
+  // A dead refresh token AND an expired access token: there is no credential
+  // anywhere that could work, so waiting for two more strikes only postpones
+  // the switch that gets the agents moving again.
+  assert.equal(revocationVerdict({ strikes: 1, accessTokenExpired: true }), true);
 });

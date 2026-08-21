@@ -206,11 +206,15 @@ function AccountRow({
     >
       <button
         onClick={onSwitch}
-        disabled={active || busy}
+        disabled={active || busy || Boolean(account.needsLogin)}
         className="flex-1 min-w-0 text-left disabled:cursor-default"
         // Hover tooltips are a leak of their own: with emails hidden, they say
         // what the button does without saying whose account it is.
-        title={active ? 'This account is signed in' : masked ? 'Switch to this account' : `Switch to ${account.email}`}
+        title={
+          account.needsLogin
+            ? (masked ? 'This account was signed out by the server — remove it and add it again' : account.needsLogin)
+            : active ? 'This account is signed in' : masked ? 'Switch to this account' : `Switch to ${account.email}`
+        }
       >
         <div className="flex items-baseline gap-1.5">
           <span
@@ -221,6 +225,12 @@ function AccountRow({
           </span>
           {active && (
             <span className="text-[9px] uppercase tracking-wider text-info shrink-0">active</span>
+          )}
+          {/* A dead sign-in, as opposed to meters that merely could not be
+              read: rotation will never use this account again until it is
+              re-added, and the row has to say so rather than show "?". */}
+          {account.needsLogin && (
+            <span className="text-[9px] uppercase tracking-wider text-danger shrink-0">sign in again</span>
           )}
           {meter ? (
             <span className="ml-auto text-[11px] font-mono shrink-0" style={{ color }}>

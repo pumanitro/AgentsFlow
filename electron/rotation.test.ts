@@ -1,6 +1,6 @@
 import { strict as assert } from 'node:assert';
 import { test } from 'node:test';
-import { __resetForTests, bindingPercent, decide, getStatus, runOnce, type RotationDeps } from './rotation';
+import { __resetForTests, __setNowForTests, bindingPercent, decide, getStatus, runOnce, type RotationDeps } from './rotation';
 import type { Account, RotationPolicy, UsageMeter, UsageResult } from '../shared/types';
 
 function meter(over: Partial<UsageMeter> = {}): UsageMeter {
@@ -166,6 +166,41 @@ test('decide: a custom threshold is honoured', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Proof outranks the meter (the night of 2026-08-21)
+// ---------------------------------------------------------------------------
+// 00:50 — a chat reports "You've hit your session limit"; the active account's
+// worst meter reads 43%; the urgent pass answers "active at 43% (below 90%)"
+// and leaves it parked. Walls exist that no meter row reports. Later that
+// night the active login is revoked server-side, its meters go unreadable, and
+// "unreadable ⇒ do nothing" holds rotation still for 87 minutes with four
+// readable accounts in the pool.
+
+test('decide: a forced pass switches however calm the active meter looks', () => {
+  const d = decide({ activePercent: 43, candidates: [{ accountId: 'b', percent: 20 }], threshold: 90, force: 'a chat hit the wall' });
+  assert.equal(d.action, 'switch');
+  assert.match(d.reason, /a chat hit the wall \(meter at 43%\)/);
+});
+
+test('decide: a forced pass with an unreadable active meter still switches', () => {
+  const d = decide({ activePercent: null, candidates: [{ accountId: 'b', percent: 20 }], threshold: 90, force: 'active login unreadable for 6 min' });
+  assert.equal(d.action, 'switch');
+  assert.match(d.reason, /meter unreadable/);
+});
+
+test('decide: force never overrides the headroom rule or the unreadable-target rule', () => {
+  const full = decide({ activePercent: 43, candidates: [{ accountId: 'b', percent: 95 }], threshold: 90, force: 'a chat hit the wall' });
+  assert.equal(full.action, 'exhausted');
+  const blind = decide({ activePercent: null, candidates: [{ accountId: 'b', percent: null }], threshold: 90, force: 'active login unreadable for 6 min' });
+  assert.equal(blind.action, 'exhausted');
+  assert.match(blind.reason, /1 unreadable/);
+});
+
+test('decide: without force, the meter still gates as before', () => {
+  assert.equal(decide({ activePercent: 43, candidates: [{ accountId: 'b', percent: 20 }], threshold: 90 }).action, 'none');
+  assert.equal(decide({ activePercent: null, candidates: [{ accountId: 'b', percent: 20 }], threshold: 90 }).action, 'none');
+});
+
+// ---------------------------------------------------------------------------
 // The loop — the guards that decide whether an unattended overnight run is safe
 // ---------------------------------------------------------------------------
 
@@ -177,6 +212,10 @@ function account(id: string): Account {
 function harness(opts: {
   policy?: Partial<RotationPolicy>;
   percentById: Record<string, number>;
+  /** Accounts whose meters cannot be read (a dead or 429'd token). */
+  unreadable?: string[];
+  /** Per-read error for unreadable accounts; defaults to an auth rejection. */
+  unreadableError?: () => UsageResult;
   activeId?: string | null;
   switchImpl?: (id: string) => Promise<Account>;
 }) {
@@ -186,7 +225,12 @@ function harness(opts: {
     getPolicy: () => ({ enabled: true, threshold: 95, resumeOnLimit: true, ...opts.policy }),
     getAccounts: () => accounts,
     getActiveId: () => (opts.activeId === undefined ? 'a' : opts.activeId),
-    getAccountUsage: async (acct) => usage([meter({ percent: opts.percentById[acct.id], isActive: true })]),
+    getAccountUsage: async (acct) => {
+      if (opts.unreadable?.includes(acct.id)) {
+        return opts.unreadableError?.() ?? { ok: false, reason: 'expired', error: 'Auth rejected (HTTP 401).' };
+      }
+      return usage([meter({ percent: opts.percentById[acct.id], isActive: true })]);
+    },
     getActiveUsage: async () => usage([meter({ percent: 0, isActive: true })]),
     switchTo: async (id) => {
       switched.push(id);
@@ -289,6 +333,132 @@ test('runOnce: repeated failures stop rotation instead of retrying all night', a
   // …and once stopped, it stays stopped.
   await runOnce(deps);
   assert.equal(switched.length, 3, 'no further attempts after the stop');
+});
+
+// ---------------------------------------------------------------------------
+// The loop under proof: walls the meter missed, and a login that died
+// ---------------------------------------------------------------------------
+
+const MIN = 60_000;
+
+test('runOnce: an urgent pass switches even when the meter is below the threshold', async () => {
+  // The 00:50 case, as the loop sees it: proof in the transcript, 43% on the meter.
+  __resetForTests();
+  const { deps, switched } = harness({ percentById: { a: 43, b: 60, c: 12 }, policy: { threshold: 90 } });
+  const outcome = await runOnce(deps, { urgent: true });
+  assert.equal(outcome.switched, true);
+  assert.deepEqual(switched, ['c'], 'the most headroom, whatever the active meter claimed');
+  assert.match(getStatus().lastEvent ?? '', /a chat hit the wall \(meter at 43%\)/);
+});
+
+test('runOnce: an urgent pass names its cause on the status line', async () => {
+  __resetForTests();
+  const { deps } = harness({ percentById: { a: 10, b: 5 }, policy: { threshold: 90 } });
+  await runOnce(deps, { urgent: true, cause: 'the active login was revoked' });
+  assert.match(getStatus().lastEvent ?? '', /the active login was revoked/);
+});
+
+test('runOnce: an account a chat proved full is not switched back onto', async () => {
+  // a walls → switch to b. b walls → a's meter still says 43%, but a chat just
+  // proved that number wrong; picking a again would wall the chat a third time.
+  __resetForTests();
+  let t = 10_000_000;
+  __setNowForTests(() => t);
+  const { deps, switched } = harness({ percentById: { a: 43, b: 50 }, policy: { threshold: 90 } });
+  await runOnce(deps, { urgent: true });
+  assert.deepEqual(switched, ['b']);
+
+  deps.getActiveId = () => 'b';
+  t += 1 * MIN;
+  const back = await runOnce(deps, { urgent: true });
+  assert.equal(back.switched, false);
+  assert.match(back.reason, /no other account is below 90%/);
+
+  // Half an hour on, the proof has gone stale and a is a candidate again.
+  t += 31 * MIN;
+  assert.equal((await runOnce(deps, { urgent: true })).switched, true);
+  assert.deepEqual(switched, ['b', 'a']);
+});
+
+test('runOnce: an unreadable active login is switched away from after the grace', async () => {
+  __resetForTests();
+  let t = 10_000_000;
+  __setNowForTests(() => t);
+  const { deps, switched } = harness({ percentById: { a: 0, b: 30, c: 12 }, unreadable: ['a'] });
+
+  assert.equal((await runOnce(deps)).switched, false, 'first sighting only starts the clock');
+  t += 4 * MIN;
+  assert.equal((await runOnce(deps)).switched, false, 'still inside the grace');
+  assert.deepEqual(switched, []);
+
+  t += 2 * MIN;
+  const outcome = await runOnce(deps);
+  assert.equal(outcome.switched, true);
+  assert.deepEqual(switched, ['c'], 'onto the readable account with the most headroom');
+  assert.match(outcome.reason, /unreadable for 6 min/);
+});
+
+test('runOnce: the blind clock does not restart when the error text changes', async () => {
+  // A 429 that turns into a 401 is one outage, not two fresh ones.
+  __resetForTests();
+  let t = 10_000_000;
+  __setNowForTests(() => t);
+  let reads = 0;
+  const { deps, switched } = harness({
+    percentById: { a: 0, b: 30 },
+    unreadable: ['a'],
+    unreadableError: () => (reads++ % 2 === 0
+      ? { ok: false, reason: 'unknown', error: 'Usage endpoint returned HTTP 429.' }
+      : { ok: false, reason: 'expired', error: 'Auth rejected (HTTP 401).' }),
+  });
+  for (let i = 0; i < 6; i++) { await runOnce(deps); t += 1 * MIN; }
+  assert.deepEqual(switched, ['b'], 'six minutes blind is six minutes blind, whatever the wording');
+});
+
+test('runOnce: unreadable everywhere is an outage, not a reason to move', async () => {
+  // If no other account reads either, the endpoint (or the network) is down;
+  // switching would install a token we cannot vouch for and burn the cooldown.
+  __resetForTests();
+  let t = 10_000_000;
+  __setNowForTests(() => t);
+  const { deps, switched } = harness({ percentById: { a: 0, b: 30 }, unreadable: ['a', 'b'] });
+  for (let i = 0; i < 10; i++) { await runOnce(deps); t += 1 * MIN; }
+  assert.deepEqual(switched, []);
+});
+
+test('runOnce: a readable active account clears the blind clock', async () => {
+  __resetForTests();
+  let t = 10_000_000;
+  __setNowForTests(() => t);
+  const h = harness({ percentById: { a: 20, b: 30 }, unreadable: ['a'] });
+  await runOnce(h.deps);
+  t += 4 * MIN;
+  // The meters come back with headroom — the blind spell is over.
+  const healthy = harness({ percentById: { a: 20, b: 30 } });
+  await runOnce(healthy.deps);
+  t += 2 * MIN;
+  // Dark again: this is a NEW spell, so the grace starts over.
+  assert.equal((await runOnce(h.deps)).switched, false);
+  assert.deepEqual(h.switched, []);
+});
+
+test('runOnce: a blind switch resets the clock for the account it lands on', async () => {
+  __resetForTests();
+  let t = 10_000_000;
+  __setNowForTests(() => t);
+  const { deps, switched } = harness({ percentById: { a: 0, b: 30, c: 10 }, unreadable: ['a', 'b'] });
+  await runOnce(deps);
+  t += 6 * MIN;
+  await runOnce(deps);
+  assert.deepEqual(switched, ['c']);
+  // Now c is active but (say) its meters are dark too. The cooldown and a
+  // fresh grace both apply — no immediate second hop.
+  deps.getActiveId = () => 'c';
+  (deps as { getAccountUsage: RotationDeps['getAccountUsage'] }).getAccountUsage = async (acct) =>
+    acct.id === 'b' ? usage([meter({ percent: 30 })]) : { ok: false, reason: 'expired', error: 'Auth rejected (HTTP 401).' };
+  t += 1 * MIN;
+  assert.equal((await runOnce(deps)).switched, false);
+  assert.deepEqual(switched, ['c']);
 });
 
 test('runOnce: reports exhaustion once, not on every tick', async () => {

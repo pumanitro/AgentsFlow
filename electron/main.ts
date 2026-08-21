@@ -475,7 +475,14 @@ ipcMain.handle('usage:get', (_e, force?: boolean) => getUsage(Boolean(force)));
 let authIssue: string | null = null;
 
 function accountsSnapshot(): AccountsSnapshot {
-  return { accounts: store.getAccounts(), activeId: store.getActiveAccountId(), authIssue };
+  return {
+    accounts: store.getAccounts().map((a) => {
+      const needsLogin = accounts.revokedReason(a.id);
+      return needsLogin ? { ...a, needsLogin } : a;
+    }),
+    activeId: store.getActiveAccountId(),
+    authIssue,
+  };
 }
 
 function broadcastAccounts(): void {
@@ -534,6 +541,7 @@ function applyReconcile(account: Account, result: accounts.ReconcileResult): voi
 
     case 'signed-out':
     case 'failed':
+    case 'revoked':
       authIssue = result.error;
       break;
   }
@@ -602,6 +610,7 @@ ipcMain.handle('accounts:remove', async (_e, id: string) => {
   const account = store.getAccounts().find((a) => a.id === id);
   if (!account) return;
   store.removeAccount(id);
+  accounts.clearRevoked(id);
   await accounts.destroyVault(account.configDir);
   broadcastAccounts();
 });
@@ -694,6 +703,31 @@ const rotationDeps: rotation.RotationDeps = {
     }
   },
 };
+
+// ----- A login that died under us -----
+// A revoked token family is a wall with no reset time: every daemon on that
+// account is stuck at "Please run /login" until the credentials in the main
+// slot change. The moment the pool recognises one on the active account it
+// moves — the same urgent pass limit-watch uses, with the same guards, so it
+// still only lands on an account whose meters read fine. (2026-08-21: this
+// state lasted 87 minutes with four healthy accounts in the pool.)
+accounts.onAccountRevoked((account, reason) => {
+  const isActive = account.id === store.getActiveAccountId();
+  if (isActive) authIssue = reason;
+  broadcastAccounts();
+  if (!isActive) return;
+  const attempt = (left: number) => {
+    void rotation.runOnce(rotationDeps, { urgent: true, cause: 'the active login was revoked' }).then((outcome) => {
+      if (outcome.switched) return;
+      // The minute tick may be mid-pass; that is the one refusal worth one retry.
+      if (left > 0 && /already running/.test(outcome.reason)) setTimeout(() => attempt(left - 1), 10_000);
+      else console.warn('[agentsflow][rotation] could not switch away from the revoked login', { reason: outcome.reason });
+    });
+  };
+  // Off the refresh call stack: the revocation is noticed inside a reconcile
+  // or usage read, and a switch must not interleave with either.
+  setTimeout(() => attempt(1), 0);
+});
 
 // ----- The wall that got hit anyway -----
 // Same switch, triggered by a chat's own rate-limit error instead of by a
