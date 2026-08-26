@@ -274,6 +274,16 @@ export function registerHealthProbe(fn: HealthProbe): void {
   healthProbe = fn;
 }
 
+// Running tally of main-thread stalls this process has recorded, so the live
+// Performance panel can show "N stalls, last one 2m ago (5.4s)" without
+// scraping the log.
+let stallCount = 0;
+let lastStallAt: string | null = null;
+let lastStallMs = 0;
+export function getStallStats(): { count: number; lastAt: string | null; lastMs: number } {
+  return { count: stallCount, lastAt: lastStallAt, lastMs: lastStallMs };
+}
+
 function heartbeat(): void {
   const mem = process.memoryUsage();
   const fields: Record<string, unknown> = {
@@ -389,6 +399,9 @@ export function installCrashLogging(): void {
             `(sleep / App Nap while backgrounded) — not a real UI freeze`,
         );
       } else {
+        stallCount += 1;
+        lastStallAt = new Date(now).toISOString();
+        lastStallMs = Math.round(stall);
         // Append the recent slow-op history so a freeze can be attributed to the
         // operation that caused it, instead of just recording that one happened.
         console.error(`[agentsflow][stall] main event loop blocked for ~${Math.round(stall)}ms — the UI was frozen${recentSlowOpsSummary()}`);

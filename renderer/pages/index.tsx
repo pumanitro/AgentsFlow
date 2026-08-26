@@ -22,6 +22,7 @@ import { BridgeHealth, Conversation, PinnedDivider, PinnedItemRef, PinnedTodo, T
 const NotesPanel = dynamic(() => import('../components/NotesPanel'), { ssr: false });
 const UsagePanel = dynamic(() => import('../components/UsagePanel'), { ssr: false });
 const AccountsPanel = dynamic(() => import('../components/AccountsPanel'), { ssr: false });
+const PerfLauncher = dynamic(() => import('../components/PerfPanel'), { ssr: false });
 const FileEditor = dynamic(() => import('../components/FileEditor'), { ssr: false });
 
 type PinnedItem =
@@ -722,6 +723,10 @@ export default function Home() {
               </>
             )}
           </div>
+          {/* Live performance pill — machine CPU + main-loop lag, coloured by
+              severity. Click opens the full monitor (per-agent CPU, what each
+              agent's tools are doing, who owns the heavy processes). */}
+          <PerfLauncher />
           <button
             onClick={() => setHelpOpen(true)}
             className="shrink-0 w-6 h-6 rounded-full border border-border bg-panel hover:bg-panel2 hover:border-accent text-muted hover:text-accent text-[12px] font-semibold flex items-center justify-center"

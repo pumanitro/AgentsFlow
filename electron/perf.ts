@@ -51,8 +51,9 @@ interface Stat {
 }
 // Reset each summary window, so the summary reflects recent behaviour.
 const windowStats = new Map<string, Stat>();
+let windowSince = new Date().toISOString();
 
-interface SlowOp { at: string; label: string; ms: number; peer?: string }
+export interface SlowOp { at: string; label: string; ms: number; peer?: string }
 // Rolling buffer of recent slow ops — survives window resets so the stall dump
 // still has context.
 const recentSlow: SlowOp[] = [];
@@ -117,9 +118,45 @@ export function startPerfSummary(): () => void {
       );
     }
     windowStats.clear();
+    windowSince = new Date().toISOString();
   }, SUMMARY_INTERVAL_MS);
   t.unref?.();
   return () => clearInterval(t);
+}
+
+export interface PerfOpRowLike {
+  label: string;
+  count: number;
+  totalMs: number;
+  avgMs: number;
+  maxMs: number;
+  maxPeer?: string;
+  overCount: number;
+}
+
+/**
+ * The current summary window's heaviest labels, for the live Performance panel
+ * — the same rows the 5-minute log summary prints, but on demand.
+ */
+export function windowSnapshot(limit = SUMMARY_TOP_N): { since: string; rows: PerfOpRowLike[] } {
+  const rows = Array.from(windowStats.entries())
+    .map(([label, s]) => ({
+      label,
+      count: s.count,
+      totalMs: Math.round(s.totalMs),
+      avgMs: Math.round((s.totalMs / Math.max(1, s.count)) * 10) / 10,
+      maxMs: Math.round(s.maxMs),
+      maxPeer: s.maxPeer,
+      overCount: s.overCount,
+    }))
+    .sort((a, b) => b.totalMs - a.totalMs)
+    .slice(0, limit);
+  return { since: windowSince, rows };
+}
+
+/** Newest-first copy of the recent slow-op buffer (survives window resets). */
+export function recentSlowOps(limit = 8): SlowOp[] {
+  return recentSlow.slice(-limit).reverse().map((o) => ({ ...o, ms: Math.round(o.ms) }));
 }
 
 /**

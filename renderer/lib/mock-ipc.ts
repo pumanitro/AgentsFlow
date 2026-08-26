@@ -197,6 +197,107 @@ export function createMockApi(): AgentsFlowApi {
       bridge: { socketPath: '/mock/userData/peersflow-bridge.sock', listening: true, socketFileExists: true, healthy: true },
     }),
 
+    getPerfHistory: async () => {
+      const n = 360; // 30 min at 5 s
+      const now = Date.now();
+      const points = Array.from({ length: n }, (_, i) => {
+        const t = now - (n - 1 - i) * 5000;
+        const phase = i / n;
+        const burst = i > 200 && i < 260 ? 1 : 0; // a vitest storm in the middle
+        const cpu = Math.round(30 + 20 * Math.sin(phase * 9) + burst * 60 + (i % 7));
+        const test = burst * (300 + (i % 5) * 20);
+        const build = i > 300 ? 120 + (i % 4) * 10 : 5;
+        return {
+          t,
+          cpuBusyPct: Math.min(100, cpu),
+          load1: Math.round((cpu / 100) * 16 * (1 + burst * 6) * 10) / 10,
+          memUsedPct: 45 + Math.round(10 * phase) + burst * 15,
+          lagMaxMs: burst ? 800 + (i % 9) * 400 : 5 + (i % 11) * 4,
+          mainCpuPct: 2 + (i % 5),
+          rendererCpuPct: 3 + (i % 3),
+          agentsCpu: 20 + test + build,
+          byCategory: { claude: 12 + (i % 6), test, build, search: i % 3 === 0 ? 4 : 0, git: 2 },
+          agents: [
+            { pid: 25470, cpu: 8 + test },
+            { pid: 29465, cpu: 6 + build },
+            { pid: 10241, cpu: 3 + (i % 4) },
+            { pid: 8409, cpu: 1 },
+          ],
+          topProcs: [
+            { name: 'Docker VM', cpu: 150 + (i % 10) * 3 },
+            { name: 'Chrome', cpu: 90 + (i % 13) * 5 },
+            { name: 'node (vitest)', cpu: test },
+            { name: 'node', cpu: 40 + build / 2 },
+            { name: 'claude', cpu: 20 + (i % 6) },
+          ],
+        };
+      });
+      return {
+        intervalMs: 5000,
+        points,
+        agentNames: {
+          '25470': { title: '10. V2 · /game-council listen a lot has changed', peer: 'atlas-of-doors', kind: 'session' },
+          '29465': { title: 'Can we also measure how many people accept our cookie bars', peer: 'atlas-of-doors', kind: 'session' },
+          '10241': { title: 'Performance monitor', peer: 'AgentsFlow', kind: 'session' },
+          '8409': { title: null, peer: null, kind: 'spare' },
+        },
+      };
+    },
+
+    getPerfSnapshot: async () => ({
+      at: new Date().toISOString(),
+      system: { cpuBusyPct: 87, load1: 22.4, load5: 18.1, load15: 12.0, cores: 16, memTotalMB: 131072, memUsedMB: 43000, memUsedPct: 33, swapUsedMB: 0, memPressure: 'normal' },
+      app: { uptimeS: 6600, mainCpuPct: 4.2, mainRssMB: 448, heapMB: 71, rendererCpuPct: 3.6, rendererRssMB: 300, gpuCpuPct: 5.8, totalRssMB: 850 },
+      loop: { lagNowMs: 12, lagMaxMs: 4614, lagAvgMs: 140, stalls: 8, lastStallAt: new Date(Date.now() - 2 * 60_000).toISOString(), lastStallMs: 5434 },
+      resources: { attachPtys: 1, resumePtys: 12, systemPtys: 68, convWatchers: 10, convs: 1738, bridgeOk: true },
+      censusAt: new Date().toISOString(),
+      agents: {
+        totalCpu: 96.4,
+        byCategory: { test: 62, claude: 22.3, search: 6.1, git: 3.2, shell: 1.8, mcp: 0.6, other: 0.4 },
+        rows: [
+          { pid: 25470, kind: 'session', sessionId: '85ca6a65', conversationId: 'c1', title: '10. V2 · /game-council listen a lot has changed', peer: 'atlas-of-doors', status: 'working', cpu: 61.2, selfCpu: 3.9, rssMB: 6200, procs: 21,
+            tools: [
+              { name: 'node (vitest)', cmd: '', category: 'test', cpu: 55.1, rssMB: 4100, count: 15 },
+              { name: 'npm', cmd: 'exec vitest run --shard=2/4', category: 'test', cpu: 1.4, rssMB: 84, count: 1 },
+              { name: 'rg', cmd: '-n --json season tools/', category: 'search', cpu: 0.8, rssMB: 12, count: 1 },
+            ] },
+          { pid: 29465, kind: 'session', sessionId: '99b7b9d3', conversationId: 'c2', title: 'Can we also measure how many people accept our cookie bars', peer: 'atlas-of-doors', status: 'working', cpu: 14.3, selfCpu: 6.4, rssMB: 900, procs: 4,
+            tools: [
+              { name: 'grep', cmd: '-rn cookie src/', category: 'search', cpu: 5.3, rssMB: 6, count: 1 },
+              { name: 'git', cmd: 'status --porcelain', category: 'git', cpu: 2.6, rssMB: 20, count: 1 },
+            ] },
+          { pid: 8409, kind: 'spare', sessionId: null, conversationId: null, title: null, peer: null, status: null, cpu: 12.1, selfCpu: 12.1, rssMB: 430, procs: 2, tools: [] },
+          { pid: 10241, kind: 'session', sessionId: '652a0c68', conversationId: 'c3', title: 'Performance monitor', peer: 'AgentsFlow', status: 'working', cpu: 8.8, selfCpu: 5.6, rssMB: 1200, procs: 3,
+            tools: [ { name: 'tsc', cmd: '-p electron/tsconfig.json', category: 'build', cpu: 3.2, rssMB: 300, count: 1 } ] },
+        ],
+      },
+      processes: {
+        total: 1392, claude: 50, claudeRssMB: 13346, node: 63, vitest: 90, chrome: 87,
+        topCpu: [
+          { name: 'Chrome', cpu: 171, rssMB: 6200, count: 87, underAgents: { count: 19, cpu: 2 }, groups: [{ label: 'main profile', count: 42, cpu: 116 }, { label: 'claude job (throwaway)', count: 19, cpu: 0 }, { label: 'Zoom webview', count: 5, cpu: 0 }] },
+          { name: 'Docker VM', cpu: 157, rssMB: 9400, count: 1, underAgents: { count: 0, cpu: 0 }, groups: [] },
+          { name: 'node (vitest)', cpu: 120, rssMB: 4100, count: 90, underAgents: { count: 90, cpu: 120 }, groups: [{ label: 'roomforge', count: 90, cpu: 120 }] },
+          { name: 'node', cpu: 55, rssMB: 11000, count: 51, underAgents: { count: 1, cpu: 0 }, groups: [{ label: 'atlas-of-doors', count: 12, cpu: 30 }, { label: 'influence', count: 14, cpu: 20 }, { label: 'roomforge', count: 4, cpu: 5 }] },
+          { name: 'claude', cpu: 57, rssMB: 13346, count: 50, underAgents: { count: 0, cpu: 0 }, groups: [{ label: 'claude', count: 50, cpu: 57 }] },
+        ],
+      },
+      docker: { containers: 19, top: [{ name: 'atlas-dash-db', cpu: 100.1, memMB: 205 }, { name: 'billing-api', cpu: 0.5, memMB: 531 }, { name: 'customer-ui', cpu: 0, memMB: 3732 }] },
+      ops: {
+        windowSince: new Date(Date.now() - 3 * 60_000).toISOString(),
+        rows: [
+          { label: 'git:worktrees', count: 21, totalMs: 110244, avgMs: 5249.7, maxMs: 11366, maxPeer: 'atlas-of-doors', overCount: 19 },
+          { label: 'poll:listAgents', count: 20, totalMs: 97962, avgMs: 4898.1, maxMs: 19132, overCount: 12 },
+          { label: 'accounts:usage', count: 80, totalMs: 79288, avgMs: 991.1, maxMs: 3380, overCount: 73 },
+          { label: 'git:status', count: 45, totalMs: 23898, avgMs: 531.1, maxMs: 2174, maxPeer: 'atlas-of-doors', overCount: 43 },
+        ],
+        recentSlow: [
+          { at: new Date(Date.now() - 20_000).toISOString(), label: 'git:worktrees', ms: 55295, peer: 'atlas-of-doors' },
+          { at: new Date(Date.now() - 45_000).toISOString(), label: 'usage:get', ms: 26611 },
+        ],
+      },
+      logPath: null,
+    }),
+
     getBridgeHealth: async () => ({
       socketPath: '/mock/userData/peersflow-bridge.sock',
       listening: true,

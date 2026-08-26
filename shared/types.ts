@@ -219,6 +219,190 @@ export type UsageResult =
   //  - unknown : reachable but unexpected status/body
   | { ok: false; reason: 'no-auth' | 'expired' | 'network' | 'unknown'; error: string };
 
+// ---- Performance monitor ---------------------------------------------------
+// One live sample for the sidebar Performance panel: the machine, this app's
+// own processes, the main event loop, and the per-operation timings perf.ts
+// already keeps for main.log — so "why is it laggy" is answerable from the UI
+// without opening the log.
+export interface PerfOpRow {
+  label: string;
+  count: number;
+  totalMs: number;
+  avgMs: number;
+  maxMs: number;
+  maxPeer?: string;
+  // Samples in this window that crossed the slow threshold.
+  overCount: number;
+}
+
+export interface PerfSlowOp {
+  at: string;
+  label: string;
+  ms: number;
+  peer?: string;
+}
+
+// One row of the "top CPU consumers" table: processes aggregated by name,
+// with "who runs them": how many sit under an agent, and the biggest groups
+// by origin (Chrome profile, node project, docker container…).
+export interface PerfProcGroup {
+  label: string;
+  count: number;
+  cpu: number;
+}
+
+export interface PerfProcRow {
+  name: string;
+  cpu: number;
+  rssMB: number;
+  count: number;
+  // Processes in this row whose ancestor is a running agent (claude process).
+  underAgents: { count: number; cpu: number };
+  groups: PerfProcGroup[];
+}
+
+export interface PerfContainerRow {
+  name: string;
+  cpu: number;
+  memMB: number;
+}
+
+// What an agent's subprocesses are doing, bucketed. `claude` is the agent
+// process itself — Read/Write/Edit and model I/O happen in-process, so file
+// work shows up there, not as a child.
+export type PerfToolCategory = 'claude' | 'search' | 'git' | 'test' | 'build' | 'shell' | 'mcp' | 'browser' | 'other';
+
+export interface PerfToolRow {
+  name: string;
+  // Short human-readable arguments, e.g. "exec vitest run --shard=2/4".
+  cmd: string;
+  category: PerfToolCategory;
+  cpu: number;
+  rssMB: number;
+  count: number;
+}
+
+// One running `claude` process billed for everything under it in the process
+// tree (nearest-agent-ancestor attribution, so a delegated peer session is its
+// own row rather than folded into its parent).
+export interface PerfAgentRow {
+  pid: number;
+  // session: `claude --resume/--session-id …` (an AgentsFlow chat, or a
+  // terminal one); spare: a `--bg` daemon worker (claimed or idle).
+  kind: 'session' | 'spare';
+  sessionId: string | null;
+  conversationId: string | null;
+  title: string | null;
+  peer: string | null;
+  status: string | null;
+  // Whole subtree, self included.
+  cpu: number;
+  selfCpu: number;
+  rssMB: number;
+  procs: number;
+  tools: PerfToolRow[];
+}
+
+export interface PerfAgentsSummary {
+  rows: PerfAgentRow[];
+  totalCpu: number;
+  byCategory: Partial<Record<PerfToolCategory, number>>;
+}
+
+// One point of the rolling history behind the Timeline charts, sampled every
+// few seconds in the main process. Census-derived fields are null until the
+// first `ps` census exists and repeat the latest census between refreshes.
+export interface PerfHistoryPoint {
+  t: number; // epoch ms
+  cpuBusyPct: number | null;
+  load1: number;
+  memUsedPct: number | null;
+  // Worst event-loop lag since the previous point.
+  lagMaxMs: number;
+  mainCpuPct: number;
+  rendererCpuPct: number;
+  agentsCpu: number | null;
+  byCategory: Partial<Record<PerfToolCategory, number>> | null;
+  // Top agents at that census, by pid — names live in PerfHistory.agentNames.
+  agents: Array<{ pid: number; cpu: number }> | null;
+  // Top machine-wide commands at that census (Docker VM, Chrome, node…).
+  topProcs: Array<{ name: string; cpu: number }> | null;
+}
+
+export interface PerfHistory {
+  intervalMs: number;
+  points: PerfHistoryPoint[];
+  agentNames: Record<string, { title: string | null; peer: string | null; kind: 'session' | 'spare' }>;
+}
+
+export interface PerfSnapshot {
+  at: string;
+  system: {
+    // Whole-machine busy percentage across all cores (null until two samples exist).
+    cpuBusyPct: number | null;
+    load1: number;
+    load5: number;
+    load15: number;
+    cores: number;
+    memTotalMB: number;
+    memUsedMB: number;
+    memUsedPct: number;
+    swapUsedMB: number;
+    // macOS kernel memory-pressure level (null where unavailable). More honest
+    // than a used-% on a machine whose file cache counts as "used".
+    memPressure: 'normal' | 'warning' | 'critical' | null;
+  };
+  app: {
+    uptimeS: number;
+    mainCpuPct: number;
+    mainRssMB: number;
+    heapMB: number;
+    // Summed over every renderer / GPU / utility child of this app.
+    rendererCpuPct: number;
+    rendererRssMB: number;
+    gpuCpuPct: number;
+    totalRssMB: number;
+  };
+  loop: {
+    // Main-process event-loop lag: the last 500 ms tick's drift, plus the worst
+    // and mean drift over the trailing minute. Under CPU starvation this also
+    // measures how long the OS left the process unscheduled — which is exactly
+    // what the user feels as lag.
+    lagNowMs: number;
+    lagMaxMs: number;
+    lagAvgMs: number;
+    stalls: number;
+    lastStallAt: string | null;
+    lastStallMs: number;
+  };
+  // The health-heartbeat fields (PTY counts, watchers, convs, bridge state).
+  resources: Record<string, number | boolean | string>;
+  // When the machine census (ps / vm_stat / pressure) was last refreshed. It
+  // runs in the background so a snapshot never waits on a starved `ps`; null
+  // until the first one lands.
+  censusAt: string | null;
+  // Per-agent CPU: every `claude` process and the tool subprocesses under it.
+  agents: PerfAgentsSummary | null;
+  // Machine-wide process census (null until the first `ps` completes, or if it failed).
+  processes: {
+    total: number;
+    claude: number;
+    claudeRssMB: number;
+    node: number;
+    vitest: number;
+    chrome: number;
+    topCpu: PerfProcRow[];
+  } | null;
+  // `docker stats`, only when a Docker VM is running (null otherwise / if slow).
+  docker: { containers: number; top: PerfContainerRow[] } | null;
+  ops: {
+    windowSince: string;
+    rows: PerfOpRow[];
+    recentSlow: PerfSlowOp[];
+  };
+  logPath: string | null;
+}
+
 // ---- Account pool ----------------------------------------------------------
 // One Anthropic account in the switchable pool. Each has its own isolated
 // credential home (`configDir`), which Claude Code keys its keychain slot off —
@@ -323,6 +507,13 @@ export interface AgentsFlowApi {
   // screen. Pass force=true to bypass the brief server-side cache (manual
   // refresh). Never throws — failures come back as { ok: false, reason }.
   getUsage: (force?: boolean) => Promise<UsageResult>;
+
+  // One sample for the sidebar Performance panel (machine load, this app's
+  // processes, event-loop lag, and the slowest main-thread ops right now).
+  // Cheap enough to poll every few seconds while the panel is open.
+  getPerfSnapshot: () => Promise<PerfSnapshot>;
+  // The rolling history (≈1 h at 5 s) behind the Timeline charts.
+  getPerfHistory: () => Promise<PerfHistory>;
 
   // ---- Account pool ----
   // The switchable pool of Anthropic accounts. Switching swaps which account's

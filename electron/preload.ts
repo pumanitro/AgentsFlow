@@ -11,6 +11,8 @@ const api: AgentsFlowApi = {
   getMcpServerInfo: () => ipcRenderer.invoke('mcp:info'),
   getBridgeHealth: () => ipcRenderer.invoke('bridge:health'),
   getUsage: (force?: boolean) => ipcRenderer.invoke('usage:get', force),
+  getPerfSnapshot: () => ipcRenderer.invoke('perf:snapshot'),
+  getPerfHistory: () => ipcRenderer.invoke('perf:history'),
 
   listAccounts: () => ipcRenderer.invoke('accounts:list'),
   addAccount: (email) => ipcRenderer.invoke('accounts:add', email),

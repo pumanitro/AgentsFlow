@@ -4,8 +4,9 @@ import * as fs from 'fs';
 import * as os from 'os';
 import { v4 as uuid } from 'uuid';
 import serve from 'electron-serve';
-import { installCrashLogging, notePowerResume, notePowerSuspend, registerHealthProbe } from './logger';
+import { getLogFilePath, getStallStats, installCrashLogging, notePowerResume, notePowerSuspend, registerHealthProbe } from './logger';
 import * as perf from './perf';
+import * as sysmon from './sysmon';
 
 const APP_NAME = 'Peers Flow';
 app.setName(APP_NAME);
@@ -47,7 +48,7 @@ import {
   readJobState,
   hasLiveDaemon,
 } from './claude-cli';
-import { refreshNow, setPollerForeground, startPoller, stopPoller, syncWatchers, unwatchConversation, watchConversation, watcherStats } from './poller';
+import { getLastAgentRows, refreshNow, setPollerForeground, startPoller, stopPoller, syncWatchers, unwatchConversation, watchConversation, watcherStats } from './poller';
 import { bridgeSocketPath, buildBootstrapSystemPrompt, getMcpServerInfo, writeMcpConfigForConversation } from './mcp-bridge';
 import { buildDelegatePrompt } from './registry';
 import { startPeersBridge, type DelegateRequest, type OpenFileRequest, type PeersBridge } from './delegation-bridge';
@@ -116,12 +117,37 @@ function bridgeHealthSnapshot(): BridgeHealth {
 // Feed the heartbeat the subsystem counts worth trending over a long session:
 // the PTY/pty-budget numbers whose exhaustion has historically aborted the app,
 // and whether the delegation bridge is still reachable.
-registerHealthProbe(() => ({
+const healthProbe = () => ({
   ...pty.ptyStats(),
   ...watcherStats(),
   convs: store.getConversations().length,
   bridgeOk: bridgeHealthSnapshot().healthy,
-}));
+});
+registerHealthProbe(healthProbe);
+
+// Names a `claude` process for the Performance panel's per-agent CPU table.
+// Spawned chats carry their conversation id in the --mcp-config path and their
+// session id in --resume/--session-id; --bg daemon workers carry neither, so
+// those are matched by pid against the poller's last `claude agents` listing.
+function resolveAgentForPerf(q: sysmon.AgentQuery): sysmon.AgentIdentity | null {
+  const convs = store.getConversations();
+  let conv = q.conversationId ? convs.find((c) => c.id === q.conversationId) : undefined;
+  let sid = q.sessionId;
+  if (!conv && !sid) sid = getLastAgentRows().find((r) => r.pid === q.pid)?.sessionId ?? null;
+  if (!conv && sid) {
+    const s = sid;
+    conv = convs.find((c) => c.sessionId === s) ?? convs.find((c) => !!c.sessionId && (s.startsWith(c.sessionId) || c.sessionId.startsWith(s)));
+  }
+  if (!conv) return sid ? { sessionId: sid } : null;
+  const dir = store.getDirectories().find((d) => d.id === conv!.directoryId);
+  return {
+    conversationId: conv.id,
+    sessionId: conv.sessionId || sid,
+    title: conv.displayName || conv.title || null,
+    peer: dir?.displayName ?? null,
+    status: conv.status ?? null,
+  };
+}
 
 // ----- Per-operation performance instrumentation -----
 // Wrap ipcMain.handle ONCE so every IPC handler (all of them live in this file)
@@ -294,6 +320,14 @@ app.whenReady().then(() => {
   createWindow();
   startPoller(() => mainWindow);
   perf.startPerfSummary();
+  // Live sampler behind the sidebar Performance panel (event-loop lag, CPU).
+  sysmon.startSysmon({
+    appMetrics: () => app.getAppMetrics(),
+    health: healthProbe,
+    stalls: getStallStats,
+    logPath: getLogFilePath,
+    resolveAgent: resolveAgentForPerf,
+  });
   // Keep every pooled account's refresh token alive so "sign in once" holds
   // even for an account that has not been switched to in months.
   accounts.startKeepWarm(() => store.getAccounts(), () => store.getActiveAccountId());
@@ -465,6 +499,11 @@ ipcMain.handle('bridge:health', () => bridgeHealthSnapshot());
 // Live plan-usage meters for the sidebar Usage panel. Read-only against the
 // authenticated `/usage` endpoint; cached briefly inside getUsage().
 ipcMain.handle('usage:get', (_e, force?: boolean) => getUsage(Boolean(force)));
+
+// Live sample for the sidebar Performance panel. Registered on the RAW handle
+// so the monitor's own polling never shows up in the slow-op table it renders.
+rawIpcHandle('perf:snapshot', () => sysmon.getPerfSnapshot());
+rawIpcHandle('perf:history', () => sysmon.getPerfHistory());
 
 // ----- Account pool -----
 // Switching moves an account's credentials into the single keychain slot Claude

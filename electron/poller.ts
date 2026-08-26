@@ -12,6 +12,13 @@ import * as perf from './perf';
 import { nextReapDelayMs } from './reap-backoff';
 
 let fallbackTimer: NodeJS.Timeout | null = null;
+// The most recent successful `claude agents --json` — the only place a --bg
+// daemon worker's pid is tied to its session id (its argv carries neither).
+// Read by the Performance panel to name background agents in the CPU table.
+let lastAgentRows: ClaudeAgentJsonRow[] = [];
+export function getLastAgentRows(): ClaudeAgentJsonRow[] {
+  return lastAgentRows;
+}
 const watchers = new Map<string, fs.FSWatcher>();
 let getWindowRef: (() => BrowserWindow | null) | null = null;
 let pushScheduled = false;
@@ -417,6 +424,7 @@ async function fallbackTickImpl(): Promise<void> {
     return;
   }
   const rows: ClaudeAgentJsonRow[] = result.rows;
+  lastAgentRows = rows;
   const rowIndex = buildRowIndex(rows);
 
   // Drop miss counters for conversations that no longer exist.
