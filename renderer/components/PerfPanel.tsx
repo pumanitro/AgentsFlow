@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api } from '../lib/ipc';
-import type { PerfAgentRow, PerfHistory, PerfSnapshot, PerfToolCategory } from '../../shared/types';
+import type { PerfActionRow, PerfAgentRow, PerfHistory, PerfHistoryPoint, PerfSnapshot, PerfToolCategory, TrackedDirectory } from '../../shared/types';
+import PerfAsk from './PerfAsk';
 import { LineChart, OTHER_COLOR, PALETTE, type Series } from './PerfCharts';
 import {
   CPU_DANGER, CPU_WARN, LAG_DANGER_MS, LAG_WARN_MS,
@@ -150,18 +151,29 @@ function usePersisted<T extends string>(key: string, fallback: T): [T, (v: T) =>
 }
 
 type PerfView = 'timeline' | 'now';
-const RANGES: Array<{ key: string; min: number; label: string }> = [
-  { key: '5', min: 5, label: '5m' },
-  { key: '15', min: 15, label: '15m' },
-  { key: '30', min: 30, label: '30m' },
-  { key: '60', min: 60, label: '1h' },
+// `label` is the button; `spoken` is how the same window reads in a sentence
+// (the Ask composer puts it in the prompt it hands the spawned session).
+const RANGES: Array<{ key: string; min: number; label: string; spoken: string }> = [
+  { key: '5', min: 5, label: '5m', spoken: '5 minutes' },
+  { key: '15', min: 15, label: '15m', spoken: '15 minutes' },
+  { key: '30', min: 30, label: '30m', spoken: '30 minutes' },
+  { key: '60', min: 60, label: '1h', spoken: 'hour' },
 ];
+
+export interface PerfLauncherProps {
+  // Everything the "Ask about this" composer needs to spawn a session: where
+  // it can spawn, and the same handler the main SpawnBar uses (so a session
+  // started from here lands and focuses exactly like any other).
+  dirs?: TrackedDirectory[];
+  targetDir?: TrackedDirectory | null;
+  onSend?: (prompt: string, attachments: string[], model: string, directoryId: string) => Promise<void>;
+}
 
 /**
  * The header pill next to ☰: live severity dot + "54% · 66ms". Click opens
  * the full monitor as an overlay.
  */
-export default function PerfLauncher() {
+export default function PerfLauncher({ dirs = [], targetDir = null, onSend }: PerfLauncherProps) {
   const [open, setOpen] = useState(false);
   const { snap, unavailable } = usePerfSnapshot(false);
   const verdict = snap ? perfVerdict(snap) : null;
@@ -182,15 +194,16 @@ export default function PerfLauncher() {
         />
         <span className={verdict ? '' : 'text-muted'}>{verdict ? verdict.badge : 'perf'}</span>
       </button>
-      {open && <PerfModal onClose={() => setOpen(false)} />}
+      {open && <PerfModal onClose={() => setOpen(false)} dirs={dirs} targetDir={targetDir} onSend={onSend} />}
     </>
   );
 }
 
-function PerfModal({ onClose }: { onClose: () => void }) {
+function PerfModal({ onClose, dirs, targetDir, onSend }: { onClose: () => void } & PerfLauncherProps) {
   const [view, setView] = usePersisted<PerfView>('agentsflow:perf:view', 'timeline');
   const [rangeKey, setRangeKey] = usePersisted<string>('agentsflow:perf:range', '15');
-  const rangeMin = RANGES.find((r) => r.key === rangeKey)?.min ?? 15;
+  const range = RANGES.find((r) => r.key === rangeKey);
+  const rangeMin = range?.min ?? 15;
   const { snap, failed, loading, unavailable, load } = usePerfSnapshot(true);
   const { history } = usePerfHistory(view === 'timeline');
   // The renderer's own jank, measured here rather than in main: the longest
@@ -303,6 +316,19 @@ function PerfModal({ onClose }: { onClose: () => void }) {
             <PerfBody snap={snap} uiFrameGapMs={uiFrameGapMs} onOpenLog={openLog} loading={loading} layout="wide" />
           )}
         </div>
+        {/* Ask about what is on screen: freezes this window's samples into a
+            report and starts a session that already has them. Outside the
+            scroll area so it is reachable without scrolling to the bottom. */}
+        {onSend && (
+          <PerfAsk
+            dirs={dirs ?? []}
+            defaultDir={targetDir ?? null}
+            rangeMin={rangeMin}
+            rangeLabel={range?.spoken ?? `${rangeMin} minutes`}
+            onSend={onSend}
+            onSpawned={onClose}
+          />
+        )}
       </div>
     </div>
   );
@@ -360,6 +386,7 @@ function AgentRow({ a }: { a: PerfAgentRow }) {
         </span>
         <span className="text-[11px] font-mono shrink-0" style={{ color: SEV_COLOR[sev] }}>
           {a.cpu}%<span className="text-subtle ml-1.5">{fmtMB(a.rssMB)}</span>
+          {typeof a.threads === 'number' && <span className="text-subtle ml-1.5" title={`${a.threads} threads across ${a.procs + 1} processes`}>{a.threads} thr</span>}
         </span>
       </div>
       <div className="mt-0.5 h-1 rounded-full overflow-hidden flex" style={{ backgroundColor: 'rgba(255,255,255,0.06)' }}>
@@ -402,6 +429,15 @@ function agentSeriesLabel(pid: number, names: PerfHistory['agentNames']): string
   return n.kind === 'spare' ? `bg agent (pid ${pid})` : `session (pid ${pid})`;
 }
 
+// An action is a command as the agent ran it (name + short args), regardless
+// of which agent ran it — the same grep from three agents is one thing.
+function actionKey(a: PerfActionRow): string {
+  return `${a.name}|${a.cmd}`;
+}
+function actionLabel(a: PerfActionRow): string {
+  return a.cmd ? `${a.name} ${a.cmd}` : a.name;
+}
+
 /**
  * Change over time: machine, app, event loop, and what the agents were doing.
  * Every chart shares the one time range chosen in the header; each has one
@@ -420,7 +456,19 @@ function PerfTimeline({ history, rangeMin, cores, verdict }: { history: PerfHist
     { key: 'cpu', label: 'CPU busy', color: PALETTE[0], values: points.map((p) => p.cpuBusyPct) },
     { key: 'mem', label: 'Memory used', color: PALETTE[1], values: points.map((p) => p.memUsedPct) },
   ];
-  const load: Series[] = [{ key: 'load', label: 'Load (1 min)', color: PALETTE[1], values: points.map((p) => p.load1) }];
+  // Load = runnable threads, smoothed; the thread census adds the instantaneous
+  // on-CPU count next to it, both against the core count.
+  const load: Series[] = [
+    { key: 'load', label: 'Load (1 min)', color: PALETTE[1], values: points.map((p) => p.load1) },
+    ...(points.some((p) => p.threads) ? [{ key: 'running', label: 'Threads on CPU (sample)', color: PALETTE[0], values: points.map((p) => (p.threads ? p.threads.running : null)) }] : []),
+  ];
+  // Thread population: everything alive vs what the agents' subtrees hold.
+  const threads: Series[] = points.some((p) => p.threads)
+    ? [
+      { key: 'total', label: 'All threads', color: PALETTE[6], values: points.map((p) => (p.threads ? p.threads.total : null)) },
+      { key: 'agents', label: 'Under agents', color: PALETTE[4], values: points.map((p) => (p.threads ? p.threads.underAgents : null)) },
+    ]
+    : [];
   const appCpu: Series[] = [
     { key: 'main', label: 'Main process', color: PALETTE[0], values: points.map((p) => p.mainCpuPct) },
     { key: 'renderer', label: 'Renderer + helpers', color: PALETTE[1], values: points.map((p) => p.rendererCpuPct) },
@@ -431,6 +479,56 @@ function PerfTimeline({ history, rangeMin, cores, verdict }: { history: PerfHist
   const activity: Series[] = CATEGORY_ORDER
     .filter((c) => points.some((p) => (p.byCategory?.[c] ?? 0) > 0))
     .map((c) => ({ key: c, label: CATEGORY_LABEL[c], color: CATEGORY_COLOR[c], values: points.map((p) => (p.byCategory ? p.byCategory[c] ?? 0 : null)) }));
+
+  // By action: the concrete commands behind the categories. The hottest
+  // (name + args) keys across the range get palette slots, the rest fold into
+  // "other actions". The same command run by several agents is one series.
+  const actions: Series[] = useMemo(() => {
+    const peak = new Map<string, { label: string; cpu: number }>();
+    for (const p of points) {
+      for (const a of p.topActions ?? []) {
+        const key = actionKey(a);
+        const prev = peak.get(key);
+        if (!prev || a.cpu > prev.cpu) peak.set(key, { label: actionLabel(a), cpu: a.cpu });
+      }
+    }
+    const ranked = Array.from(peak.entries()).sort((a, b) => b[1].cpu - a[1].cpu).map(([k]) => k);
+    const top = ranked.slice(0, 7).sort();
+    const topSet = new Set(top);
+    const sumAt = (p: PerfHistoryPoint, pick: (k: string) => boolean): number | null =>
+      p.topActions ? p.topActions.filter((a) => pick(actionKey(a))).reduce((s, a) => s + a.cpu, 0) : null;
+    const out: Series[] = top.map((key, i) => ({
+      key,
+      label: peak.get(key)!.label,
+      color: PALETTE[i],
+      values: points.map((p) => sumAt(p, (k) => k === key)),
+    }));
+    if (ranked.length > top.length) {
+      out.push({ key: '__other', label: `other actions (${ranked.length - top.length})`, color: OTHER_COLOR, values: points.map((p) => sumAt(p, (k) => !topSet.has(k))) });
+    }
+    return out;
+  }, [points]);
+
+  // Tooltip drill-down for the category chart: the commands (and whose agent)
+  // behind the hovered sample, so a spike names its cause.
+  const actionsAt = (i: number) => {
+    const rows = points[i]?.topActions;
+    if (!rows || rows.length === 0) return null;
+    return (
+      <div className="mt-1 pt-1 border-t border-border/60">
+        <div className="text-subtle mb-0.5">what was running</div>
+        {rows.slice(0, 6).map((a, j) => (
+          <div key={j} className="flex items-center gap-1.5">
+            <span className="inline-block w-1.5 h-1.5 rounded-full shrink-0" style={{ backgroundColor: CATEGORY_COLOR[a.category] ?? OTHER_COLOR }} aria-hidden="true" />
+            <span className="text-text w-12 text-right shrink-0">{Math.round(a.cpu)}%</span>
+            <span className="text-text truncate max-w-[260px]">{actionLabel(a)}</span>
+            {typeof a.threads === 'number' && a.threads > 0 && <span className="text-subtle shrink-0">{a.threads} thr</span>}
+            <span className="text-subtle truncate max-w-[160px]">· {agentSeriesLabel(a.pid, names)}</span>
+          </div>
+        ))}
+      </div>
+    );
+  };
 
   // Per agent: the busiest pids across the range get palette slots — assigned
   // in pid order so an agent keeps its colour as others come and go — and the
@@ -493,18 +591,28 @@ function PerfTimeline({ history, rangeMin, cores, verdict }: { history: PerfHist
       )}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
         <div className={cell}><LineChart title="Machine · CPU & memory" unit="%" times={times} series={machine} yMax={100} format={pct} /></div>
-        <div className={cell}><LineChart title="Machine · load average" unit="" times={times} series={load} reference={{ value: cores, label: `${cores} cores` }} format={pct} /></div>
+        <div className={cell}><LineChart title="Machine · load & threads on CPU" unit="" times={times} series={load} reference={{ value: cores, label: `${cores} cores` }} format={pct} /></div>
+        {threads.length > 0 && (
+          <div className={`${cell} md:col-span-2`}>
+            <LineChart title="Machine · threads alive (all vs under agents)" unit="" times={times} series={threads} height={110} format={(v) => Math.round(v).toLocaleString()} />
+          </div>
+        )}
         <div className={cell}><LineChart title="This app · CPU" unit="%" times={times} series={appCpu} format={pct} /></div>
         <div className={cell}><LineChart title="This app · event-loop lag" unit="" times={times} series={lag} format={(v) => (v >= 1000 ? `${(v / 1000).toFixed(1)}s` : `${Math.round(v)}ms`)} /></div>
         <div className={cell}>
           {activity.length > 0
-            ? <LineChart title="Agents · CPU by activity (stacked)" unit="%" times={times} series={activity} stacked height={150} format={pct} />
+            ? <LineChart title="Agents · CPU by activity (stacked)" unit="%" times={times} series={activity} stacked height={150} format={pct} detail={actionsAt} />
             : <div className="text-[11px] text-muted italic px-1 py-6">No agent census in this range yet.</div>}
         </div>
         <div className={cell}>
           {perAgent.length > 0
-            ? <LineChart title="Agents · CPU per agent" unit="%" times={times} series={perAgent} height={150} format={pct} />
+            ? <LineChart title="Agents · CPU per agent" unit="%" times={times} series={perAgent} height={150} format={pct} detail={actionsAt} />
             : <div className="text-[11px] text-muted italic px-1 py-6">No agent census in this range yet.</div>}
+        </div>
+        <div className={`${cell} md:col-span-2`}>
+          {actions.length > 0
+            ? <LineChart title="Agents · CPU by action — the commands behind the spikes (stacked)" unit="%" times={times} series={actions} stacked height={170} format={pct} detail={actionsAt} />
+            : <div className="text-[11px] text-muted italic px-1 py-6">No agent actions recorded in this range yet (needs a main-process restart after this update).</div>}
         </div>
         <div className={`${cell} md:col-span-2`}>
           {procs.length > 0
@@ -552,6 +660,16 @@ function PerfBody({ snap, uiFrameGapMs, onOpenLog, loading, layout }: { snap: Pe
           ? `${system.memUsedPct}% · ${fmtMB(system.memUsedMB)} / ${fmtMB(system.memTotalMB)}${system.swapUsedMB > 0 ? ` · swap ${fmtMB(system.swapUsedMB)}` : ''}${system.memPressure && system.memPressure !== 'normal' ? ` · pressure ${system.memPressure}` : ''}`
           : 'measuring…'}
       />
+      {/* Threads: how many exist, how many are on a CPU right now (vs cores),
+          and how many belong to agent subtrees. Absent from an older main. */}
+      {system.threads && (
+        <Row
+          label="Threads"
+          value={`${system.threads.running} on CPU / ${system.cores} cores`}
+          severity={severityFor(system.threads.running, system.cores, system.cores * 2)}
+          sub={`${system.threads.total.toLocaleString()} total · ${system.threads.underAgents.toLocaleString()} under agents`}
+        />
+      )}
     </>
   );
 
@@ -611,6 +729,30 @@ function PerfBody({ snap, uiFrameGapMs, onOpenLog, loading, layout }: { snap: Pe
               ))}
             </div>
           </div>
+          {/* The commands burning CPU right now, across every agent — the
+              flat answer before scanning agent by agent. Field-level default:
+              an older main process may still send summaries without it. */}
+          {(snap.agents.topActions ?? []).length > 0 && (
+            <div className="px-3 pb-1">
+              <div className="text-[10px] text-subtle mb-0.5">Hottest actions</div>
+              {(snap.agents.topActions ?? []).slice(0, 6).map((t, i) => {
+                const owner = snap.agents!.rows.find((r) => r.pid === t.pid);
+                const sev = severityFor(t.cpu, 100, 200);
+                return (
+                  <div key={i} className="flex items-baseline gap-1.5 text-[10px] font-mono">
+                    <span className="shrink-0 w-10 text-right" style={{ color: SEV_COLOR[sev] }}>{Math.round(t.cpu)}%</span>
+                    <span className="truncate min-w-0" title={`${actionLabel(t)} · ${owner ? agentLabel(owner) : `pid ${t.pid}`}`}>
+                      <span style={{ color: CATEGORY_COLOR[t.category] ?? OTHER_COLOR }}>{t.name}</span>
+                      {t.count > 1 && <span className="text-subtle"> ×{t.count}</span>}
+                      {t.cmd && <span className="text-text"> {t.cmd}</span>}
+                      {typeof t.threads === 'number' && t.threads > 0 && <span className="text-subtle"> · {t.threads} thr</span>}
+                      <span className="text-subtle"> · {owner ? `${owner.peer ? `${owner.peer} · ` : ''}${agentLabel(owner)}` : `pid ${t.pid}`}</span>
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+          )}
           <div className="flex flex-col">
             {snap.agents.rows.map((a) => <AgentRow key={a.pid} a={a} />)}
           </div>

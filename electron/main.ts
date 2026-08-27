@@ -7,6 +7,7 @@ import serve from 'electron-serve';
 import { getLogFilePath, getStallStats, installCrashLogging, notePowerResume, notePowerSuspend, registerHealthProbe } from './logger';
 import * as perf from './perf';
 import * as sysmon from './sysmon';
+import { buildPerfReport, reportBasename, serializeReportData } from './perf-report';
 
 const APP_NAME = 'Peers Flow';
 app.setName(APP_NAME);
@@ -58,7 +59,7 @@ import { gitStatus, listBranches, listFiles, listWorktrees, removeWorktree } fro
 import { searchInFiles } from './search';
 import { deleteAttachmentFiles, pastedImagesRoot, prunePastedImages, sweepOrphanAttachments, todayDateSlug } from './attachments';
 import { noteDirForPath, sweepNoteDir, sweepNoteImages } from './note-images';
-import { Account, AccountsSnapshot, AddAccountResult, BridgeHealth, Conversation, FileEntry, PinnedDivider, PinnedItemRef, PinnedTodo, ProbeAccountResult, RotationPolicy, SlashCommand, SpawnRequest, SwitchAccountResult, TrackedDirectory, UsageResult } from '../shared/types';
+import { Account, AccountsSnapshot, AddAccountResult, BridgeHealth, Conversation, FileEntry, PerfReportResult, PinnedDivider, PinnedItemRef, PinnedTodo, ProbeAccountResult, RotationPolicy, SlashCommand, SpawnRequest, SwitchAccountResult, TrackedDirectory, UsageResult } from '../shared/types';
 
 const isDev = process.env.NODE_ENV === 'development';
 const loadURL = isDev ? null : serve({ directory: path.join(__dirname, '..', '..', '..', 'renderer', 'out') });
@@ -504,6 +505,33 @@ ipcMain.handle('usage:get', (_e, force?: boolean) => getUsage(Boolean(force)));
 // so the monitor's own polling never shows up in the slow-op table it renders.
 rawIpcHandle('perf:snapshot', () => sysmon.getPerfSnapshot());
 rawIpcHandle('perf:history', () => sysmon.getPerfHistory());
+
+// Freeze the Performance view into files on disk, so a Claude Code session can
+// be spawned with the numbers already in hand instead of being told "it's slow".
+// Kept out of the tracked project dirs (a report is not the user's source) and
+// pruned to the newest PERF_REPORT_KEEP so this never grows unbounded.
+const PERF_REPORT_KEEP = 30;
+rawIpcHandle('perf:report', async (_e: unknown, rangeMin: number): Promise<PerfReportResult> => {
+  const fsMod = require('fs') as typeof import('fs');
+  const pathMod = require('path') as typeof import('path');
+  const span = Math.max(1, Math.min(360, Math.round(Number(rangeMin) || 15)));
+  const [snapshot, history] = [await sysmon.getPerfSnapshot(), sysmon.getPerfHistory()];
+  const report = buildPerfReport({ snapshot, history, rangeMin: span });
+  const dir = pathMod.join(app.getPath('userData'), 'perf-reports');
+  fsMod.mkdirSync(dir, { recursive: true });
+  const base = reportBasename(span);
+  const markdownPath = pathMod.join(dir, `${base}.md`);
+  const jsonPath = pathMod.join(dir, `${base}.json`);
+  fsMod.writeFileSync(markdownPath, report.markdown, 'utf8');
+  fsMod.writeFileSync(jsonPath, serializeReportData(report.data), 'utf8');
+  try {
+    const stale = fsMod.readdirSync(dir).filter((f) => /^perf-.*\.(md|json)$/.test(f)).sort();
+    for (const f of stale.slice(0, Math.max(0, stale.length - PERF_REPORT_KEEP * 2))) {
+      try { fsMod.unlinkSync(pathMod.join(dir, f)); } catch { /* already gone */ }
+    }
+  } catch { /* pruning is best-effort */ }
+  return { markdownPath, jsonPath, rangeMin: span, samples: report.data.samples, summary: report.summary };
+});
 
 // ----- Account pool -----
 // Switching moves an account's credentials into the single keychain slot Claude

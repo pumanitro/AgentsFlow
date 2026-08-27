@@ -40,6 +40,8 @@ export interface LineChartProps {
   height?: number;
   // Number formatting for values in the legend and tooltip.
   format?: (v: number) => string;
+  // Extra tooltip content for the hovered sample (e.g. "what was running").
+  detail?: (index: number) => React.ReactNode;
 }
 
 const PAD = { left: 38, right: 10, top: 8, bottom: 18 };
@@ -78,7 +80,7 @@ function useWidth<T extends HTMLElement>(): [React.RefObject<T>, number] {
   return [ref, w];
 }
 
-export function LineChart({ title, unit, times, series, stacked = false, yMax, reference, height = 120, format }: LineChartProps) {
+export function LineChart({ title, unit, times, series, stacked = false, yMax, reference, height = 120, format, detail }: LineChartProps) {
   const [wrapRef, width] = useWidth<HTMLDivElement>();
   const [hover, setHover] = useState<number | null>(null);
   const fmt = format ?? ((v: number) => (Math.abs(v) >= 100 ? Math.round(v).toString() : (Math.round(v * 10) / 10).toString()));
@@ -260,6 +262,7 @@ export function LineChart({ title, unit, times, series, stacked = false, yMax, r
                 </div>
               );
             })}
+            {detail?.(hover)}
           </div>
         )}
       </div>

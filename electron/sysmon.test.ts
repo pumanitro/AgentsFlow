@@ -75,7 +75,7 @@ test('parsePsOutput: census counts, claude RSS, and top-CPU aggregation by name'
 function snap(over: Partial<PerfSnapshot['system']> = {}, loop: Partial<PerfSnapshot['loop']> = {}): PerfSnapshot {
   return {
     at: '2026-08-26T13:30:00.000Z',
-    system: { cpuBusyPct: 20, load1: 4, load5: 4, load15: 4, cores: 16, memTotalMB: 131072, memUsedMB: 40000, memUsedPct: 30, swapUsedMB: 0, memPressure: null, ...over },
+    system: { cpuBusyPct: 20, load1: 4, load5: 4, load15: 4, cores: 16, memTotalMB: 131072, memUsedMB: 40000, memUsedPct: 30, swapUsedMB: 0, memPressure: null, threads: null, ...over },
     app: { uptimeS: 1, mainCpuPct: 1, mainRssMB: 1, heapMB: 1, rendererCpuPct: 1, rendererRssMB: 1, gpuCpuPct: 0, totalRssMB: 1 },
     loop: { lagNowMs: 1, lagMaxMs: 10, lagAvgMs: 2, stalls: 0, lastStallAt: null, lastStallMs: 0, ...loop },
     resources: {},
@@ -191,12 +191,60 @@ test('categorize + shortCmd: tool buckets and human argument strings', () => {
   assert.equal(categorize('agentsflow-mcp', '/x/Electron /x/mcp/agentsflow-mcp'), 'mcp');
   assert.equal(categorize('Chrome (headless)', '/x/chrome-headless-shell --headless'), 'browser');
   assert.equal(categorize('caffeinate', 'caffeinate -i -t 300'), 'other');
+  // Claude Code's shell snapshot execs its embedded ugrep for every `grep`.
+  const ugrepArgs = 'ugrep -G --ignore-files --hidden -I --exclude-dir=.git --exclude-dir=.svn --exclude-dir=.hg --exclude-dir=.bzr --exclude-dir=.jj --exclude-dir=.sl -rn "wrath" src/';
+  assert.equal(displayName(exeFromArgs(ugrepArgs), ugrepArgs), 'grep (ugrep)');
+  assert.equal(categorize('grep (ugrep)', ugrepArgs), 'search');
+  assert.equal(categorize('ugrep', ugrepArgs), 'search');
+  assert.equal(shortCmd('grep (ugrep)', 'ugrep', ugrepArgs), '-rn "wrath" src/');
+  // …and `find` → embedded bfs.
+  const bfsArgs = 'bfs -S dfs -regextype findutils-default / -iname run.py -print';
+  assert.equal(displayName(exeFromArgs(bfsArgs), bfsArgs), 'find (bfs)');
+  assert.equal(categorize('find (bfs)', bfsArgs), 'search');
+  assert.equal(shortCmd('find (bfs)', 'bfs', bfsArgs), '/ -iname run.py -print');
+  // The macOS framework binary is capital-P `Python` (browser-harness, uv tools).
+  const pyArgs = '/opt/homebrew/Cellar/python@3.12/3.12.7/Frameworks/Python.framework/Versions/3.12/Resources/Python.app/Contents/MacOS/Python /Users/x/.local/bin/browser-harness';
+  assert.equal(categorize(displayName(exeFromArgs(pyArgs), pyArgs), pyArgs), 'build');
   assert.equal(shortCmd('npm', 'npm', 'npm exec vitest run   --shard=2/4'), 'exec vitest run --shard=2/4');
   assert.equal(shortCmd('zsh', '/bin/zsh', '/bin/zsh -c source /x/snapshot.sh && ls'), '');
   assert.equal(shortCmd('node', 'node', 'node /Users/x/IdeaProjects/atlas/tools/season-loop/rounds.mjs --journal=/y'), 'rounds.mjs --journal=/y');
   assert.equal(shortCmd('git', '/usr/bin/git', '/usr/bin/git status'), 'status');
   assert.equal(shortCmd('Chrome (headless)', '/x/chrome-headless-shell', '/x/chrome-headless-shell --type=gpu-process --no-sandbox --headless'), 'gpu-process');
   assert.equal(categorize('Chrome (headless)', '/Users/x/Library/Caches/ms-playwright/chromium/chrome-headless-shell --type=renderer'), 'browser');
+});
+
+test('parseThreadLines + applyThreads: per-pid thread counts, running threads, agent share', () => {
+  const { parseThreadLines, applyThreads } = require('./sysmon') as typeof import('./sysmon');
+  // BSD `ps -axM -o pid=,state=`: the -M layout first, our columns last; the
+  // header line has no numeric pid; thread rows carry no user/tt columns.
+  const text = [
+    'USER               PID   TT   %CPU STAT PRI     STIME     UTIME COMMAND        PID STAT',
+    'root                 1   ??    0.0 S    31T   0:00.01   0:00.00 /sbin/l          1 S',
+    '                     1         0.3 S    37T   0:00.04   0:00.04                  1 S',
+    'iij                 81   ??   30.0 R    31T   0:00.01   0:00.00 claude          81 R',
+    '                    81         0.3 S    37T   0:00.04   0:00.04                 81 S',
+    '                    81         0.3 R    37T   0:00.04   0:00.04                 81 R+',
+    'iij                 85   ??   25.0 R    31T   0:00.01   0:00.00 node            85 R',
+    '                    85         0.3 S    37T   0:00.04   0:00.04                 85 S',
+    'iij                200   ??   50.0 S    31T   0:00.01   0:00.00 vm             200 S',
+    '',
+  ].join('\n');
+  const map = parseThreadLines(text);
+  assert.deepEqual(map.get(1), { threads: 2, running: 0 });
+  assert.deepEqual(map.get(81), { threads: 3, running: 2 });
+  assert.deepEqual(map.get(85), { threads: 2, running: 1 });
+  const procs = parsePsLines([
+    '   81     1  30.0 400000 claude bg-spare --bg-spare /tmp/s1.claim.sock',
+    '   85    81  25.0  80000 node (vitest 1)',
+    '  200     1  50.0  10000 /x/com.apple.Virtualization.VirtualMachine',
+  ].join('\n'));
+  const totals = applyThreads(procs, map);
+  assert.deepEqual(totals, { total: 6, running: 3, underAgents: 5 });
+  assert.equal(procs[1].threads, 2);
+  const r = attributeAgents(procs);
+  assert.equal(r.rows[0].threads, 5);
+  assert.equal(r.threads, 5);
+  assert.equal(r.rows[0].tools[0].threads, 2);
 });
 
 test('attributeAgents: bills each subtree to its nearest agent, names it via the resolver', () => {
@@ -245,6 +293,14 @@ test('attributeAgents: bills each subtree to its nearest agent, names it via the
   assert.deepEqual(r.rows[2].tools.map((t) => [t.name, t.cmd, t.category, t.cpu]), [['git', 'status --porcelain', 'git', 2]]);
   assert.equal(r.totalCpu, 98.2);
   assert.deepEqual(r.byCategory, { claude: 43.6, test: 46.4, search: 6, git: 2, mcp: 0.2 });
+  // Flat cross-agent ranking: every tool row of every agent, hottest first,
+  // each tagged with the agent that ran it.
+  assert.deepEqual(r.topActions.map((t) => [t.pid, t.name, t.cmd, t.category, t.cpu, t.count]), [
+    [81, 'node (vitest)', '', 'test', 45, 3],
+    [102, 'grep', '-rn cookie src/', 'search', 6, 1],
+    [100, 'git', 'status --porcelain', 'git', 2, 1],
+    [81, 'npm', 'exec vitest run --shard=2/4', 'test', 1.4, 1],
+  ]);
   // The resolver saw the ids parsed from argv.
   assert.deepEqual(seen.find((q) => q.pid === 100), { pid: 100, sessionId: '652a0c68-1', conversationId: '4d9cee57-000a' });
   assert.deepEqual(seen.find((q) => q.pid === 81), { pid: 81, sessionId: null, conversationId: null });

@@ -13,6 +13,7 @@ const api: AgentsFlowApi = {
   getUsage: (force?: boolean) => ipcRenderer.invoke('usage:get', force),
   getPerfSnapshot: () => ipcRenderer.invoke('perf:snapshot'),
   getPerfHistory: () => ipcRenderer.invoke('perf:history'),
+  savePerfReport: (rangeMin: number) => ipcRenderer.invoke('perf:report', rangeMin),
 
   listAccounts: () => ipcRenderer.invoke('accounts:list'),
   addAccount: (email) => ipcRenderer.invoke('accounts:add', email),

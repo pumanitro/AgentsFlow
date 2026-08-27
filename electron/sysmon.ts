@@ -29,7 +29,7 @@
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { execFile } from 'node:child_process';
-import type { PerfAgentRow, PerfAgentsSummary, PerfContainerRow, PerfHistory, PerfHistoryPoint, PerfProcGroup, PerfProcRow, PerfSnapshot, PerfToolCategory, PerfToolRow } from '../shared/types';
+import type { PerfActionRow, PerfAgentRow, PerfAgentsSummary, PerfContainerRow, PerfHistory, PerfHistoryPoint, PerfProcGroup, PerfProcRow, PerfSnapshot, PerfThreadTotals, PerfToolCategory, PerfToolRow } from '../shared/types';
 import * as perf from './perf';
 
 export interface AppMetricLike {
@@ -70,9 +70,11 @@ const HISTORY_CAP = 720;
 const HISTORY_CENSUS_MS = 15_000;
 const HISTORY_AGENTS = 8;
 const HISTORY_PROCS = 6;
+const HISTORY_ACTIONS = 8;
 const TOP_CPU_ROWS = 6;
 const TOP_AGENT_ROWS = 10;
 const TOOLS_PER_AGENT = 4;
+const TOP_ACTIONS = 10;
 
 // ---------- pure helpers (unit-tested) ----------
 
@@ -130,6 +132,9 @@ export interface ProcRec {
   rssKB: number;
   exe: string; // executable path as it appears in args
   args: string; // full command line
+  // From the `ps -M` thread census, when one was taken alongside.
+  threads?: number;
+  runningThreads?: number;
 }
 
 /**
@@ -165,6 +170,43 @@ export function parsePsLines(text: string): ProcRec[] {
 }
 
 /**
+ * One line per THREAD of `ps -axM -o pid=,state=` (BSD ps appends the -o
+ * columns after its fixed -M layout, so the pid and state are the last two
+ * tokens). Returns per-pid thread counts and how many were on a CPU (state R).
+ */
+export function parseThreadLines(text: string): Map<number, { threads: number; running: number }> {
+  const out = new Map<number, { threads: number; running: number }>();
+  for (const raw of text.split('\n')) {
+    const m = /(\d+)\s+([A-Za-z+<>]+)\s*$/.exec(raw);
+    if (!m) continue;
+    const pid = Number(m[1]);
+    const e = out.get(pid) ?? { threads: 0, running: 0 };
+    e.threads++;
+    if (m[2].startsWith('R')) e.running++;
+    out.set(pid, e);
+  }
+  return out;
+}
+
+/** Attach the thread census to the process records (in place) and total it. */
+export function applyThreads(procs: ProcRec[], threads: Map<number, { threads: number; running: number }>): PerfThreadTotals {
+  const { ownerOf } = buildOwnerMap(procs);
+  let total = 0;
+  let running = 0;
+  let underAgents = 0;
+  for (const p of procs) {
+    const t = threads.get(p.pid);
+    if (!t) continue;
+    p.threads = t.threads;
+    p.runningThreads = t.running;
+    total += t.threads;
+    running += t.running;
+    if (ownerOf(p.pid) !== null) underAgents += t.threads;
+  }
+  return { total, running, underAgents };
+}
+
+/**
  * Collapse an executable into the name we aggregate on. Chrome's many helpers
  * and vitest's per-worker titles would otherwise each be their own row.
  */
@@ -175,11 +217,19 @@ export function displayName(exe: string, args = exe): string {
   if (/^Google Chrome/.test(base)) return 'Chrome';
   if (/^Electron/.test(base)) return /\/mcp\/agentsflow-mcp/.test(args) ? 'agentsflow-mcp' : 'AgentsFlow (Electron)';
   if (/^node \(vitest/.test(args) || /^node \(vitest/.test(base)) return 'node (vitest)';
+  // Claude Code's shell snapshot rewrites `grep` into the CLI's embedded ugrep
+  // (`ARGV0=ugrep claude -G --ignore-files …`), so every agent grep shows up
+  // in ps as `ugrep`. Multi-threaded: one call can take 300 %+ of CPU.
+  if (base === 'ugrep' || base === 'ug') return 'grep (ugrep)';
+  // Same shim for `find` → embedded bfs (`ARGV0=bfs claude -S dfs …`).
+  if (base === 'bfs') return 'find (bfs)';
   return base;
 }
 
-const SEARCH_RE = /^(grep|egrep|fgrep|rg|ripgrep|ag|ack|find|fd|locate|mdfind)$/;
-const BUILD_RE = /^(node|tsc|npm|npx|pnpm|yarn|bun|deno|esbuild|vite|next|webpack|rollup|swc|babel|python3?|pip3?|cargo|rustc|go|swift|swiftc|xcodebuild|java|javac|gradle|mvn|make|cmake|clang|gcc|ld)$/;
+const SEARCH_RE = /^(grep|egrep|fgrep|ugrep|ug|rg|ripgrep|ag|ack|find|bfs|fd|locate|mdfind)$/;
+// `Python` (capital) is the macOS framework binary every `python3`/uv tool
+// actually execs (browser-harness among them).
+const BUILD_RE = /^(node|tsc|npm|npx|pnpm|yarn|bun|deno|esbuild|vite|next|webpack|rollup|swc|babel|[Pp]ython3?|pip3?|uv|uvx|cargo|rustc|go|swift|swiftc|xcodebuild|java|javac|gradle|mvn|make|cmake|clang|gcc|ld)$/;
 const TEST_RE = /(vitest|jest|mocha|playwright|cypress|pytest|karma|ava\b)/i;
 const SHELL_RE = /^(zsh|bash|sh|fish|dash|ksh)$/;
 
@@ -212,6 +262,11 @@ export function shortCmd(name: string, exe: string, args: string): string {
     const sp = rest.indexOf(' ');
     rest = path.basename(sp === -1 ? rest : rest.slice(0, sp)) + (sp === -1 ? '' : rest.slice(sp));
   }
+  // The grep→ugrep / find→bfs shims prepend a fixed wall of flags; drop them
+  // so the row reads like the command the agent actually typed. After the
+  // path collapse above: a search root of `/` is an argument, not a program.
+  if (name === 'grep (ugrep)') rest = rest.replace(/^(?:(?:-G|--ignore-files|--hidden|-I|--exclude-dir=\S+) )+/, '');
+  if (name === 'find (bfs)') rest = rest.replace(/^-S dfs -regextype findutils-default ?/, '');
   return rest.length > 60 ? `${rest.slice(0, 57)}…` : rest;
 }
 
@@ -263,11 +318,11 @@ export function attributeAgents(procs: ProcRec[], resolve?: AgentResolver): Perf
   for (const p of procs) byPid.set(p.pid, p);
   const { agentOf, ownerOf } = buildOwnerMap(procs);
 
-  type Acc = { self: ProcRec; cpu: number; selfCpu: number; rssKB: number; procs: number; tools: Map<string, PerfToolRow> };
+  type Acc = { self: ProcRec; cpu: number; selfCpu: number; rssKB: number; procs: number; threads: number; tools: Map<string, PerfToolRow> };
   const acc = new Map<number, Acc>();
   for (const [pid, _c] of agentOf) {
     const self = byPid.get(pid)!;
-    acc.set(pid, { self, cpu: self.cpu, selfCpu: self.cpu, rssKB: self.rssKB, procs: 0, tools: new Map() });
+    acc.set(pid, { self, cpu: self.cpu, selfCpu: self.cpu, rssKB: self.rssKB, procs: 0, threads: self.threads ?? 0, tools: new Map() });
   }
   const byCategory: Partial<Record<PerfToolCategory, number>> = {};
   const bump = (cat: PerfToolCategory, cpu: number) => { byCategory[cat] = (byCategory[cat] ?? 0) + cpu; };
@@ -281,15 +336,17 @@ export function attributeAgents(procs: ProcRec[], resolve?: AgentResolver): Perf
     a.cpu += p.cpu;
     a.rssKB += p.rssKB;
     a.procs++;
+    a.threads += p.threads ?? 0;
     const name = displayName(p.exe, p.args);
     const cmd = shortCmd(name, p.exe, p.args);
     const category = categorize(name, p.args);
     bump(category, p.cpu);
     const key = `${name}|${cmd}`;
-    const t = a.tools.get(key) ?? { name, cmd, category, cpu: 0, rssMB: 0, count: 0 };
+    const t = a.tools.get(key) ?? { name, cmd, category, cpu: 0, rssMB: 0, count: 0, threads: 0 };
     t.cpu += p.cpu;
     t.rssMB += p.rssKB / 1024;
     t.count++;
+    t.threads = (t.threads ?? 0) + (p.threads ?? 0);
     a.tools.set(key, t);
   }
 
@@ -315,6 +372,7 @@ export function attributeAgents(procs: ProcRec[], resolve?: AgentResolver): Perf
       selfCpu: Math.round(a.selfCpu * 10) / 10,
       rssMB: Math.round(a.rssKB / 1024),
       procs: a.procs,
+      threads: a.threads,
       tools,
     });
   }
@@ -324,7 +382,18 @@ export function attributeAgents(procs: ProcRec[], resolve?: AgentResolver): Perf
     const v = Math.round((byCategory[k] ?? 0) * 10) / 10;
     if (v > 0) byCategory[k] = v; else delete byCategory[k];
   }
-  return { rows: rows.slice(0, TOP_AGENT_ROWS), totalCpu, byCategory };
+  // The flat, cross-agent answer to "which command is burning CPU": every
+  // tool row of every agent (not just the per-agent top few), hottest first.
+  const topActions: PerfActionRow[] = [];
+  for (const [pid, a] of acc) {
+    for (const t of a.tools.values()) {
+      if (t.cpu < 0.5) continue;
+      topActions.push({ ...t, pid, cpu: Math.round(t.cpu * 10) / 10, rssMB: Math.round(t.rssMB) });
+    }
+  }
+  topActions.sort((x, y) => y.cpu - x.cpu);
+  const threads = rows.reduce((s, r) => s + (r.threads ?? 0), 0);
+  return { rows: rows.slice(0, TOP_AGENT_ROWS), totalCpu, byCategory, topActions: topActions.slice(0, TOP_ACTIONS), threads };
 }
 
 /**
@@ -502,6 +571,8 @@ export function recordHistoryPoint(): void {
     byCategory: c?.agents ? c.agents.byCategory : null,
     agents: c?.agents ? c.agents.rows.slice(0, HISTORY_AGENTS).map((r) => ({ pid: r.pid, cpu: r.cpu })) : null,
     topProcs: c?.processes ? c.processes.topCpu.slice(0, HISTORY_PROCS).map((r) => ({ name: r.name, cpu: r.cpu })) : null,
+    topActions: c?.agents ? c.agents.topActions.slice(0, HISTORY_ACTIONS) : null,
+    threads: c?.threads ?? null,
   };
   lagSinceHistory = 0;
   if (c?.agents) {
@@ -518,7 +589,10 @@ export function recordHistoryPoint(): void {
 export function getPerfHistory(): PerfHistory {
   // Drop names for agents no longer present in any retained point.
   const live = new Set<string>();
-  for (const p of history) for (const a of p.agents ?? []) live.add(String(a.pid));
+  for (const p of history) {
+    for (const a of p.agents ?? []) live.add(String(a.pid));
+    for (const a of p.topActions ?? []) live.add(String(a.pid));
+  }
   for (const k of Object.keys(agentNames)) if (!live.has(k)) delete agentNames[k];
   return { intervalMs: HISTORY_TICK_MS, points: history.slice(), agentNames: { ...agentNames } };
 }
@@ -605,6 +679,7 @@ interface Census {
   processes: PerfSnapshot['processes'];
   docker: PerfSnapshot['docker'];
   agents: PerfAgentsSummary | null;
+  threads: PerfThreadTotals | null;
   vm: VmStatSummary | null;
   pressure: PerfSnapshot['system']['memPressure'];
 }
@@ -615,11 +690,15 @@ function refreshCensus(): Promise<void> {
   if (censusInflight) return censusInflight;
   if (census && Date.now() - census.at < CENSUS_TTL_MS) return Promise.resolve();
   const darwin = process.platform === 'darwin';
+  // One line per thread; ~0.1 s even with 8 000 threads. BSD ps only.
+  const threadsP = darwin ? run('ps', ['-axM', '-o', 'pid=,state=']).then((r) => (r ? parseThreadLines(r.out) : null)) : Promise.resolve(null);
   censusInflight = Promise.all([
     run('ps', ['-axww', '-o', 'pid=,ppid=,%cpu=,rss=,args=']).then(async (r) => {
-      if (!r) return { processes: null, agents: null, docker: null };
+      if (!r) return { processes: null, agents: null, docker: null, threads: null };
       try {
         const procs = parsePsLines(r.out).filter((p) => p.pid !== r.pid);
+        const threadMap = await threadsP;
+        const threads = threadMap ? applyThreads(procs, threadMap) : null;
         const processes = buildCensus(procs, [process.pid]);
         const agents = attributeAgents(procs, providers.resolveAgent);
         // Only ask Docker when its VM is actually up — otherwise the CLI
@@ -633,15 +712,15 @@ function refreshCensus(): Promise<void> {
             dockerCache = { at: Date.now(), value: docker };
           }
         }
-        return { processes, agents, docker };
+        return { processes, agents, docker, threads };
       } catch {
-        return { processes: null, agents: null, docker: null };
+        return { processes: null, agents: null, docker: null, threads: null };
       }
     }),
     darwin ? run('vm_stat', []).then((r) => (r ? parseVmStat(r.out, os.totalmem()) : null)) : Promise.resolve(null),
     darwin ? run('sysctl', ['-n', 'kern.memorystatus_vm_pressure_level']).then((r) => (r ? parsePressureLevel(r.out) : null)) : Promise.resolve(null),
   ]).then(([ps, vm, pressure]) => {
-    census = { at: Date.now(), processes: ps.processes, agents: ps.agents, docker: ps.docker, vm, pressure };
+    census = { at: Date.now(), processes: ps.processes, agents: ps.agents, docker: ps.docker, threads: ps.threads, vm, pressure };
   }).catch(() => { /* keep the previous census */ }).finally(() => { censusInflight = null; });
   return censusInflight;
 }
@@ -729,6 +808,7 @@ export async function getPerfSnapshot(): Promise<PerfSnapshot> {
       memUsedPct: mem.usedPct,
       swapUsedMB: mem.swapUsedMB,
       memPressure: c?.pressure ?? null,
+      threads: c?.threads ?? null,
     },
     app: appProcesses(),
     loop: {

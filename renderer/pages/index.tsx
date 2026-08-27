@@ -419,15 +419,18 @@ export default function Home() {
     }
   };
 
-  const handleSpawn = async (prompt: string, attachments: string[] = [], model?: string) => {
-    if (!selectedDir) return;
+  // `directoryId` overrides the sidebar selection — the Performance monitor's
+  // Ask composer picks its own target, and the modal covers the sidebar.
+  const handleSpawn = async (prompt: string, attachments: string[] = [], model?: string, directoryId?: string) => {
+    const dir = (directoryId ? dirs.find((d) => d.id === directoryId) : null) ?? selectedDir;
+    if (!dir) return;
     // Snapshot pinned conv ids *before* the spawn so the effect below can focus whichever
     // new conv lands first — the optimistic broadcast usually arrives well before the
     // spawnAgent IPC resolves, and we want the focus to follow it without delay.
     awaitingNewConvRef.current = new Set(
       pinnedItems.filter((it) => it.kind === 'conversation').map((it) => it.id),
     );
-    await api().spawnAgent({ directoryId: selectedDir.id, prompt, attachments, model });
+    await api().spawnAgent({ directoryId: dir.id, prompt, attachments, model });
     const c = await api().listConversations();
     setConvs(c);
   };
@@ -726,7 +729,7 @@ export default function Home() {
           {/* Live performance pill — machine CPU + main-loop lag, coloured by
               severity. Click opens the full monitor (per-agent CPU, what each
               agent's tools are doing, who owns the heavy processes). */}
-          <PerfLauncher />
+          <PerfLauncher dirs={dirs} targetDir={selectedDir} onSend={handleSpawn} />
           <button
             onClick={() => setHelpOpen(true)}
             className="shrink-0 w-6 h-6 rounded-full border border-border bg-panel hover:bg-panel2 hover:border-accent text-muted hover:text-accent text-[12px] font-semibold flex items-center justify-center"

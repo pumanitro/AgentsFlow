@@ -230,6 +230,13 @@ export function createMockApi(): AgentsFlowApi {
             { name: 'node', cpu: 40 + build / 2 },
             { name: 'claude', cpu: 20 + (i % 6) },
           ],
+          topActions: [
+            ...(burst ? [{ pid: 25470, name: 'node (vitest)', cmd: '', category: 'test' as const, cpu: test, rssMB: 4100, count: 15 }] : []),
+            ...(i > 300 ? [{ pid: 29465, name: 'grep (ugrep)', cmd: '-rni "wrath" src/', category: 'search' as const, cpu: build, rssMB: 30, count: 3 }] : []),
+            { pid: 10241, name: 'tsc', cmd: '-p electron/tsconfig.json', category: 'build' as const, cpu: 3 + (i % 4), rssMB: 300, count: 1 },
+            { pid: 29465, name: 'git', cmd: 'status --porcelain', category: 'git' as const, cpu: 2, rssMB: 20, count: 1 },
+          ],
+          threads: { total: 7200 + (i % 9) * 40 + burst * 900, running: 6 + (i % 5) + burst * 30, underAgents: 900 + burst * 800 + (i > 300 ? 120 : 0) },
         };
       });
       return {
@@ -244,9 +251,17 @@ export function createMockApi(): AgentsFlowApi {
       };
     },
 
+    savePerfReport: async (rangeMin: number) => ({
+      markdownPath: `/tmp/mock/perf-reports/perf-${rangeMin}m.md`,
+      jsonPath: `/tmp/mock/perf-reports/perf-${rangeMin}m.json`,
+      rangeMin,
+      samples: Math.round((rangeMin * 60) / 5),
+      summary: `${rangeMin} min · ${Math.round((rangeMin * 60) / 5)} samples · warning`,
+    }),
+
     getPerfSnapshot: async () => ({
       at: new Date().toISOString(),
-      system: { cpuBusyPct: 87, load1: 22.4, load5: 18.1, load15: 12.0, cores: 16, memTotalMB: 131072, memUsedMB: 43000, memUsedPct: 33, swapUsedMB: 0, memPressure: 'normal' },
+      system: { cpuBusyPct: 87, load1: 22.4, load5: 18.1, load15: 12.0, cores: 16, memTotalMB: 131072, memUsedMB: 43000, memUsedPct: 33, swapUsedMB: 0, memPressure: 'normal', threads: { total: 8479, running: 31, underAgents: 1204 } },
       app: { uptimeS: 6600, mainCpuPct: 4.2, mainRssMB: 448, heapMB: 71, rendererCpuPct: 3.6, rendererRssMB: 300, gpuCpuPct: 5.8, totalRssMB: 850 },
       loop: { lagNowMs: 12, lagMaxMs: 4614, lagAvgMs: 140, stalls: 8, lastStallAt: new Date(Date.now() - 2 * 60_000).toISOString(), lastStallMs: 5434 },
       resources: { attachPtys: 1, resumePtys: 12, systemPtys: 68, convWatchers: 10, convs: 1738, bridgeOk: true },
@@ -254,6 +269,13 @@ export function createMockApi(): AgentsFlowApi {
       agents: {
         totalCpu: 96.4,
         byCategory: { test: 62, claude: 22.3, search: 6.1, git: 3.2, shell: 1.8, mcp: 0.6, other: 0.4 },
+        topActions: [
+          { pid: 25470, name: 'node (vitest)', cmd: '', category: 'test', cpu: 55.1, rssMB: 4100, count: 15 },
+          { pid: 29465, name: 'grep', cmd: '-rn cookie src/', category: 'search', cpu: 5.3, rssMB: 6, count: 1 },
+          { pid: 10241, name: 'tsc', cmd: '-p electron/tsconfig.json', category: 'build', cpu: 3.2, rssMB: 300, count: 1 },
+          { pid: 29465, name: 'git', cmd: 'status --porcelain', category: 'git', cpu: 2.6, rssMB: 20, count: 1 },
+          { pid: 25470, name: 'npm', cmd: 'exec vitest run --shard=2/4', category: 'test', cpu: 1.4, rssMB: 84, count: 1 },
+        ],
         rows: [
           { pid: 25470, kind: 'session', sessionId: '85ca6a65', conversationId: 'c1', title: '10. V2 · /game-council listen a lot has changed', peer: 'atlas-of-doors', status: 'working', cpu: 61.2, selfCpu: 3.9, rssMB: 6200, procs: 21,
             tools: [

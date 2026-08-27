@@ -1,13 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { SlashCommand, TrackedDirectory } from '../../shared/types';
 import { api } from '../lib/ipc';
+import { attachmentPromptLines, imageFilesFromPaste, savePastedImages, type PastedImage } from '../lib/paste-image';
 import ImagePreviewModal from './ImagePreviewModal';
-
-interface PastedImage {
-  id: string;
-  dataUrl: string;
-  savedPath: string;
-}
 
 interface Props {
   targetDir: TrackedDirectory | null;
@@ -32,20 +27,6 @@ function loadModel(): ModelAlias {
 
 // Survives navigation to /session and back. Cleared only after a successful send.
 const draft: { prompt: string; images: PastedImage[] } = { prompt: '', images: [] };
-
-function blobToBase64(blob: Blob): Promise<{ base64: string; dataUrl: string; mime: string }> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onerror = () => reject(reader.error);
-    reader.onload = () => {
-      const dataUrl = String(reader.result || '');
-      const m = /^data:([^;]+);base64,(.+)$/.exec(dataUrl);
-      if (!m) return reject(new Error('unexpected dataURL format'));
-      resolve({ mime: m[1], base64: m[2], dataUrl });
-    };
-    reader.readAsDataURL(blob);
-  });
-}
 
 export default function SpawnBar({ targetDir, onSend }: Props) {
   const [prompt, setPrompt] = useState(draft.prompt);
@@ -193,38 +174,12 @@ export default function SpawnBar({ targetDir, onSend }: Props) {
   const [pasteError, setPasteError] = useState<string | null>(null);
 
   const handlePaste = async (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
-    const items = Array.from(e.clipboardData?.items ?? []);
-    const imgItems = items.filter((it) => it.kind === 'file' && it.type.startsWith('image/'));
-    if (imgItems.length === 0) return;
+    const files = imageFilesFromPaste(e);
+    if (files.length === 0) return;
     e.preventDefault();
-
-    const a = api();
-    if (typeof a.saveImageFromPaste !== 'function') {
-      setPasteError('Image paste needs the latest preload — restart the app (kill electron, then `npm run dev`).');
-      return;
-    }
-
-    for (const item of imgItems) {
-      const file = item.getAsFile();
-      if (!file) continue;
-      try {
-        const { base64, dataUrl, mime } = await blobToBase64(file);
-        const res = await a.saveImageFromPaste(base64, mime);
-        if (!res?.savedPath) {
-          setPasteError('The app saved the image but no path came back. Restart and try again.');
-          continue;
-        }
-        setPasteError(null);
-        setImages((prev) => [
-          ...prev,
-          { id: `${Date.now()}-${Math.random().toString(36).slice(2, 6)}`, dataUrl, savedPath: res.savedPath },
-        ]);
-      } catch (err) {
-        // eslint-disable-next-line no-console
-        console.error('[agentsflow] paste image failed', err);
-        setPasteError(`Failed to save image: ${(err as Error)?.message ?? err}`);
-      }
-    }
+    const { images: saved, error } = await savePastedImages(files);
+    if (saved.length > 0) setImages((prev) => [...prev, ...saved]);
+    setPasteError(error);
   };
 
   const removeImage = (id: string) => setImages((prev) => prev.filter((i) => i.id !== id));
@@ -232,18 +187,7 @@ export default function SpawnBar({ targetDir, onSend }: Props) {
   const buildFullPrompt = () => {
     const lines: string[] = [];
     if (prompt.trim()) lines.push(prompt.trim());
-    const valid = images.filter((img) => !!img.savedPath);
-    if (valid.length > 0) {
-      lines.push('');
-      lines.push(
-        valid.length === 1
-          ? 'I attached one image. Use the Read tool on this absolute path to view it:'
-          : `I attached ${valid.length} images. Use the Read tool on these absolute paths to view them:`,
-      );
-      for (const img of valid) {
-        lines.push(img.savedPath);
-      }
-    }
+    lines.push(...attachmentPromptLines(images.filter((img) => !!img.savedPath).map((img) => img.savedPath)));
     return lines.join('\n');
   };
 

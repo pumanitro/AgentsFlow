@@ -272,6 +272,15 @@ export interface PerfContainerRow {
 // work shows up there, not as a child.
 export type PerfToolCategory = 'claude' | 'search' | 'git' | 'test' | 'build' | 'shell' | 'mcp' | 'browser' | 'other';
 
+// Thread counts from one `ps -M` census. `running` is the number of threads
+// on a CPU at that instant (state R) — the literal "threads in use"; the load
+// average is its smoothed cousin.
+export interface PerfThreadTotals {
+  total: number;
+  running: number;
+  underAgents: number;
+}
+
 export interface PerfToolRow {
   name: string;
   // Short human-readable arguments, e.g. "exec vitest run --shard=2/4".
@@ -280,6 +289,8 @@ export interface PerfToolRow {
   cpu: number;
   rssMB: number;
   count: number;
+  // Threads across the grouped processes (absent from an older main process).
+  threads?: number;
 }
 
 // One running `claude` process billed for everything under it in the process
@@ -300,13 +311,26 @@ export interface PerfAgentRow {
   selfCpu: number;
   rssMB: number;
   procs: number;
+  // Threads in the whole subtree (absent from an older main process).
+  threads?: number;
   tools: PerfToolRow[];
+}
+
+// One tool subprocess group (name + args) billed to one agent: the flat,
+// cross-agent view of "which command is burning CPU right now". `pid` is the
+// owning agent (PerfAgentRow.pid / PerfHistory.agentNames key).
+export interface PerfActionRow extends PerfToolRow {
+  pid: number;
 }
 
 export interface PerfAgentsSummary {
   rows: PerfAgentRow[];
   totalCpu: number;
   byCategory: Partial<Record<PerfToolCategory, number>>;
+  // Hottest actions across every agent, not just each agent's top few.
+  topActions: PerfActionRow[];
+  // Threads in every agent subtree combined (absent from an older main process).
+  threads?: number;
 }
 
 // One point of the rolling history behind the Timeline charts, sampled every
@@ -327,6 +351,10 @@ export interface PerfHistoryPoint {
   agents: Array<{ pid: number; cpu: number }> | null;
   // Top machine-wide commands at that census (Docker VM, Chrome, node…).
   topProcs: Array<{ name: string; cpu: number }> | null;
+  // Hottest agent actions (command + owning agent) at that census.
+  topActions: PerfActionRow[] | null;
+  // Thread census at that sample (null before the first one / unsupported).
+  threads: PerfThreadTotals | null;
 }
 
 export interface PerfHistory {
@@ -351,6 +379,10 @@ export interface PerfSnapshot {
     // macOS kernel memory-pressure level (null where unavailable). More honest
     // than a used-% on a machine whose file cache counts as "used".
     memPressure: 'normal' | 'warning' | 'critical' | null;
+    // Thread census (`ps -M`): every thread on the machine, the ones on a CPU
+    // at sample time, and the ones belonging to agent subtrees. Null until the
+    // first census / where unsupported.
+    threads: PerfThreadTotals | null;
   };
   app: {
     uptimeS: number;
@@ -401,6 +433,20 @@ export interface PerfSnapshot {
     recentSlow: PerfSlowOp[];
   };
   logPath: string | null;
+}
+
+// A perf report written to disk so a spawned Claude Code session can read it:
+// the markdown digest a human (or an agent) reads, plus the raw JSON samples
+// behind it. Both live under `<userData>/perf-reports/`.
+export interface PerfReportResult {
+  markdownPath: string;
+  jsonPath: string;
+  // Window the report covers, in minutes (the Timeline range the user picked).
+  rangeMin: number;
+  // History points that fell inside that window.
+  samples: number;
+  // "15 min · 180 samples · danger" — one line for the composer.
+  summary: string;
 }
 
 // ---- Account pool ----------------------------------------------------------
@@ -514,6 +560,9 @@ export interface AgentsFlowApi {
   getPerfSnapshot: () => Promise<PerfSnapshot>;
   // The rolling history (≈1 h at 5 s) behind the Timeline charts.
   getPerfHistory: () => Promise<PerfHistory>;
+  // Freezes what the Performance view is showing into files a spawned agent can
+  // read: a markdown digest of the chosen window + the raw samples as JSON.
+  savePerfReport: (rangeMin: number) => Promise<PerfReportResult>;
 
   // ---- Account pool ----
   // The switchable pool of Anthropic accounts. Switching swaps which account's
