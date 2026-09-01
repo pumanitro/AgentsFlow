@@ -50,6 +50,7 @@ import {
   hasLiveDaemon,
 } from './claude-cli';
 import { getLastAgentRows, refreshNow, setPollerForeground, startPoller, stopPoller, syncWatchers, unwatchConversation, watchConversation, watcherStats } from './poller';
+import { countRunning, freeSlots, maxConcurrentRuns, nextQueued } from './launch-queue';
 import { bridgeSocketPath, buildBootstrapSystemPrompt, getMcpServerInfo, writeMcpConfigForConversation } from './mcp-bridge';
 import { buildDelegatePrompt } from './registry';
 import { startPeersBridge, type DelegateRequest, type OpenFileRequest, type PeersBridge } from './delegation-bridge';
@@ -864,10 +865,22 @@ async function spawnConversation(opts: {
   delegatedByConversationId?: string;
   // Model alias passed to `claude --model`; undefined ⇒ CLI default.
   model?: string;
+  // Skip the launch gate. Set for delegated sub-peer spawns: the delegating
+  // parent blocks awaiting this one, so queueing it behind the parent's own
+  // slot would deadlock the pair (see launch-queue.ts).
+  bypassQueue?: boolean;
 }): Promise<{ conversationId: string; sessionId: string; daemonShort: string }> {
   const { dir, prompt } = opts;
   const conversationId = uuid();
   const title = (opts.title ?? prompt).trim().slice(0, 80);
+
+  // Launch gate: a batch of 10+ near-identical runs launched at once
+  // oversubscribes the box so badly that the whole batch finishes LATER
+  // (measured 2026-09-01 — rationale and cap in launch-queue.ts). Beyond the
+  // cap the run parks as 'queued'; the drain interval dispatches it oldest-
+  // first as slots free, and opening the row dispatches it immediately.
+  const existing = store.getConversations();
+  const queueIt = !opts.bypassQueue && freeSlots(existing) <= 0;
 
   const optimistic: Conversation = {
     id: conversationId,
@@ -878,23 +891,53 @@ async function spawnConversation(opts: {
     directoryPath: dir.path,
     displayName: dir.displayName,
     title,
-    description: 'starting…',
+    description: queueIt
+      ? `queued — ${countRunning(existing)} runs at the cap of ${maxConcurrentRuns()}`
+      : 'starting…',
     pinned: opts.pinned,
     attachments: opts.attachments ?? [],
-    state: 'starting',
-    status: 'starting',
+    state: queueIt ? 'queued' : 'starting',
+    status: queueIt ? 'queued' : 'starting',
     intent: prompt,
     createdAt: new Date().toISOString(),
     lastPrompt: prompt,
     delegatedByConversationId: opts.delegatedByConversationId,
+    ...(queueIt ? { queuedSpawn: { prompt, model: opts.model, peerAware: opts.peerAware } } : {}),
   };
   store.addConversation(optimistic);
   broadcastConversations();
   broadcastPinnedOrder();
 
+  if (queueIt) {
+    console.log('[agentsflow][launch-queue] holding spawn — no free slot', {
+      conversationId, title, running: countRunning(existing), cap: maxConcurrentRuns(),
+    });
+    return { conversationId, sessionId: '', daemonShort: '' };
+  }
+
+  return performDispatch({
+    conversationId, dir, prompt,
+    peerAware: opts.peerAware, model: opts.model,
+    delegated: !!opts.delegatedByConversationId,
+  });
+}
+
+// The dispatch tail shared by an immediate spawn and a queued run whose turn
+// came up: write the MCP config, launch the `--bg` daemon, resolve which
+// session it became, and hand reconciliation to the poller/file-watcher.
+async function performDispatch(args: {
+  conversationId: string;
+  dir: TrackedDirectory;
+  prompt: string;
+  peerAware: boolean;
+  model?: string;
+  delegated: boolean;
+}): Promise<{ conversationId: string; sessionId: string; daemonShort: string }> {
+  const { conversationId, dir, prompt } = args;
+
   let mcpConfigPath: string | undefined;
   let appendSystemPrompt: string | undefined;
-  if (opts.peerAware) {
+  if (args.peerAware) {
     try {
       mcpConfigPath = writeMcpConfigForConversation(conversationId, dir.path);
       appendSystemPrompt = buildBootstrapSystemPrompt(store.getDirectories());
@@ -905,7 +948,7 @@ async function spawnConversation(opts: {
 
   const startedBefore = Date.now();
   const claimedSessionIds = new Set(store.getConversations().map((c) => c.sessionId).filter(Boolean));
-  const dispatch = await dispatchBackground({ cwd: dir.path, prompt, mcpConfigPath, appendSystemPrompt, model: opts.model });
+  const dispatch = await dispatchBackground({ cwd: dir.path, prompt, mcpConfigPath, appendSystemPrompt, model: args.model });
   const daemonShortFromOut = dispatch.daemonShort ?? '';
   let resolved = daemonShortFromOut
     ? await resolveSessionByDaemonShort(daemonShortFromOut, 10000)
@@ -922,7 +965,7 @@ async function spawnConversation(opts: {
 
   const sessionId = resolved?.sessionId ?? '';
   const daemonShort = daemonShortFromOut || (sessionId ? sessionId.slice(0, 8) : '');
-  console.log('[agentsflow] spawn resolved', { sessionId, daemonShort, daemonShortFromOut, delegated: !!opts.delegatedByConversationId });
+  console.log('[agentsflow] spawn resolved', { sessionId, daemonShort, daemonShortFromOut, delegated: args.delegated });
   store.updateConversation(conversationId, { sessionId, daemonShort });
   syncWatchers();
 
@@ -930,7 +973,7 @@ async function spawnConversation(opts: {
   if (job) {
     store.updateConversation(conversationId, {
       state: job.state ?? 'idle',
-      description: (job.detail ?? optimistic.description) || 'starting…',
+      description: (job.detail ?? 'starting…') || 'starting…',
     });
   }
 
@@ -945,6 +988,59 @@ async function spawnConversation(opts: {
   broadcastConversations();
   return { conversationId, sessionId, daemonShort };
 }
+
+// ---------- Launch-queue drain ----------
+// Claim-then-dispatch for a queued run. The synchronous check-and-clear of
+// `queuedSpawn` IS the claim: the drain and an open-row jump can both call
+// this for the same conversation and exactly one proceeds (single thread, no
+// await between the check and the store write).
+async function dispatchQueuedConversation(
+  conversationId: string,
+): Promise<{ conversationId: string; sessionId: string; daemonShort: string } | null> {
+  const conv = store.getConversation(conversationId);
+  if (!conv?.queuedSpawn) return null;
+  const { prompt, model, peerAware } = conv.queuedSpawn;
+  const dir = store.getDirectories().find((d) => d.id === conv.directoryId);
+  if (!dir) {
+    store.updateConversation(conversationId, {
+      state: 'failed', status: '', description: 'its peer directory was removed while queued', queuedSpawn: undefined,
+    });
+    broadcastConversations();
+    return null;
+  }
+  store.updateConversation(conversationId, {
+    state: 'starting', status: 'starting', description: 'starting…', queuedSpawn: undefined,
+  });
+  broadcastConversations();
+  console.log('[agentsflow][launch-queue] dispatching queued run', { conversationId, title: conv.title });
+  return performDispatch({
+    conversationId, dir, prompt, peerAware, model,
+    delegated: !!conv.delegatedByConversationId,
+  });
+}
+
+// One dispatch per pass, so a released batch ramps back up in drain-interval
+// steps instead of re-creating the thundering herd the queue exists to
+// prevent. The queue itself lives in the store (state 'queued' + payload), so
+// it survives an app restart and simply resumes draining.
+let queueDrainInFlight = false;
+async function drainLaunchQueue(): Promise<void> {
+  if (queueDrainInFlight) return;
+  queueDrainInFlight = true;
+  try {
+    const convs = store.getConversations();
+    if (freeSlots(convs) <= 0) return;
+    const next = nextQueued(convs);
+    if (!next) return;
+    await dispatchQueuedConversation(next.id);
+  } catch (err) {
+    console.error('[agentsflow][launch-queue] drain failed', err);
+  } finally {
+    queueDrainInFlight = false;
+  }
+}
+const LAUNCH_QUEUE_DRAIN_MS = 5000;
+setInterval(() => { void drainLaunchQueue(); }, LAUNCH_QUEUE_DRAIN_MS);
 
 ipcMain.handle('convs:spawn', async (_e, req: SpawnRequest): Promise<{ conversationId: string; sessionId: string; daemonShort: string }> => {
   const dir = store.getDirectories().find((d) => d.id === req.directoryId);
@@ -1108,6 +1204,9 @@ async function handleDelegate(req: DelegateRequest): Promise<Record<string, unkn
     pinned: false,
     peerAware: false,
     delegatedByConversationId: req.rootConversationId || undefined,
+    // The delegating parent is blocked awaiting this spawn — queueing it
+    // behind the parent's own slot would deadlock both (see launch-queue.ts).
+    bypassQueue: true,
   });
 
   const outcome = await waitForDelegationCompletion(spawn.conversationId, req.timeoutMs);
@@ -1234,6 +1333,13 @@ ipcMain.handle('convs:setPinned', (_e, id: string, pinned: boolean) => {
 ipcMain.handle('convs:stop', async (_e, id: string) => {
   const conv = store.getConversations().find((c) => c.id === id);
   if (!conv) return;
+  if (conv.queuedSpawn) {
+    // Never dispatched — there is no daemon to stop; just take it out of the
+    // launch queue so the drain can never pick it up.
+    store.updateConversation(id, { state: 'done', status: '', description: 'canceled while queued', queuedSpawn: undefined });
+    broadcastConversations();
+    return;
+  }
   await cliStop(conv.daemonShort);
 });
 
@@ -1373,10 +1479,17 @@ function resumePeerAwareness(conv: Conversation): { mcpConfigPath?: string; appe
 
 ipcMain.handle('term:attach', async (_e, conversationId: string, cols: number, rows: number) => {
   console.log('[agentsflow] term:attach received', { conversationId, cols, rows });
-  const conv = store.getConversations().find((c) => c.id === conversationId);
+  let conv = store.getConversations().find((c) => c.id === conversationId);
   if (!conv) {
     console.error('[agentsflow] term:attach: conversation not found', { conversationId, all: store.getConversations().map((c) => c.id) });
     throw new Error(`conversation ${conversationId} not found`);
+  }
+  if (conv.queuedSpawn) {
+    // Opening a queued run means "I want this one NOW" — the cap is a
+    // throttle, not a hard scheduler, so dispatch it ahead of its turn and
+    // fall through to normal routing with the fresh session id.
+    await dispatchQueuedConversation(conv.id);
+    conv = store.getConversation(conversationId) ?? conv;
   }
   if (!conv.sessionId) {
     console.error('[agentsflow] term:attach: no sessionId yet', conv);
