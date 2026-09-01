@@ -14,17 +14,38 @@ import type { Conversation } from '../shared/types';
  * dispatched oldest-first as slots free (main.ts drains one per pass, so a
  * big batch ramps in steps instead of re-creating the thundering herd).
  *
- * WHAT COUNTS toward the cap: sessions actually consuming CPU — starting or
- * working, plus a live busy status (which wins over a stale recorded state,
- * same precedence the status dot uses). Deliberately NOT counted:
- *   - blocked / needs-input / idle / terminal states: parked on a human or
- *     finished. Counting a blocked run would let four permission prompts
- *     stall an unattended overnight batch forever.
+ * WHAT COUNTS toward the cap — LIVE evidence only. The first version counted
+ * stored `state`/`status` and immediately wedged on zombies: rows frozen at
+ * `working` since July, a run with no daemon at all — 8 "running" on a machine
+ * at 34%, so nothing ever dispatched. Recorded state lies (a --resume'd
+ * session's state.json freezes; the poller can re-apply stale files), so the
+ * gate now counts:
+ *   - live `claude agents --json` rows with status 'busy' — processes that
+ *     exist and are working RIGHT NOW, AgentsFlow-spawned or not (a terminal
+ *     session burns the same cores);
+ *   - plus conversations in state 'starting' created within a short boot
+ *     grace, which a dispatched-but-not-yet-listed daemon needs so the drain
+ *     cannot over-dispatch between listAgents ticks. Deduped against the
+ *     busy rows; a 'starting' row older than the grace is a zombie and does
+ *     not count.
+ * Deliberately NOT counted:
+ *   - resident-but-idle and waiting daemons: parked on a human or finished.
+ *     Counting a blocked run would let four permission prompts stall an
+ *     unattended overnight batch forever.
  *   - delegated sub-peer spawns bypass the gate entirely (main.ts passes
  *     `bypassQueue`): the delegating parent blocks awaiting the delegate, so
  *     queueing the delegate behind its own parent's slot would deadlock both.
  */
 export const DEFAULT_MAX_CONCURRENT_RUNS = 4;
+
+/** How long a dispatched run may sit in 'starting' and still hold a slot. */
+export const STARTING_GRACE_MS = 2 * 60 * 1000;
+
+/** The slice of a `claude agents --json` row the gate needs. */
+export interface LiveRunRow {
+  sessionId: string;
+  status?: string;
+}
 
 export function maxConcurrentRuns(env: NodeJS.ProcessEnv = process.env): number {
   const n = Number(env.AGENTSFLOW_MAX_CONCURRENT_RUNS);
@@ -32,23 +53,42 @@ export function maxConcurrentRuns(env: NodeJS.ProcessEnv = process.env): number 
   return DEFAULT_MAX_CONCURRENT_RUNS;
 }
 
-const RUNNING_STATES = new Set(['starting', 'working', 'active']);
-
-/** Is this conversation occupying a CPU slot right now? */
-export function isRunning(c: Pick<Conversation, 'state' | 'status'>): boolean {
-  const status = (c.status || '').toLowerCase();
-  if (status === 'busy' || status === 'working' || status === 'starting') return true;
-  return RUNNING_STATES.has((c.state || '').toLowerCase());
+function isBusy(r: LiveRunRow): boolean {
+  return (r.status || '').toLowerCase() === 'busy';
 }
 
-export function countRunning(convs: Conversation[]): number {
-  let n = 0;
-  for (const c of convs) if (isRunning(c)) n += 1;
+function matchesRow(c: Conversation, r: LiveRunRow): boolean {
+  if (!r.sessionId) return false;
+  if (c.daemonShort && r.sessionId.startsWith(c.daemonShort)) return true;
+  return !!c.sessionId && r.sessionId === c.sessionId;
+}
+
+/** Occupied CPU slots right now: live busy sessions + still-booting spawns. */
+export function countRunning(
+  convs: Conversation[],
+  liveRows: LiveRunRow[],
+  now: number = Date.now(),
+): number {
+  const busy = liveRows.filter(isBusy);
+  let n = busy.length;
+  for (const c of convs) {
+    if ((c.state || '').toLowerCase() !== 'starting') continue;
+    const age = now - Date.parse(c.createdAt);
+    if (!(age >= 0 && age < STARTING_GRACE_MS)) continue;
+    // Already visible as a busy live row → counted above; don't double-bill.
+    if (busy.some((r) => matchesRow(c, r))) continue;
+    n += 1;
+  }
   return n;
 }
 
-export function freeSlots(convs: Conversation[], env: NodeJS.ProcessEnv = process.env): number {
-  return Math.max(0, maxConcurrentRuns(env) - countRunning(convs));
+export function freeSlots(
+  convs: Conversation[],
+  liveRows: LiveRunRow[],
+  env: NodeJS.ProcessEnv = process.env,
+  now: number = Date.now(),
+): number {
+  return Math.max(0, maxConcurrentRuns(env) - countRunning(convs, liveRows, now));
 }
 
 /**

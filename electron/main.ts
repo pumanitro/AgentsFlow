@@ -879,8 +879,11 @@ async function spawnConversation(opts: {
   // (measured 2026-09-01 — rationale and cap in launch-queue.ts). Beyond the
   // cap the run parks as 'queued'; the drain interval dispatches it oldest-
   // first as slots free, and opening the row dispatches it immediately.
+  // Occupancy is judged from the poller's LIVE agent rows, never stored
+  // state — recorded 'working' rows go stale and would wedge the gate shut.
   const existing = store.getConversations();
-  const queueIt = !opts.bypassQueue && freeSlots(existing) <= 0;
+  const liveRows = getLastAgentRows();
+  const queueIt = !opts.bypassQueue && freeSlots(existing, liveRows) <= 0;
 
   const optimistic: Conversation = {
     id: conversationId,
@@ -892,7 +895,7 @@ async function spawnConversation(opts: {
     displayName: dir.displayName,
     title,
     description: queueIt
-      ? `queued — ${countRunning(existing)} runs at the cap of ${maxConcurrentRuns()}`
+      ? `queued — ${countRunning(existing, liveRows)} runs at the cap of ${maxConcurrentRuns()}`
       : 'starting…',
     pinned: opts.pinned,
     attachments: opts.attachments ?? [],
@@ -910,7 +913,7 @@ async function spawnConversation(opts: {
 
   if (queueIt) {
     console.log('[agentsflow][launch-queue] holding spawn — no free slot', {
-      conversationId, title, running: countRunning(existing), cap: maxConcurrentRuns(),
+      conversationId, title, running: countRunning(existing, liveRows), cap: maxConcurrentRuns(),
     });
     return { conversationId, sessionId: '', daemonShort: '' };
   }
@@ -1029,7 +1032,7 @@ async function drainLaunchQueue(): Promise<void> {
   queueDrainInFlight = true;
   try {
     const convs = store.getConversations();
-    if (freeSlots(convs) <= 0) return;
+    if (freeSlots(convs, getLastAgentRows()) <= 0) return;
     const next = nextQueued(convs);
     if (!next) return;
     await dispatchQueuedConversation(next.id);

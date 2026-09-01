@@ -1,7 +1,12 @@
 import { strict as assert } from 'node:assert';
 import { test } from 'node:test';
-import { countRunning, freeSlots, isRunning, maxConcurrentRuns, nextQueued, DEFAULT_MAX_CONCURRENT_RUNS } from './launch-queue';
+import {
+  countRunning, freeSlots, maxConcurrentRuns, nextQueued,
+  DEFAULT_MAX_CONCURRENT_RUNS, STARTING_GRACE_MS, type LiveRunRow,
+} from './launch-queue';
 import type { Conversation } from '../shared/types';
+
+const NOW = Date.parse('2026-09-01T12:00:00.000Z');
 
 const conv = (over: Partial<Conversation>): Conversation => ({
   id: over.id ?? Math.random().toString(36).slice(2),
@@ -17,10 +22,12 @@ const conv = (over: Partial<Conversation>): Conversation => ({
   state: 'idle',
   status: '',
   intent: '',
-  createdAt: '2026-09-01T10:00:00.000Z',
+  createdAt: new Date(NOW - 1000).toISOString(),
   lastPrompt: '',
   ...over,
 });
+
+const busyRow = (sessionId: string): LiveRunRow => ({ sessionId, status: 'busy' });
 
 test('maxConcurrentRuns: default, env override, and nonsense env values', () => {
   assert.equal(maxConcurrentRuns({}), DEFAULT_MAX_CONCURRENT_RUNS);
@@ -30,28 +37,46 @@ test('maxConcurrentRuns: default, env override, and nonsense env values', () => 
   assert.equal(maxConcurrentRuns({ AGENTSFLOW_MAX_CONCURRENT_RUNS: 'lots' }), DEFAULT_MAX_CONCURRENT_RUNS);
 });
 
-test('isRunning: CPU-consuming states count, parked and finished ones do not', () => {
-  assert.equal(isRunning(conv({ state: 'working' })), true);
-  assert.equal(isRunning(conv({ state: 'starting' })), true);
-  // Live busy status wins over a stale terminal state (a --resume'd session
-  // whose state.json froze on the previous turn).
-  assert.equal(isRunning(conv({ state: 'done', status: 'busy' })), true);
-  // Blocked runs are parked on a human — they must not hold a slot, or a few
-  // permission prompts would stall an unattended batch forever.
-  assert.equal(isRunning(conv({ state: 'blocked' })), false);
-  assert.equal(isRunning(conv({ state: 'needs-input' })), false);
-  assert.equal(isRunning(conv({ state: 'done' })), false);
-  assert.equal(isRunning(conv({ state: 'failed' })), false);
-  assert.equal(isRunning(conv({ state: 'idle' })), false);
-  assert.equal(isRunning(conv({ state: 'queued' })), false);
+test('countRunning: live busy rows are the ground truth; idle/waiting do not count', () => {
+  const rows: LiveRunRow[] = [
+    busyRow('aaaa1111-0000-0000-0000-000000000000'),
+    busyRow('bbbb2222-0000-0000-0000-000000000000'),
+    { sessionId: 'cccc3333-0000-0000-0000-000000000000', status: 'idle' },
+    { sessionId: 'dddd4444-0000-0000-0000-000000000000', status: 'waiting' },
+  ];
+  assert.equal(countRunning([], rows, NOW), 2);
 });
 
-test('freeSlots: the cap minus the running set, never negative', () => {
-  const running = (n: number) => Array.from({ length: n }, () => conv({ state: 'working' }));
-  assert.equal(freeSlots([], {}), DEFAULT_MAX_CONCURRENT_RUNS);
-  assert.equal(freeSlots(running(3), {}), DEFAULT_MAX_CONCURRENT_RUNS - 3);
-  assert.equal(freeSlots(running(11), {}), 0);
-  assert.equal(countRunning([...running(2), conv({ state: 'blocked' }), conv({ state: 'done' })]), 2);
+test('countRunning: stored state is NOT trusted — the zombie-rows regression', () => {
+  // The exact wedge observed 2026-09-01: rows recorded 'working' (one since
+  // July, one with no daemon at all) on a machine that was 34% busy. With no
+  // live busy row behind them they must count for nothing.
+  const zombies = [
+    conv({ state: 'working', status: 'busy', daemonShort: 'deadbeef', createdAt: '2026-07-18T14:25:44.278Z' }),
+    conv({ state: 'working', status: '', createdAt: '2026-08-31T11:12:56.766Z' }),
+    conv({ state: 'working', status: 'idle', daemonShort: 'feedface' }),
+  ];
+  assert.equal(countRunning(zombies, [], NOW), 0);
+  assert.equal(freeSlots(zombies, [], {}, NOW), DEFAULT_MAX_CONCURRENT_RUNS);
+});
+
+test('countRunning: a just-dispatched run holds a slot through its boot grace, once', () => {
+  const booting = conv({ state: 'starting', createdAt: new Date(NOW - 10_000).toISOString() });
+  // Not yet visible to `claude agents` → counts via the grace.
+  assert.equal(countRunning([booting], [], NOW), 1);
+  // Became visible as a busy row → counted once, not twice.
+  const visible = conv({ state: 'starting', daemonShort: 'aaaa1111', createdAt: new Date(NOW - 10_000).toISOString() });
+  assert.equal(countRunning([visible], [busyRow('aaaa1111-0000-0000-0000-000000000000')], NOW), 1);
+  // A 'starting' row older than the grace is a zombie, not a booting run.
+  const stale = conv({ state: 'starting', createdAt: new Date(NOW - STARTING_GRACE_MS - 1000).toISOString() });
+  assert.equal(countRunning([stale], [], NOW), 0);
+});
+
+test('freeSlots: cap minus live busy minus booting, never negative', () => {
+  const rows = [busyRow('a-1'), busyRow('b-2'), busyRow('c-3')];
+  const booting = conv({ state: 'starting', createdAt: new Date(NOW - 5000).toISOString() });
+  assert.equal(freeSlots([booting], rows, {}, NOW), DEFAULT_MAX_CONCURRENT_RUNS - 4);
+  assert.equal(freeSlots([], [...rows, ...rows.map((r) => busyRow(r.sessionId + 'x'))], {}, NOW), 0);
 });
 
 test('nextQueued: oldest first, and only rows still holding their payload in state queued', () => {
