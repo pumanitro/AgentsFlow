@@ -39,12 +39,6 @@ export interface Conversation {
   // attach routing checks the transcript file on disk to decide whether the
   // fork still needs to be performed, so a failed fork just retries.
   forkFromSessionId?: string;
-  // Present while this run sits in the launch queue (state 'queued'): the
-  // spawn parameters to dispatch it with once a running slot frees (see
-  // electron/launch-queue.ts for the cap and why it exists). Cleared the
-  // moment the run is dispatched. Persisted, so a queued batch survives an
-  // app restart and simply resumes draining.
-  queuedSpawn?: { prompt: string; model?: string; peerAware: boolean };
   // Absolute path of the git worktree this chat is working inside, when that
   // differs from the peer's own directory. Nothing needs to observe worktree
   // *creation* to know this: a session that enters a worktree reports the new

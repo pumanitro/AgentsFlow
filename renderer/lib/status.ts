@@ -26,8 +26,5 @@ export function statusDotClass(
   if (state === 'done' || state === 'completed' || status === 'completed') return 'bg-ok';
   if (state === 'failed' || status === 'failed') return 'bg-err';
   if (state === 'starting') return 'bg-muted animate-pulse';
-  // Parked in the launch queue (concurrent-run cap, electron/launch-queue.ts):
-  // deliberately calm — no pulse until it actually starts.
-  if (state === 'queued') return 'bg-muted';
   return 'bg-muted';
 }
