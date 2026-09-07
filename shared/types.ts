@@ -387,6 +387,12 @@ export interface PerfSnapshot {
   app: {
     uptimeS: number;
     mainCpuPct: number;
+    // Split of mainCpuPct: share of wall time the JS event loop was busy, and
+    // what the process burned outside it (Chromium/AppKit native work). A high
+    // nativeCpuPct with an idle loop is the macOS event-monitor leak — see
+    // sysmon.nativeOverheadPct. Absent from an older main.
+    loopBusyPct?: number;
+    nativeCpuPct?: number;
     mainRssMB: number;
     heapMB: number;
     // Summed over every renderer / GPU / utility child of this app.

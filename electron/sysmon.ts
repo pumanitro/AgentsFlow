@@ -29,6 +29,7 @@
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { execFile } from 'node:child_process';
+import { performance } from 'node:perf_hooks';
 import type { PerfActionRow, PerfAgentRow, PerfAgentsSummary, PerfContainerRow, PerfHistory, PerfHistoryPoint, PerfProcGroup, PerfProcRow, PerfSnapshot, PerfThreadTotals, PerfToolCategory, PerfToolRow } from '../shared/types';
 import * as perf from './perf';
 
@@ -62,6 +63,11 @@ export interface SysmonProviders {
 const LAG_TICK_MS = 500;
 const LAG_RING = 120; // 60 s at 500 ms
 const CPU_EVERY_TICKS = 4; // 2 s
+// Main-process CPU *outside* the JS event loop, trailing window of CPU samples
+// (30 × 2 s = 1 min) and the level at which it gets called out in the log.
+const NATIVE_RING = 30;
+const NATIVE_WARN_PCT = 20;
+const NATIVE_WARN_EVERY_MS = 10 * 60_000;
 // Timeline history: one point per HISTORY_TICK_MS, HISTORY_CAP points (~1 h).
 // The census behind the agent/process series is refreshed on its own slower
 // cadence so the charts keep moving while the monitor is closed.
@@ -122,6 +128,32 @@ export function cpuBusyBetween(prev: CpuTimes[], next: CpuTimes[]): number | nul
   }
   if (total <= 0) return null;
   return Math.max(0, Math.min(100, Math.round((busy / total) * 100)));
+}
+
+/**
+ * CPU the main process burns outside the JS event loop, in percent of one core.
+ * `mainCpuPct` is the whole process (process.cpuUsage); `loopBusyPct` is the
+ * share of wall time the JS loop was running (perf_hooks event-loop
+ * utilization). The gap is Chromium/AppKit native work — input routing,
+ * window painting, IPC, helper threads — and sits at a few percent normally.
+ *
+ * It is the one number that exposes the macOS 26 AppKit event-monitor leak
+ * seen 2026-09-07: AppKit's tracking-area manager orphans an NSEvent local
+ * monitor every time a drag leaves the window while a button is held, and
+ * each orphan re-arms itself on every click; after a day the process held
+ * 173k monitors and every mouse move / key press walked that table in
+ * -[NSApplication sendEvent:], so the main process sat at 15–80% CPU with the
+ * JS loop idle. Nothing in this codebase creates or can remove those monitors
+ * and only a restart clears them — so the point of measuring this is to say
+ * so, rather than leave the user with an inexplicably hot app.
+ */
+export function nativeOverheadPct(mainCpuPct: number, loopBusyPct: number): number {
+  return Math.max(0, Math.round((mainCpuPct - loopBusyPct) * 10) / 10);
+}
+
+/** 'high' when, over the trailing window, most main-process CPU is outside JS. */
+export function nativeOverheadVerdict(avgNativePct: number, avgLoopBusyPct: number): 'ok' | 'high' {
+  return avgNativePct >= NATIVE_WARN_PCT && avgNativePct >= avgLoopBusyPct ? 'high' : 'ok';
 }
 
 // One row of `ps -axww -o pid=,ppid=,%cpu=,rss=,args=`.
@@ -497,6 +529,12 @@ let providers: SysmonProviders = {};
 const lag = new LagRing(LAG_RING);
 let cpuBusyPct: number | null = null;
 let mainCpuPct = 0;
+let loopBusyPct = 0;
+let nativeCpuPct = 0;
+let prevElu: ReturnType<typeof performance.eventLoopUtilization> | null = null;
+const nativeRing = new LagRing(NATIVE_RING);
+const loopRing = new LagRing(NATIVE_RING);
+let lastNativeWarnAt = 0;
 let prevCpus: CpuTimes[] | null = null;
 let prevUsage: NodeJS.CpuUsage | null = null;
 let prevUsageAt = 0;
@@ -523,6 +561,28 @@ function sampleCpu(): void {
   }
   prevUsage = usage;
   prevUsageAt = now;
+
+  const elu = performance.eventLoopUtilization();
+  if (prevElu) loopBusyPct = Math.round(performance.eventLoopUtilization(elu, prevElu).utilization * 1000) / 10;
+  prevElu = elu;
+  nativeCpuPct = nativeOverheadPct(mainCpuPct, loopBusyPct);
+  nativeRing.push(nativeCpuPct);
+  loopRing.push(loopBusyPct);
+  const avgNative = nativeRing.stats().avg;
+  if (nativeOverheadVerdict(avgNative, loopRing.stats().avg) === 'high' && now - lastNativeWarnAt > NATIVE_WARN_EVERY_MS) {
+    lastNativeWarnAt = now;
+    console.warn('[agentsflow][perf] main process is burning CPU outside the JS event loop', {
+      nativeCpuPct1m: avgNative,
+      loopBusyPct1m: loopRing.stats().avg,
+      mainCpuPct,
+      hint: 'if it tracks mouse/keyboard use, this is the macOS AppKit NSEvent-monitor leak (grows with drags that leave the window); only a restart clears it',
+    });
+  }
+}
+
+/** Main-process CPU split (whole process / JS loop / outside JS), for the heartbeat line. */
+export function mainThreadStats(): { mainCpuPct: number; loopBusyPct: number; nativeCpuPct: number } {
+  return { mainCpuPct, loopBusyPct, nativeCpuPct };
 }
 
 export function startSysmon(p: SysmonProviders): () => void {
@@ -770,6 +830,8 @@ function appProcesses(): PerfSnapshot['app'] {
   return {
     uptimeS: Math.round(process.uptime()),
     mainCpuPct,
+    loopBusyPct,
+    nativeCpuPct,
     mainRssMB: Math.round(mem.rss / 1024 / 1024),
     heapMB: Math.round(mem.heapUsed / 1024 / 1024),
     rendererCpuPct: Math.round(rendererCpu * 10) / 10,

@@ -677,6 +677,17 @@ function PerfBody({ snap, uiFrameGapMs, onOpenLog, loading, layout }: { snap: Pe
     <>
       <SectionLabel>This app</SectionLabel>
       <Row label="Main process" value={`${app.mainCpuPct}% CPU`} sub={`${fmtMB(app.mainRssMB)} · heap ${fmtMB(app.heapMB)}`} />
+      {/* CPU the main process burns outside the JS loop (Chromium/AppKit native
+          work). High, mouse-driven, with an idle loop = the macOS event-monitor
+          leak; only a restart clears it. Absent from an older main. */}
+      {app.nativeCpuPct != null && (
+        <Row
+          label="Main CPU outside JS"
+          value={`${app.nativeCpuPct}%`}
+          severity={app.nativeCpuPct >= 40 ? 'danger' : app.nativeCpuPct >= 20 ? 'warning' : undefined}
+          sub={`JS loop ${app.loopBusyPct ?? 0}% busy${app.nativeCpuPct >= 20 ? ' · native leak? a restart clears it' : ''}`}
+        />
+      )}
       <Row label="Renderer + helpers" value={`${app.rendererCpuPct}% CPU`} sub={`${fmtMB(app.rendererRssMB)} · GPU ${app.gpuCpuPct}%`} />
       <Row label="Event-loop lag (1 min max)" value={fmtMs(loop.lagMaxMs)} severity={lagSev} sub={`now ${fmtMs(loop.lagNowMs)} · avg ${fmtMs(loop.lagAvgMs)}`} />
       <Row label="UI frame gap (max)" value={fmtMs(uiFrameGapMs)} severity={uiSev} />

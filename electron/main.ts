@@ -121,6 +121,9 @@ function bridgeHealthSnapshot(): BridgeHealth {
 const healthProbe = () => ({
   ...pty.ptyStats(),
   ...watcherStats(),
+  // Main CPU split (whole / JS loop / outside JS): a rising nativeCpuPct with
+  // an idle loop is the macOS event-monitor leak, only cured by a restart.
+  ...sysmon.mainThreadStats(),
   convs: store.getConversations().length,
   bridgeOk: bridgeHealthSnapshot().healthy,
 });

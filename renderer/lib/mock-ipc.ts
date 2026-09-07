@@ -262,7 +262,7 @@ export function createMockApi(): AgentsFlowApi {
     getPerfSnapshot: async () => ({
       at: new Date().toISOString(),
       system: { cpuBusyPct: 87, load1: 22.4, load5: 18.1, load15: 12.0, cores: 16, memTotalMB: 131072, memUsedMB: 43000, memUsedPct: 33, swapUsedMB: 0, memPressure: 'normal', threads: { total: 8479, running: 31, underAgents: 1204 } },
-      app: { uptimeS: 6600, mainCpuPct: 4.2, mainRssMB: 448, heapMB: 71, rendererCpuPct: 3.6, rendererRssMB: 300, gpuCpuPct: 5.8, totalRssMB: 850 },
+      app: { uptimeS: 6600, mainCpuPct: 4.2, loopBusyPct: 2.8, nativeCpuPct: 1.4, mainRssMB: 448, heapMB: 71, rendererCpuPct: 3.6, rendererRssMB: 300, gpuCpuPct: 5.8, totalRssMB: 850 },
       loop: { lagNowMs: 12, lagMaxMs: 4614, lagAvgMs: 140, stalls: 8, lastStallAt: new Date(Date.now() - 2 * 60_000).toISOString(), lastStallMs: 5434 },
       resources: { attachPtys: 1, resumePtys: 12, systemPtys: 68, convWatchers: 10, convs: 1738, bridgeOk: true },
       censusAt: new Date().toISOString(),

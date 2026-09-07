@@ -1,6 +1,6 @@
 import { strict as assert } from 'node:assert';
 import { test } from 'node:test';
-import { LagRing, attributeAgents, categorize, classifyClaude, cpuBusyBetween, displayName, exeFromArgs, parsePsLines, parsePsOutput, parseDockerStats, parsePressureLevel, parseVmStat, shortCmd } from './sysmon';
+import { LagRing, attributeAgents, categorize, classifyClaude, cpuBusyBetween, displayName, exeFromArgs, nativeOverheadPct, nativeOverheadVerdict, parsePsLines, parsePsOutput, parseDockerStats, parsePressureLevel, parseVmStat, shortCmd } from './sysmon';
 import { perfVerdict, fmtMs, fmtMB, memorySeverity } from '../shared/perf-severity';
 import type { PerfSnapshot } from '../shared/types';
 
@@ -23,6 +23,20 @@ test('cpuBusyBetween: busy fraction of the delta, clamped, null on no delta', ()
   assert.equal(cpuBusyBetween(a, a), null);
   const saturated = [{ user: 1100, nice: 0, sys: 100, idle: 800, irq: 0 }];
   assert.equal(cpuBusyBetween(a, saturated), 100);
+});
+
+test('nativeOverheadPct: main-process CPU not explained by the JS loop, never negative', () => {
+  assert.equal(nativeOverheadPct(45.2, 3.1), 42.1);
+  assert.equal(nativeOverheadPct(4, 6), 0);
+  assert.equal(nativeOverheadPct(0, 0), 0);
+});
+
+test('nativeOverheadVerdict: high only when the outside-JS share is large AND dominates the loop', () => {
+  // The 2026-09-07 AppKit event-monitor leak: hot process, idle loop.
+  assert.equal(nativeOverheadVerdict(42, 3), 'high');
+  // Ordinary busy JS (poller, store writes) raises the whole process too — not a leak.
+  assert.equal(nativeOverheadVerdict(25, 60), 'ok');
+  assert.equal(nativeOverheadVerdict(8, 1), 'ok');
 });
 
 test('displayName: folds helper and worker variants into one row each', () => {
