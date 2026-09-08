@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { imageMarker, insertImageMarkers, removeImageMarker } from '../../shared/image-markers';
 import type { PerfReportResult, TrackedDirectory } from '../../shared/types';
 import { api } from '../lib/ipc';
 import { attachmentPromptLines, imageFilesFromPaste, savePastedImages, type PastedImage } from '../lib/paste-image';
@@ -118,9 +119,31 @@ export default function PerfAsk({ dirs, defaultDir, rangeMin, rangeLabel, onSend
     const files = imageFilesFromPaste(e);
     if (files.length === 0) return;
     e.preventDefault();
+    // Marker goes where the caret was at paste time — same as SpawnBar.
+    const el = e.currentTarget;
+    const selStart = el.selectionStart ?? prompt.length;
+    const selEnd = el.selectionEnd ?? selStart;
     const { images: saved, error: err } = await savePastedImages(files);
-    if (saved.length > 0) setImages((prev) => [...prev, ...saved]);
+    if (saved.length > 0) {
+      const numbers = saved.map((_, i) => images.length + i + 1);
+      const { text, caret } = insertImageMarkers(prompt, selStart, selEnd, numbers);
+      setImages((prev) => [...prev, ...saved]);
+      setPrompt(text);
+      requestAnimationFrame(() => {
+        const ta = textareaRef.current;
+        if (!ta) return;
+        ta.focus();
+        ta.setSelectionRange(caret, caret);
+      });
+    }
     setError(err);
+  };
+
+  const removeImage = (id: string) => {
+    const idx = images.findIndex((i) => i.id === id);
+    if (idx < 0) return;
+    setImages((prev) => prev.filter((i) => i.id !== id));
+    setPrompt((p) => removeImageMarker(p, idx + 1));
   };
 
   const canSend = !!target && !busy;
@@ -170,17 +193,20 @@ export default function PerfAsk({ dirs, defaultDir, rangeMin, rangeLabel, onSend
         )}
         {images.length > 0 && (
           <div className="flex items-center gap-2 flex-wrap">
-            {images.map((img) => (
+            {images.map((img, i) => (
               <div key={img.id} className="relative">
                 <button
                   onClick={() => setPreviewing(img)}
                   className="block w-12 h-12 rounded-md overflow-hidden border border-border bg-panel hover:border-accent"
-                  title={img.savedPath}
+                  title={`${imageMarker(i + 1)} — ${img.savedPath}`}
                 >
-                  <img src={img.dataUrl} alt="pasted" className="w-full h-full object-cover" />
+                  <img src={img.dataUrl} alt={imageMarker(i + 1)} className="w-full h-full object-cover" />
                 </button>
+                <span className="absolute bottom-0 left-0 px-1 py-px rounded-tr-md rounded-bl-md bg-bg/90 border-t border-r border-border text-[9px] font-mono font-semibold text-text pointer-events-none">
+                  #{i + 1}
+                </span>
                 <button
-                  onClick={() => setImages((prev) => prev.filter((i) => i.id !== img.id))}
+                  onClick={() => removeImage(img.id)}
                   className="absolute -top-1.5 -right-1.5 w-4 h-4 rounded-full bg-bg border border-border text-muted hover:text-err hover:border-err flex items-center justify-center text-[9px]"
                   title="Remove"
                 >✕</button>
@@ -279,7 +305,11 @@ export default function PerfAsk({ dirs, defaultDir, rangeMin, rangeLabel, onSend
         </div>
       </div>
       {previewing && (
-        <ImagePreviewModal src={previewing.dataUrl} caption={previewing.savedPath} onClose={() => setPreviewing(null)} />
+        <ImagePreviewModal
+          src={previewing.dataUrl}
+          caption={`${imageMarker(images.indexOf(previewing) + 1)} — ${previewing.savedPath}`}
+          onClose={() => setPreviewing(null)}
+        />
       )}
     </>
   );

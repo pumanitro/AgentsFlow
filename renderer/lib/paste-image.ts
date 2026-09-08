@@ -1,3 +1,4 @@
+import { imageMarker } from '../../shared/image-markers';
 import { api } from './ipc';
 
 /** An image pasted into a composer: shown from the data URL, sent as the path. */
@@ -62,14 +63,17 @@ export function imageFilesFromPaste(e: React.ClipboardEvent): File[] {
 /**
  * The lines that tell the agent where the pasted images landed. Claude Code
  * reads them with its own Read tool, so the prompt carries paths, not bytes.
+ * Each path is keyed by the `[Image #n]` marker the paste left in the text, so
+ * the agent knows which file a sentence is pointing at — not just that some
+ * images exist. `paths` must be in composer order (index + 1 === marker number).
  */
 export function attachmentPromptLines(paths: string[]): string[] {
   if (paths.length === 0) return [];
   return [
     '',
     paths.length === 1
-      ? 'I attached one image. Use the Read tool on this absolute path to view it:'
-      : `I attached ${paths.length} images. Use the Read tool on these absolute paths to view them:`,
-    ...paths,
+      ? `I attached one image; ${imageMarker(1)} marks where it belongs in the text above. Use the Read tool on this absolute path to view it:`
+      : `I attached ${paths.length} images; each [Image #n] marker in the text above shows where that image belongs. Use the Read tool on these absolute paths to view them:`,
+    ...paths.map((p, i) => `${imageMarker(i + 1)} ${p}`),
   ];
 }

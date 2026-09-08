@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { imageMarker, insertImageMarkers, removeImageMarker } from '../../shared/image-markers';
 import { SlashCommand, TrackedDirectory } from '../../shared/types';
 import { api } from '../lib/ipc';
 import { attachmentPromptLines, imageFilesFromPaste, savePastedImages, type PastedImage } from '../lib/paste-image';
@@ -177,12 +178,36 @@ export default function SpawnBar({ targetDir, onSend }: Props) {
     const files = imageFilesFromPaste(e);
     if (files.length === 0) return;
     e.preventDefault();
+    // Where the caret was when the paste happened — that is where the image
+    // belongs in the sentence, so that is where its marker goes.
+    const el = e.currentTarget;
+    const selStart = el.selectionStart ?? prompt.length;
+    const selEnd = el.selectionEnd ?? selStart;
     const { images: saved, error } = await savePastedImages(files);
-    if (saved.length > 0) setImages((prev) => [...prev, ...saved]);
+    if (saved.length > 0) {
+      const numbers = saved.map((_, i) => images.length + i + 1);
+      const { text, caret: pos } = insertImageMarkers(prompt, selStart, selEnd, numbers);
+      setImages((prev) => [...prev, ...saved]);
+      setPrompt(text);
+      setCaret(pos);
+      requestAnimationFrame(() => {
+        const ta = textareaRef.current;
+        if (!ta) return;
+        ta.focus();
+        ta.setSelectionRange(pos, pos);
+      });
+    }
     setPasteError(error);
   };
 
-  const removeImage = (id: string) => setImages((prev) => prev.filter((i) => i.id !== id));
+  // Dropping an image also drops its marker from the text and renumbers the
+  // ones after it, so markers keep matching the thumbnails and the path list.
+  const removeImage = (id: string) => {
+    const idx = images.findIndex((i) => i.id === id);
+    if (idx < 0) return;
+    setImages((prev) => prev.filter((i) => i.id !== id));
+    setPrompt((p) => removeImageMarker(p, idx + 1));
+  };
 
   const buildFullPrompt = () => {
     const lines: string[] = [];
@@ -281,15 +306,18 @@ export default function SpawnBar({ targetDir, onSend }: Props) {
         )}
         {images.length > 0 && (
           <div className="flex items-center gap-2 flex-wrap">
-            {images.map((img) => (
+            {images.map((img, i) => (
               <div key={img.id} className="relative group">
                 <button
                   onClick={() => setPreviewing(img)}
                   className="block w-16 h-16 rounded-md overflow-hidden border border-border bg-panel hover:border-accent"
-                  title={img.savedPath || 'preview image'}
+                  title={`${imageMarker(i + 1)} — ${img.savedPath || 'preview image'}`}
                 >
-                  <img src={img.dataUrl} alt="pasted" className="w-full h-full object-cover" />
+                  <img src={img.dataUrl} alt={imageMarker(i + 1)} className="w-full h-full object-cover" />
                 </button>
+                <span className="absolute bottom-0 left-0 px-1 py-px rounded-tr-md rounded-bl-md bg-bg/90 border-t border-r border-border text-[10px] font-mono font-semibold text-text pointer-events-none">
+                  #{i + 1}
+                </span>
                 <button
                   onClick={() => removeImage(img.id)}
                   className="absolute -top-1.5 -right-1.5 w-5 h-5 rounded-full bg-bg border border-border text-muted hover:text-err hover:border-err flex items-center justify-center text-[10px]"
@@ -387,7 +415,7 @@ export default function SpawnBar({ targetDir, onSend }: Props) {
                 submit();
               }
             }}
-            placeholder={targetDir ? 'Type a prompt or paste images and press Enter…' : 'Paste images now, then click a directory to send…'}
+            placeholder={targetDir ? 'Type a prompt — paste images where they belong — and press Enter…' : 'Paste images now, then click a directory to send…'}
             rows={1}
             className="flex-1 resize-none bg-panel border border-border rounded-md px-3 py-2 text-sm text-text outline-none focus:border-accent placeholder:text-muted/70"
           />
@@ -403,7 +431,7 @@ export default function SpawnBar({ targetDir, onSend }: Props) {
       {previewing && (
         <ImagePreviewModal
           src={previewing.dataUrl}
-          caption={previewing.savedPath}
+          caption={`${imageMarker(images.indexOf(previewing) + 1)} — ${previewing.savedPath}`}
           onClose={() => setPreviewing(null)}
         />
       )}
