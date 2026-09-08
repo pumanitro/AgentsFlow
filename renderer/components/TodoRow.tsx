@@ -6,6 +6,8 @@ interface Props {
   // Display name of the peer the task is scoped to, resolved by the parent.
   peerName: string;
   focused: boolean;
+  // Caught by the rubber-band selection — see PinnedRow.
+  selected?: boolean;
   suppressHover: boolean;
   justAdded?: boolean;
   // A freshly added task opens its editor immediately (mirrors DividerRow's
@@ -25,7 +27,7 @@ interface Props {
   onDragEnd?: (e: React.DragEvent) => void;
 }
 
-export default function TodoRow({ todo, peerName, focused, suppressHover, justAdded, startInEdit, onEditHandled, onFocus, onSaveText, onToggleDone, onRemove, onEditingChange, draggable, onDragStart, onDragEnd }: Props) {
+export default function TodoRow({ todo, peerName, focused, selected, suppressHover, justAdded, startInEdit, onEditHandled, onFocus, onSaveText, onToggleDone, onRemove, onEditingChange, draggable, onDragStart, onDragEnd }: Props) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(todo.text);
   const inputRef = useRef<HTMLInputElement | null>(null);
@@ -72,12 +74,13 @@ export default function TodoRow({ todo, peerName, focused, suppressHover, justAd
   return (
     <div
       data-focused={focused}
+      data-selected={selected ? 'true' : undefined}
       data-testid={`todo-row-${todo.id}`}
       draggable={draggable && !editing}
       onDragStart={onDragStart}
       onDragEnd={onDragEnd}
       onClick={onFocus}
-      className={`group grid grid-cols-[16px_200px_minmax(0,1fr)_auto] items-center gap-3 px-4 py-2.5 border-l-2 ${focused ? 'border-l-accent bg-panel2' : `border-l-transparent ${suppressHover ? '' : 'hover:bg-panel2'}`} border-b border-b-border cursor-default ${justAdded ? 'row-just-added' : ''}`}
+      className={`group grid grid-cols-[16px_200px_minmax(0,1fr)_auto] items-center gap-3 px-4 py-2.5 border-l-2 ${focused ? 'border-l-accent bg-panel2' : selected ? 'border-l-accent/60 bg-accent/10' : `border-l-transparent ${suppressHover ? '' : 'hover:bg-panel2'}`} border-b border-b-border cursor-default ${justAdded ? 'row-just-added' : ''}`}
       title="Task · drag to reorder"
     >
       <span

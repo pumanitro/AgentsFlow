@@ -16,7 +16,11 @@ const SHORTCUTS: { section: string; items: Shortcut[] }[] = [
     items: [
       { keys: ['⌘', '↑/↓'], desc: 'Move focus between pinned rows (works while typing in the prompt)' },
       { keys: ['⌘', '→'], desc: 'Open the focused conversation (attach terminal)' },
-      { keys: ['Shift', '↑/↓'], desc: 'Reorder the focused pinned row — works for both conversations and separators' },
+      { keys: ['Shift', '↑/↓'], desc: 'Reorder the focused pinned row — or the whole selected block, when the focused row is part of it' },
+      { keys: ['drag'], desc: 'Drag from the margin around the pinned list (left/right gutter or below it) to rubber-band select rows' },
+      { keys: ['Shift', 'drag'], desc: 'Rubber-band that adds to the current selection instead of replacing it (⌘ works too)' },
+      { keys: ['drag a row'], desc: 'Reorders it — and moves the whole selection when that row is highlighted' },
+      { keys: ['Esc'], desc: 'Clear the selection (a click in the margin clears it too)' },
       { keys: ['+ Add separator'], desc: 'Inserts a labeled separator above the focused row (button next to "Pinned conversations")' },
       { keys: ['Enter'], desc: 'Send prompt (when input is focused)' },
       { keys: ['Shift', 'Enter'], desc: 'Newline in the spawn prompt' },

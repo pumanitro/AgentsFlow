@@ -4,6 +4,8 @@ import { PinnedDivider } from '../../shared/types';
 interface Props {
   divider: PinnedDivider;
   focused: boolean;
+  // Caught by the rubber-band selection — see PinnedRow.
+  selected?: boolean;
   suppressHover: boolean;
   startInRename: boolean;
   onFocus: () => void;
@@ -18,6 +20,7 @@ interface Props {
 export default function DividerRow({
   divider,
   focused,
+  selected,
   suppressHover,
   startInRename,
   onFocus,
@@ -63,12 +66,13 @@ export default function DividerRow({
   return (
     <div
       data-focused={focused}
+      data-selected={selected ? 'true' : undefined}
       data-testid={`divider-row-${divider.id}`}
       draggable={draggable && !editing}
       onDragStart={onDragStart}
       onDragEnd={onDragEnd}
       onClick={onFocus}
-      className={`group flex items-center gap-3 px-4 py-1.5 border-l-2 ${focused ? 'border-l-accent bg-panel2' : `border-l-transparent bg-bg/50 ${suppressHover ? '' : 'hover:bg-panel2/60'}`} border-b border-b-border ${editing ? 'cursor-default' : 'cursor-grab active:cursor-grabbing select-none'}`}
+      className={`group flex items-center gap-3 px-4 py-1.5 border-l-2 ${focused ? 'border-l-accent bg-panel2' : selected ? 'border-l-accent/60 bg-accent/10' : `border-l-transparent bg-bg/50 ${suppressHover ? '' : 'hover:bg-panel2/60'}`} border-b border-b-border ${editing ? 'cursor-default' : 'cursor-grab active:cursor-grabbing select-none'}`}
       title={editing ? undefined : 'Drag to reorder · Shift+↑/↓'}
     >
       <span className="text-muted/70 shrink-0" aria-hidden>

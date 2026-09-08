@@ -8,6 +8,9 @@ interface Props {
   onSaveTitle: (title: string) => void;
   onMarkDone: () => void;
   focused: boolean;
+  // Caught by the rubber-band selection — highlighted, and moved as a block when
+  // any selected row is dragged.
+  selected?: boolean;
   suppressHover: boolean;
   justAdded?: boolean;
   onFocus: () => void;
@@ -31,7 +34,7 @@ interface Props {
   onEditingChange?: (editing: boolean) => void;
 }
 
-export default function PinnedRow({ conv, onAttach, onSaveTitle, onMarkDone, focused, suppressHover, justAdded, onFocus, draggable, hideHandle, bare, hideBottomBorder, onDragStart, onDragEnd, onEditingChange }: Props) {
+export default function PinnedRow({ conv, onAttach, onSaveTitle, onMarkDone, focused, selected, suppressHover, justAdded, onFocus, draggable, hideHandle, bare, hideBottomBorder, onDragStart, onDragEnd, onEditingChange }: Props) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(conv.title);
   const inputRef = useRef<HTMLInputElement | null>(null);
@@ -72,12 +75,13 @@ export default function PinnedRow({ conv, onAttach, onSaveTitle, onMarkDone, foc
   return (
     <div
       data-focused={focused}
+      data-selected={selected ? 'true' : undefined}
       data-testid={`pinned-row-${conv.id}`}
       draggable={draggable}
       onDragStart={onDragStart}
       onDragEnd={onDragEnd}
       onClick={handleRowClick}
-      className={`group grid grid-cols-[16px_200px_minmax(0,1fr)_auto] items-center gap-3 px-4 py-2.5 border-l-2 ${bare ? 'border-l-transparent' : (focused ? 'border-l-accent bg-panel2' : `border-l-transparent ${suppressHover ? '' : 'hover:bg-panel2'}`)} ${hideBottomBorder ? '' : 'border-b border-b-border'} cursor-pointer ${ready ? '' : 'opacity-80'} ${justAdded ? 'row-just-added' : ''}`}
+      className={`group grid grid-cols-[16px_200px_minmax(0,1fr)_auto] items-center gap-3 px-4 py-2.5 border-l-2 ${bare ? 'border-l-transparent' : (focused ? 'border-l-accent bg-panel2' : selected ? 'border-l-accent/60 bg-accent/10' : `border-l-transparent ${suppressHover ? '' : 'hover:bg-panel2'}`)} ${hideBottomBorder ? '' : 'border-b border-b-border'} cursor-pointer ${ready ? '' : 'opacity-80'} ${justAdded ? 'row-just-added' : ''}`}
       title={ready
         ? (conv.description ? `${conv.description}\n\nOpen terminal · drag to reorder` : 'Open terminal · drag to reorder')
         : 'Session is still starting…'}

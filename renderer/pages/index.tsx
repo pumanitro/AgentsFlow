@@ -15,6 +15,7 @@ import StatsView from '../components/StatsView';
 import { api } from '../lib/ipc';
 import { useUIState } from '../lib/ui-state';
 import { BridgeHealth, Conversation, PinnedDivider, PinnedItemRef, PinnedTodo, TrackedDirectory } from '../../shared/types';
+import { blockStepDropIndex, marqueeHits, moveRefsTo, refKey } from '../../shared/pinned-selection';
 
 // Both touch the Electron-only `api()` at render time, so they must be
 // client-only — this page is server-rendered by Next, where `api()` throws.
@@ -29,10 +30,6 @@ type PinnedItem =
   | { kind: 'conversation'; id: string; ref: PinnedItemRef; conv: Conversation }
   | { kind: 'divider'; id: string; ref: PinnedItemRef; divider: PinnedDivider }
   | { kind: 'todo'; id: string; ref: PinnedItemRef; todo: PinnedTodo };
-
-function refKey(r: PinnedItemRef): string {
-  return `${r.kind}:${r.id}`;
-}
 
 export default function Home() {
   const router = useRouter();
@@ -73,7 +70,26 @@ export default function Home() {
   const pendingDoneRef = useRef<{ doneKey: string; targetKey: string } | null>(null);
   const [pendingFocusConvId, setPendingFocusConvId] = useState<string | null>(null);
   const [dragKey, setDragKey] = useState<string | null>(null);
+  // Every row the current drag carries: the whole checked set when the grabbed
+  // row is part of it, otherwise just that row.
+  const [dragSet, setDragSet] = useState<Set<string> | null>(null);
   const [dropTargetIdx, setDropTargetIdx] = useState<number | null>(null);
+  // Multi-select, built by dragging a rubber band across the list. Keys are
+  // refKey() strings, so conversations, tasks and separators all live in one set
+  // and move as one block.
+  const [selectedKeys, setSelectedKeys] = useState<Set<string>>(() => new Set());
+  const listRef = useRef<HTMLDivElement | null>(null);
+  // The gutter area a band may start in — the padding around the list.
+  const bandAreaRef = useRef<HTMLElement | null>(null);
+  // The band being dragged right now, in coordinates relative to the list box.
+  const [marquee, setMarquee] = useState<{ left: number; top: number; width: number; height: number } | null>(null);
+  // Tears down the in-flight band drag (its window listeners and visuals).
+  const bandTeardownRef = useRef<(() => void) | null>(null);
+  const [banding, setBanding] = useState(false);
+  // A band that actually swept rows must not also fire the click that would
+  // open a conversation, and must not let the row start an HTML5 drag.
+  const suppressClickRef = useRef(false);
+  const dragBlockedRef = useRef(false);
   // Key of the row whose inline title editor is open; that row's wrapper must
   // not be draggable, or click-dragging to select text starts a row drag.
   const [editingKey, setEditingKey] = useState<string | null>(null);
@@ -334,6 +350,104 @@ export default function Home() {
     }
   }, []);
 
+  // Rows leave the list on their own (marked done, unpinned elsewhere) — drop
+  // their keys so a stale selection can never move a row that no longer exists.
+  useEffect(() => {
+    setSelectedKeys((prev) => {
+      if (prev.size === 0) return prev;
+      const live = new Set(pinnedItems.map((it) => refKey(it.ref)));
+      const next = new Set<string>();
+      prev.forEach((k) => { if (live.has(k)) next.add(k); });
+      return next.size === prev.size ? prev : next;
+    });
+  }, [pinnedItems]);
+
+  const clearSelection = useCallback(() => setSelectedKeys(new Set()), []);
+  const selectionCount = selectedKeys.size;
+
+  // Rubber-band selection. It starts ONLY in the gutters around the pinned
+  // list — its left/right padding and the strip beneath it — never on a row:
+  // pressing a row has always meant "drag this", and that stays true. Sweep the
+  // band and every row it crosses highlights. Shift or ⌘ adds to the current
+  // selection instead of replacing it.
+  // The move/up listeners are attached HERE rather than from an effect — a click
+  // fast enough to release before React commits would otherwise never see its
+  // mouseup and leave the band armed.
+  const handleBandMouseDown = (e: React.MouseEvent) => {
+    if (e.button !== 0) return;
+    const target = e.target as HTMLElement | null;
+    const area = bandAreaRef.current;
+    const list = listRef.current;
+    if (!target || !area || !list) return;
+    // Anything inside a row belongs to that row (drag, open, rename), and the
+    // header's own controls keep their behaviour.
+    if (target.closest('[data-pinned-key]')) return;
+    if (target.closest('input, textarea, [contenteditable="true"], button, a')) return;
+
+    const additive = e.shiftKey || e.metaKey || e.ctrlKey;
+    const band = { x0: e.clientX, y0: e.clientY, base: additive ? new Set(selectedKeys) : new Set<string>(), moved: false };
+    dragBlockedRef.current = true;
+    setBanding(true);
+    // Stops the text selection that would otherwise follow the pointer.
+    e.preventDefault();
+
+    const rowBoxes = () => Array.from(list.querySelectorAll<HTMLElement>('[data-pinned-key]')).map((el) => {
+      const r = el.getBoundingClientRect();
+      return { key: el.dataset.pinnedKey as string, top: r.top, bottom: r.bottom };
+    });
+
+    // What the band has caught, kept in a plain variable so mouseup can read it
+    // without waiting for a re-render.
+    let hits = new Set<string>(band.base);
+
+    const onMove = (ev: MouseEvent) => {
+      if (!band.moved && Math.abs(ev.clientY - band.y0) + Math.abs(ev.clientX - band.x0) < 4) return;
+      band.moved = true;
+      const box = area.getBoundingClientRect();
+      setMarquee({
+        left: Math.min(band.x0, ev.clientX) - box.left,
+        top: Math.min(band.y0, ev.clientY) - box.top,
+        width: Math.abs(ev.clientX - band.x0),
+        height: Math.abs(ev.clientY - band.y0),
+      });
+      hits = marqueeHits(rowBoxes(), band.y0, ev.clientY);
+      band.base.forEach((k) => hits.add(k));
+      setSelectedKeys(hits);
+    };
+
+    const onUp = () => {
+      teardown();
+      if (band.moved) {
+        // Swallow the click this drag would otherwise produce, and park focus on
+        // the first selected row so Shift+↑/↓ moves the block straight away.
+        suppressClickRef.current = true;
+        const first = pinnedItems.findIndex((it) => hits.has(refKey(it.ref)));
+        if (first >= 0) { setFocusedIdx(first); setSelectedChildId(null); }
+      } else {
+        // A press in the gutter that never moved is just a click — it drops the
+        // selection.
+        clearSelection();
+      }
+    };
+
+    const teardown = () => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+      bandTeardownRef.current = null;
+      dragBlockedRef.current = false;
+      setBanding(false);
+      setMarquee(null);
+    };
+
+    bandTeardownRef.current = teardown;
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+  };
+
+  // A band left armed by an unmount (navigating into a session mid-drag) would
+  // leak its window listeners.
+  useEffect(() => () => bandTeardownRef.current?.(), []);
+
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (historyDirId) return;
@@ -383,25 +497,38 @@ export default function Home() {
         }
       }
 
-      // Shift+↑/↓ — reorder focused row. Don't fight text-selection inside inputs.
+      // Esc — drop a multi-selection (the list itself has no other Esc use).
+      // A modal open on top owns Escape first, so don't steal it from there.
+      if (e.key === 'Escape' && !inEditable && !helpOpen && !mcpOpen && selectedKeys.size > 0) {
+        e.preventDefault();
+        clearSelection();
+        return;
+      }
+
+      // Shift+↑/↓ — reorder. Moves the whole checked block when the focused row
+      // is part of it, otherwise just the focused row. Don't fight
+      // text-selection inside inputs.
       if (e.shiftKey && !e.metaKey && !e.altKey && !e.ctrlKey && !inEditable) {
         if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
           if (focusedIdx < 0 || focusedIdx >= pinnedItems.length) return;
-          const delta = e.key === 'ArrowUp' ? -1 : 1;
-          const nextIdx = focusedIdx + delta;
-          if (nextIdx < 0 || nextIdx >= pinnedItems.length) return;
+          const order = pinnedItems.map((it) => it.ref);
+          const focusedKey = refKey(order[focusedIdx]);
+          const moving = selectedKeys.has(focusedKey) ? new Set(selectedKeys) : new Set([focusedKey]);
+          const dropIdx = blockStepDropIndex(order.map(refKey), moving, e.key === 'ArrowUp' ? 'up' : 'down');
+          if (dropIdx === null) return;
+          const next = moveRefsTo(order, moving, dropIdx);
+          if (!next) return;
           e.preventDefault();
           setKeyboardNavActive(true);
-          const next = pinnedItems.map((it) => it.ref);
-          [next[focusedIdx], next[nextIdx]] = [next[nextIdx], next[focusedIdx]];
-          setFocusedIdx(nextIdx);
+          const landed = next.findIndex((r) => refKey(r) === focusedKey);
+          if (landed >= 0) setFocusedIdx(landed);
           commitReorder(next);
         }
       }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [pinnedItems, focusedIdx, selectedChildId, selectableRows, convs, router, historyDirId, commitReorder, view, globalNoteFile]);
+  }, [pinnedItems, focusedIdx, selectedChildId, selectableRows, convs, router, historyDirId, commitReorder, view, globalNoteFile, selectedKeys, clearSelection, helpOpen, mcpOpen]);
 
   useEffect(() => {
     if (!keyboardNavActive) return;
@@ -561,7 +688,12 @@ export default function Home() {
   }, [pendingEditTodoId, pinnedItems]);
 
   const handleDragStart = (key: string) => (e: React.DragEvent) => {
+    // A rubber band is being swept across this row — not a reorder drag.
+    if (dragBlockedRef.current) { e.preventDefault(); return; }
     setDragKey(key);
+    // Grabbing a selected row drags the whole selection; grabbing an unselected
+    // one moves just it and leaves the selection alone.
+    setDragSet(selectedKeys.has(key) ? new Set(selectedKeys) : new Set([key]));
     e.dataTransfer.effectAllowed = 'move';
     try { e.dataTransfer.setData('text/plain', key); } catch { /* some browsers throw on synthetic events */ }
     // The draggable element IS the whole unit (a conversation + its delegated
@@ -571,6 +703,7 @@ export default function Home() {
 
   const handleDragEnd = () => {
     setDragKey(null);
+    setDragSet(null);
     setDropTargetIdx(null);
   };
 
@@ -590,30 +723,20 @@ export default function Home() {
 
   const handleDrop = (e: React.DragEvent) => {
     e.preventDefault();
-    if (!dragKey || dropTargetIdx === null) {
-      setDragKey(null);
-      setDropTargetIdx(null);
-      return;
-    }
-    const fromIdx = pinnedItems.findIndex((it) => refKey(it.ref) === dragKey);
-    if (fromIdx < 0) {
-      setDragKey(null);
-      setDropTargetIdx(null);
-      return;
-    }
-    let toIdx = dropTargetIdx;
-    if (toIdx > fromIdx) toIdx -= 1; // splice math: removing item shifts later indices left
-    if (toIdx === fromIdx) {
-      setDragKey(null);
-      setDropTargetIdx(null);
-      return;
-    }
-    const next = pinnedItems.map((it) => it.ref);
-    const [moved] = next.splice(fromIdx, 1);
-    next.splice(toIdx, 0, moved);
-    setFocusedIdx(toIdx);
+    const moving = dragSet ?? (dragKey ? new Set([dragKey]) : null);
+    const drop = dropTargetIdx;
+    const grabbed = dragKey;
     setDragKey(null);
+    setDragSet(null);
     setDropTargetIdx(null);
+    if (!moving || drop === null) return;
+    const next = moveRefsTo(pinnedItems.map((it) => it.ref), moving, drop);
+    if (!next) return;
+    // Keep focus on the row that was actually grabbed, wherever it landed.
+    if (grabbed) {
+      const idx = next.findIndex((r) => refKey(r) === grabbed);
+      if (idx >= 0) setFocusedIdx(idx);
+    }
     commitReorder(next);
   };
 
@@ -821,10 +944,41 @@ export default function Home() {
         </aside>
 
         <div className="flex-1 min-w-0 overflow-y-auto pb-4">
-        <section className="px-4 pt-4">
+        {/* The band is drawn from the gutters AROUND the list — its left/right
+            padding and the strip below it. Pressing a row is always a drag. */}
+        <section
+          ref={bandAreaRef}
+          className={`relative px-4 pt-4 pb-5 ${banding ? 'select-none' : ''}`}
+          onMouseDown={handleBandMouseDown}
+          onClickCapture={(e) => {
+            // The click that ends a band sweep must not reach whatever the
+            // pointer happened to be released over.
+            if (!suppressClickRef.current) return;
+            suppressClickRef.current = false;
+            e.preventDefault();
+            e.stopPropagation();
+          }}
+        >
+          {marquee && (
+            <div
+              data-testid="pinned-marquee"
+              className="absolute z-20 pointer-events-none rounded-[3px] border border-accent bg-accent/15"
+              style={{ left: marquee.left, top: marquee.top, width: marquee.width, height: marquee.height }}
+            />
+          )}
           <div className="flex items-center justify-between mb-2">
             <h2 className="text-xs uppercase tracking-wider text-muted">Pinned conversations</h2>
             <div className="flex items-center gap-1.5">
+              {selectionCount > 0 && (
+                <div className="flex items-center gap-2 mr-1.5 rounded-md border border-accent/50 bg-accent/10 px-2 py-0.5">
+                  <span className="text-[11px] font-semibold text-accent">{selectionCount} selected</span>
+                  <button
+                    onClick={clearSelection}
+                    className="text-[10px] uppercase tracking-wider text-muted hover:text-text border border-border hover:border-accent rounded px-1.5 py-0.5"
+                    title="Clear selection (Esc) · drag any selected row to move them all · Shift+↑/↓"
+                  >Clear</button>
+                </div>
+              )}
               {/* Add task now lives on each peer's sidebar card (the "+"), so the
                   scope is picked at the source instead of relying on selection. */}
               <button
@@ -835,6 +989,7 @@ export default function Home() {
             </div>
           </div>
           <div
+            ref={listRef}
             className="rounded-lg border border-border bg-panel/50 overflow-hidden"
             onDragOver={(e) => { if (dragKey) e.preventDefault(); }}
             onDragLeave={handleListDragLeave}
@@ -853,19 +1008,21 @@ export default function Home() {
             ) : (
               pinnedItems.map((item, i) => {
                 const key = refKey(item.ref);
-                const showInsertBefore = dropTargetIdx === i && dragKey !== null && dragKey !== key;
-                const showInsertAfter = dropTargetIdx === i + 1 && i === pinnedItems.length - 1 && dragKey !== null && dragKey !== key;
+                const moving = dragKey !== null && (dragSet?.has(key) ?? dragKey === key);
+                const showInsertBefore = dropTargetIdx === i && dragKey !== null && !moving;
+                const showInsertAfter = dropTargetIdx === i + 1 && i === pinnedItems.length - 1 && dragKey !== null && !moving;
                 const kids = item.kind === 'conversation' ? (childrenByParent.get(item.id) ?? []) : [];
                 const hasKids = kids.length > 0;
                 const focused = i === focusedIdx;
-                const beingDragged = dragKey === key;
+                const rowSelected = selectedKeys.has(key);
+                const beingDragged = moving;
                 // A conversation + its delegated peers form one DRAGGABLE unit, but
                 // each row SELECTS and HOVERS independently (so a peer can be
                 // previewed on its own). The wrapper only owns drag + the closing
                 // bottom border; the grip lives on the parent row, never the peer.
                 const unitCls = `relative ${hasKids ? 'border-b border-b-border' : ''} ${beingDragged ? 'opacity-60' : ''}`;
                 return (
-                  <div key={key} onDragOver={handleRowDragOver(i)}>
+                  <div key={key} data-pinned-key={key} onDragOver={handleRowDragOver(i)}>
                     {showInsertBefore && <div className="h-0.5 bg-accent" />}
                     {item.kind === 'conversation' ? (
                       <div
@@ -877,6 +1034,7 @@ export default function Home() {
                         <PinnedRow
                           conv={item.conv}
                           focused={i === focusedIdx && !selectedChildId}
+                          selected={rowSelected}
                           suppressHover={keyboardNavActive}
                           hideBottomBorder={hasKids}
                           justAdded={item.id === justAddedConvId}
@@ -907,6 +1065,7 @@ export default function Home() {
                         todo={item.todo}
                         peerName={dirNameById.get(item.todo.directoryId) ?? '?'}
                         focused={focused && !selectedChildId}
+                        selected={rowSelected}
                         suppressHover={keyboardNavActive}
                         startInEdit={pendingEditTodoId === item.id}
                         onEditHandled={() => setPendingEditTodoId(null)}
@@ -923,6 +1082,7 @@ export default function Home() {
                       <DividerRow
                         divider={item.divider}
                         focused={focused}
+                        selected={rowSelected}
                         suppressHover={keyboardNavActive}
                         startInRename={pendingRenameDividerId === item.id}
                         onRenameHandled={() => setPendingRenameDividerId(null)}
