@@ -137,6 +137,7 @@ function sanitizeTodos(raw: any): PinnedTodo[] {
       createdAt: typeof t.createdAt === 'string' ? t.createdAt : new Date().toISOString(),
       done: t.done === true,
       doneAt: typeof t.doneAt === 'string' ? t.doneAt : undefined,
+      conversationId: typeof t.conversationId === 'string' ? t.conversationId : undefined,
     }));
 }
 
@@ -148,7 +149,8 @@ function sanitizePinnedOrder(
 ): PinnedItemRef[] {
   const convIds = new Set(conversations.filter((c) => c.pinned).map((c) => c.id));
   const divIds = new Set(dividers.map((d) => d.id));
-  const todoIds = new Set(todos.filter((t) => !t.done).map((t) => t.id));
+  // Nested tasks belong to their conversation's row, never to the flat order.
+  const todoIds = new Set(todos.filter((t) => !t.done && !t.conversationId).map((t) => t.id));
   const seen = new Set<string>();
   const out: PinnedItemRef[] = [];
   if (Array.isArray(raw)) {
@@ -446,6 +448,9 @@ export const store = {
   removeConversation(id: string): void {
     const s = load();
     s.conversations = s.conversations.filter((x) => x.id !== id);
+    // Tasks nested under the conversation have no life of their own — deleting
+    // the conversation deletes them too (they'd otherwise be unreachable).
+    s.todos = s.todos.filter((t) => t.conversationId !== id);
     dropPinnedRef(s, { kind: 'conversation', id });
     save();
   },
@@ -548,7 +553,7 @@ export const store = {
     const s = load();
     s.todos = [todo, ...s.todos.filter((t) => t.id !== todo.id)];
     const ref: PinnedItemRef = { kind: 'todo', id: todo.id };
-    if (!todo.done) {
+    if (!todo.done && !todo.conversationId) {
       s.pinnedOrder = afterRef
         ? placePinnedRefAfter(s.pinnedOrder, ref, afterRef)
         : placePinnedRefAtEndOfFirstSection(s.pinnedOrder, ref);
@@ -571,7 +576,9 @@ export const store = {
         dropPinnedRef(s, { kind: 'todo', id });
       } else {
         next.doneAt = undefined;
-        prependPinnedRef(s, { kind: 'todo', id });
+        // A nested task returns to its conversation's child list, not to the
+        // top of the flat order.
+        if (!next.conversationId) prependPinnedRef(s, { kind: 'todo', id });
       }
     }
     save();

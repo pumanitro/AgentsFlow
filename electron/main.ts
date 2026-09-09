@@ -1269,6 +1269,8 @@ ipcMain.handle('convs:remove', async (_e, id: string) => {
   deleteAttachmentFiles(conv.attachments);
   store.removeConversation(id);
   broadcastConversations();
+  // removeConversation also drops the tasks nested under it.
+  broadcastTodos();
   broadcastPinnedOrder();
 });
 
@@ -1286,6 +1288,8 @@ ipcMain.handle('dirs:removeWithHistory', async (_e, id: string): Promise<{ remov
   const dirs = store.getDirectories().filter((d) => d.id !== id);
   store.setDirectories(recomputeAllDisplayNames(dirs));
   broadcastConversations();
+  // Their nested tasks went with them.
+  broadcastTodos();
   broadcastPinnedOrder();
   return { removedConversations: targets.length };
 });
@@ -1317,13 +1321,16 @@ ipcMain.handle('dividers:remove', (_e, id: string) => {
 
 ipcMain.handle('todos:list', () => store.getTodos());
 
-ipcMain.handle('todos:add', (_e, directoryId: string, afterRef: PinnedItemRef | null): PinnedTodo => {
+ipcMain.handle('todos:add', (_e, directoryId: string, afterRef: PinnedItemRef | null, conversationId?: string): PinnedTodo => {
   const todo: PinnedTodo = {
     id: uuid(),
     directoryId,
     text: '',
     createdAt: new Date().toISOString(),
     done: false,
+    // Nested under a conversation when the "+" on that row asked for it; the
+    // store then keeps it out of the flat pinned order.
+    ...(conversationId ? { conversationId } : {}),
   };
   store.addTodo(todo, afterRef ?? null);
   broadcastTodos();

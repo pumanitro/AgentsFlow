@@ -5,6 +5,7 @@ import PinnedRow from '../components/PinnedRow';
 import DelegatedChildRow from '../components/DelegatedChildRow';
 import DividerRow from '../components/DividerRow';
 import TodoRow from '../components/TodoRow';
+import TodoChildRow from '../components/TodoChildRow';
 import DirectoryCard from '../components/DirectoryCard';
 import SpawnBar from '../components/SpawnBar';
 import HistoryModal from '../components/HistoryModal';
@@ -245,6 +246,20 @@ export default function Home() {
 
   // Peer display names for rows that only carry a directoryId (tasks). Falls
   // back to the raw id-less placeholder when the peer is no longer tracked.
+  // Open tasks nested under each conversation, oldest first — the sub-rows the
+  // "+" on a conversation adds. Keyed by conversation id.
+  const todosByConv = useMemo(() => {
+    const map = new Map<string, PinnedTodo[]>();
+    for (const t of todos) {
+      if (t.done || !t.conversationId) continue;
+      const list = map.get(t.conversationId) ?? [];
+      list.push(t);
+      map.set(t.conversationId, list);
+    }
+    for (const list of map.values()) list.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+    return map;
+  }, [todos]);
+
   const dirNameById = useMemo(() => {
     const m = new Map<string, string>();
     for (const d of dirs) m.set(d.id, d.displayName);
@@ -254,7 +269,9 @@ export default function Home() {
   const pinnedItems = useMemo<PinnedItem[]>(() => {
     const convById = new Map(convs.filter((c) => c.pinned).map((c) => [c.id, c]));
     const divById = new Map(dividers.map((d) => [d.id, d]));
-    const todoById = new Map(todos.filter((t) => !t.done).map((t) => [t.id, t]));
+    // Tasks nested under a conversation render as that row's children, so they
+    // must never surface as standalone rows here.
+    const todoById = new Map(todos.filter((t) => !t.done && !t.conversationId).map((t) => [t.id, t]));
     const out: PinnedItem[] = [];
     const used = new Set<string>();
     for (const ref of pinnedOrder) {
@@ -680,6 +697,15 @@ export default function Home() {
     setPendingEditTodoId(todo.id);
   };
 
+  // Add a task nested under a conversation — the "+" on that row. It inherits
+  // the conversation's peer and lives as a child row, so it never takes a slot
+  // in the flat pinned order.
+  const handleAddConvTodo = async (conv: Conversation) => {
+    const todo = await api().addTodo(conv.directoryId, null, conv.id);
+    setPendingEditTodoId(todo.id);
+    await refreshAll();
+  };
+
   // Focus the newly created task once it lands, so its editor opens in place.
   useEffect(() => {
     if (!pendingEditTodoId) return;
@@ -1012,7 +1038,8 @@ export default function Home() {
                 const showInsertBefore = dropTargetIdx === i && dragKey !== null && !moving;
                 const showInsertAfter = dropTargetIdx === i + 1 && i === pinnedItems.length - 1 && dragKey !== null && !moving;
                 const kids = item.kind === 'conversation' ? (childrenByParent.get(item.id) ?? []) : [];
-                const hasKids = kids.length > 0;
+                const tasks = item.kind === 'conversation' ? (todosByConv.get(item.id) ?? []) : [];
+                const hasKids = kids.length > 0 || tasks.length > 0;
                 const focused = i === focusedIdx;
                 const rowSelected = selectedKeys.has(key);
                 const beingDragged = moving;
@@ -1042,12 +1069,16 @@ export default function Home() {
                           onAttach={() => attach(item.conv)}
                           onSaveTitle={(t) => api().updateConversationTitle(item.id, t).then(refreshAll)}
                           onMarkDone={() => markDone(i)}
+                          onAddTask={() => handleAddConvTodo(item.conv)}
+                          taskCount={tasks.length}
                           onEditingChange={(ed) => setEditingKey((cur) => (ed ? key : cur === key ? null : cur))}
                           draggable={false}
                         />
                         {hasKids && (
-                          // Peer rows span the FULL width (so hover/selection isn't
+                          // Sub-rows span the FULL width (so hover/selection isn't
                           // clipped on the left); only their content is indented.
+                          // Delegated peers first, then the tasks the user parked
+                          // on this conversation.
                           <div className="relative">
                             {kids.map((child) => (
                               <DelegatedChildRow
@@ -1055,6 +1086,18 @@ export default function Home() {
                                 conv={child}
                                 selected={selectedChildId === child.id}
                                 onAttach={() => { setSelectedChildId(child.id); attach(child); }}
+                              />
+                            ))}
+                            {tasks.map((t) => (
+                              <TodoChildRow
+                                key={t.id}
+                                todo={t}
+                                startInEdit={pendingEditTodoId === t.id}
+                                onEditHandled={() => setPendingEditTodoId(null)}
+                                onSaveText={(text) => api().updateTodoText(t.id, text).then(refreshAll)}
+                                onToggleDone={() => api().setTodoDone(t.id, true).then(refreshAll)}
+                                onRemove={() => api().removeTodo(t.id).then(refreshAll)}
+                                onEditingChange={(ed) => setEditingKey((cur) => (ed ? key : cur === key ? null : cur))}
                               />
                             ))}
                           </div>

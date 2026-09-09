@@ -74,6 +74,11 @@ export interface PinnedTodo {
   // When it was last marked done; mirrors Conversation.unpinnedAt and drives
   // the History timeline bucket. Cleared again on undo/restore.
   doneAt?: string;
+  // When set, the task is NESTED under this conversation — rendered as a child
+  // row of it (like a delegated peer) instead of standing on its own line in
+  // the pinned list. Nested tasks never enter pinnedOrder; their place is their
+  // parent's, and they die with it.
+  conversationId?: string;
 }
 
 export type PinnedItemRef =
@@ -648,7 +653,9 @@ export interface AgentsFlowApi {
   // section (mirrors a fresh spawn). `setTodoDone` moves it out of/back into
   // the pinned list, like un/re-pinning a conversation.
   listTodos: () => Promise<PinnedTodo[]>;
-  addTodo: (directoryId: string, afterRef: PinnedItemRef | null) => Promise<PinnedTodo>;
+  // `conversationId` nests the task under that conversation instead of adding
+  // it as a standalone pinned row (afterRef is then ignored).
+  addTodo: (directoryId: string, afterRef: PinnedItemRef | null, conversationId?: string) => Promise<PinnedTodo>;
   updateTodoText: (id: string, text: string) => Promise<void>;
   setTodoDone: (id: string, done: boolean) => Promise<void>;
   removeTodo: (id: string) => Promise<void>;

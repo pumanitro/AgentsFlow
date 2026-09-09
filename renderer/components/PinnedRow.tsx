@@ -7,6 +7,11 @@ interface Props {
   onAttach: () => void;
   onSaveTitle: (title: string) => void;
   onMarkDone: () => void;
+  // Adds a task nested under this conversation (the "+" in the actions area).
+  onAddTask?: () => void;
+  // How many open tasks are already nested under it — shown next to the "+" so
+  // the row says at a glance that it carries work.
+  taskCount?: number;
   focused: boolean;
   // Caught by the rubber-band selection — highlighted, and moved as a block when
   // any selected row is dragged.
@@ -34,7 +39,7 @@ interface Props {
   onEditingChange?: (editing: boolean) => void;
 }
 
-export default function PinnedRow({ conv, onAttach, onSaveTitle, onMarkDone, focused, selected, suppressHover, justAdded, onFocus, draggable, hideHandle, bare, hideBottomBorder, onDragStart, onDragEnd, onEditingChange }: Props) {
+export default function PinnedRow({ conv, onAttach, onSaveTitle, onMarkDone, onAddTask, taskCount = 0, focused, selected, suppressHover, justAdded, onFocus, draggable, hideHandle, bare, hideBottomBorder, onDragStart, onDragEnd, onEditingChange }: Props) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(conv.title);
   const inputRef = useRef<HTMLInputElement | null>(null);
@@ -143,9 +148,22 @@ export default function PinnedRow({ conv, onAttach, onSaveTitle, onMarkDone, foc
 
       <div className="flex items-center gap-1">
         {!ready && <span className="shrink-0 text-xs text-muted italic mr-1">starting…</span>}
+        {onAddTask && (
+          <button
+            onClick={(e) => { e.stopPropagation(); onAddTask(); }}
+            className="text-xs text-muted hover:text-accent hover:bg-accent/10 px-2 py-1 rounded border border-transparent hover:border-accent/40 flex items-center gap-1 opacity-60 group-hover:opacity-100"
+            title="Add a task under this conversation"
+            aria-label="Add a task under this conversation"
+          >
+            <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M7.25 2.5h1.5v4.75H13.5v1.5H8.75V13.5h-1.5V8.75H2.5v-1.5h4.75V2.5z"/></svg>
+            {taskCount > 0 && <span className="tabular-nums">{taskCount}</span>}
+          </button>
+        )}
+        {/* Gap before Done: it's the button that gets hit all day, so it must
+            not sit flush against the "+" and invite a misclick. */}
         <button
           onClick={(e) => { e.stopPropagation(); onMarkDone(); }}
-          className="text-xs text-muted hover:text-ok hover:bg-ok/10 px-2 py-1 rounded border border-transparent hover:border-ok/40 flex items-center gap-1 opacity-70 group-hover:opacity-100"
+          className="ml-4 text-xs text-muted hover:text-ok hover:bg-ok/10 px-2 py-1 rounded border border-transparent hover:border-ok/40 flex items-center gap-1 opacity-70 group-hover:opacity-100"
           title="Mark done (moves to history, can be reopened)"
         >
           <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M6.5 11.207L3.146 7.854l.708-.708L6.5 9.793l5.646-5.647.708.708L6.5 11.207z"/></svg>

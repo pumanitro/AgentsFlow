@@ -102,7 +102,7 @@ const api: AgentsFlowApi = {
   },
 
   listTodos: () => ipcRenderer.invoke('todos:list'),
-  addTodo: (directoryId, afterRef) => ipcRenderer.invoke('todos:add', directoryId, afterRef),
+  addTodo: (directoryId, afterRef, conversationId) => ipcRenderer.invoke('todos:add', directoryId, afterRef, conversationId),
   updateTodoText: (id, text) => ipcRenderer.invoke('todos:updateText', id, text),
   setTodoDone: (id, done) => ipcRenderer.invoke('todos:setDone', id, done),
   removeTodo: (id) => ipcRenderer.invoke('todos:remove', id),
