@@ -33,6 +33,14 @@ can select an existing separate data directory for tests. Do not point two runni
 instances at the same store. Repository-specific setup notes belong in the ignored
 `SETUP.local.md`; never commit user paths, account data, or sessions.
 
+## Terminal colors
+
+Embedded shells and Claude terminal views advertise `xterm-256color` and
+`COLORTERM=truecolor`. Launcher flags such as `NO_COLOR=1` are cleared for interactive
+terminals, and all sixteen ANSI theme colors are defined. Color-aware commands can
+use the full 256-color palette or 24-bit RGB. Shell startup files can still choose
+their own color preferences; no global shell configuration is changed.
+
 ## Accounts and usage
 
 The **Accounts** and **Usage** panels show Claude and Codex separately within the

@@ -102,7 +102,7 @@ export default function Terminal({ conversationId, shellId, shellCwd, baseDir, o
           foreground: '#e6e8ee',
           cursor: '#ff7847',
           black: '#0f1115',
-          brightBlack: '#3a4258',
+          brightBlack: '#758198',
           red: '#ef4444',
           green: '#4ade80',
           yellow: '#fbbf24',
@@ -110,6 +110,13 @@ export default function Terminal({ conversationId, shellId, shellCwd, baseDir, o
           magenta: '#c084fc',
           cyan: '#22d3ee',
           white: '#e6e8ee',
+          brightRed: '#ff7b86',
+          brightGreen: '#86efac',
+          brightYellow: '#fde68a',
+          brightBlue: '#93c5fd',
+          brightMagenta: '#d8b4fe',
+          brightCyan: '#67e8f9',
+          brightWhite: '#ffffff',
         },
       });
 
