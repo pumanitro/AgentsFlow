@@ -636,7 +636,7 @@ export default function Home() {
   const attach = (c: Conversation) => {
     // eslint-disable-next-line no-console
     console.log('[agentsflow] attach()', { id: c.id, sessionId: c.sessionId });
-    if (!c.sessionId) {
+    if (!c.sessionId && c.provider !== 'codex') {
       // eslint-disable-next-line no-console
       console.warn('[agentsflow] attach aborted: no sessionId yet');
       return;

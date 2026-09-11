@@ -89,9 +89,9 @@ export default function HistoryModal({ dir, conversations, onClose, onAttach, on
                   </button>
                   <button
                     onClick={() => onAttach(c)}
-                    disabled={!c.sessionId}
+                    disabled={!c.sessionId && c.provider !== 'codex'}
                     className="text-xs px-2 py-1 rounded text-muted hover:text-text hover:bg-panel disabled:opacity-40 disabled:cursor-not-allowed"
-                    title={c.sessionId ? 'Attach terminal' : 'Session is still starting…'}
+                    title={c.sessionId || c.provider === 'codex' ? 'Open conversation' : 'Session is still starting…'}
                   >open →</button>
                   <button
                     onClick={() => onRemove(c)}
