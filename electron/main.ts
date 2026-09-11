@@ -1,3 +1,6 @@
+import './cli-environment';
+import { CodexAgents } from './codex-agent';
+import type { CodexReply } from '../shared/codex';
 import { app, BrowserWindow, clipboard, dialog, ipcMain, nativeImage, powerMonitor, shell } from 'electron';
 import * as path from 'path';
 import * as fs from 'fs';
@@ -10,6 +13,8 @@ import * as sysmon from './sysmon';
 import { buildPerfReport, reportBasename, serializeReportData } from './perf-report';
 
 const APP_NAME = 'Peers Flow';
+// Isolated data directory for development and smoke tests.
+if (process.env.AGENTSFLOW_USER_DATA) app.setPath('userData', path.resolve(process.env.AGENTSFLOW_USER_DATA));
 app.setName(APP_NAME);
 
 // Earliest possible: mirror console.* to a log file and install last-resort
@@ -66,6 +71,31 @@ const loadURL = isDev ? null : serve({ directory: path.join(__dirname, '..', '..
 
 let mainWindow: BrowserWindow | null = null;
 let peersBridge: PeersBridge | null = null;
+const codex = new CodexAgents({
+  get: (id) => store.getConversation(id),
+  update: (id, patch) => { store.updateConversation(id, patch); broadcastConversations(); },
+  options: (conv) => {
+    const configPath = !conv.delegatedByConversationId ? writeMcpConfigForConversation(conv.id, conv.directoryPath) : undefined;
+    const server = configPath ? JSON.parse(fs.readFileSync(configPath, 'utf8')).mcpServers.peersflow : undefined;
+    return {
+      approvalPolicy: 'on-request', sandbox: 'workspace-write', approvalsReviewer: 'user',
+      ...(server ? {
+        config: { 'mcp_servers.peersflow': { ...server, required: true, tool_timeout_sec: 1860 } },
+        developerInstructions: buildBootstrapSystemPrompt(store.getDirectories()),
+      } : {}),
+    };
+  },
+  changed: (snapshot) => {
+    if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.webContents.isDestroyed()) mainWindow.webContents.send('codex:updated', snapshot);
+  },
+});
+
+ipcMain.handle('codex:account', (_e, force?: boolean) => codex.accountStatus(Boolean(force)));
+
+ipcMain.handle('codex:snapshot', (_e, id: string, older?: boolean) => codex.snapshot(id, older));
+ipcMain.handle('codex:send', (_e, id: string, prompt: string, images?: string[]) => codex.send(id, prompt, images));
+ipcMain.handle('codex:reply', (_e, id: string, requestId: string | number, reply: CodexReply) => codex.reply(id, requestId, reply));
+
 
 // Single-instance guard. Two overlapping mains race on the delegation-bridge
 // socket: the one that quits first runs its teardown `unlinkSync` and deletes
@@ -439,6 +469,7 @@ app.on('window-all-closed', () => {
 });
 
 app.on('before-quit', () => {
+  codex.close();
   try { peersBridge?.stop(); } catch { /* ignore */ }
   // Flush any debounced store changes synchronously so a quit never loses the
   // last few mutations (the async debounce window would otherwise drop them).
@@ -650,17 +681,13 @@ const credentialSyncDeps: accounts.SyncDeps = {
 
 ipcMain.handle('accounts:list', () => accountsSnapshot());
 
-ipcMain.handle('accounts:add', (_e, email: string): AddAccountResult => {
+ipcMain.handle('accounts:add', (_e, email: string, label?: string): AddAccountResult => {
   const trimmed = (email ?? '').trim();
   if (!accounts.isEmailAddress(trimmed)) {
     return { ok: false, error: 'Enter an email address (…@gmail.com, or your work domain).' };
   }
-  const existing = store.getAccounts();
-  if (existing.some((a) => a.email.toLowerCase() === trimmed.toLowerCase())) {
-    return { ok: false, error: `${trimmed} is already in the pool.` };
-  }
   try {
-    const entry = accounts.beginAdd(trimmed);
+    const entry = accounts.beginAdd(trimmed, label);
     // Queue the one-time login so it starts the moment the terminal attaches.
     pty.queueShellCommand(entry.shellId, accounts.loginCommandFor(entry.configDir, entry.email));
     return { ok: true, pendingId: entry.pendingId, shellId: entry.shellId, email: entry.email, cwd: os.homedir() };
@@ -678,8 +705,7 @@ ipcMain.handle('accounts:probe', async (_e, pendingId: string): Promise<ProbeAcc
     // nobody is active until the user switched to the account they are already on.
     if (
       !store.getActiveAccountId() &&
-      result.account.accountUuid &&
-      result.account.accountUuid === accounts.currentLoginAccountUuid()
+      accounts.isCurrentMembership(result.account)
     ) {
       store.setActiveAccountId(result.account.id);
     }
@@ -825,7 +851,7 @@ accounts.onAccountRevoked((account, reason) => {
 // status line — see limit-watch.ts for why a forecast alone isn't enough.
 const limitWatchDeps: limitWatch.LimitWatchDeps = {
   getPolicy: () => store.getRotationPolicy(),
-  getConversations: () => store.getConversations(),
+  getConversations: () => store.getConversations().filter((c) => c.provider !== 'codex'),
   rotate: () => rotation.runOnce(rotationDeps, { urgent: true }),
   nudge: (conv, text) => {
     // Snapshotted BEFORE anything is typed: the receipt for this nudge is a
@@ -877,6 +903,7 @@ ipcMain.handle('convs:list', () => store.getConversations());
  */
 async function spawnConversation(opts: {
   dir: TrackedDirectory;
+  provider?: 'claude' | 'codex';
   prompt: string;
   // Display title for the conversation. Defaults to the (possibly boilerplate)
   // prompt — delegations pass the human-readable goal instead.
@@ -894,6 +921,8 @@ async function spawnConversation(opts: {
 
   const optimistic: Conversation = {
     id: conversationId,
+    provider: opts.provider ?? 'claude',
+    model: opts.model,
     sessionId: '',
     daemonShort: '',
     sessionName: '',
@@ -914,6 +943,17 @@ async function spawnConversation(opts: {
   store.addConversation(optimistic);
   broadcastConversations();
   broadcastPinnedOrder();
+
+  if (opts.provider === 'codex') {
+    try {
+      await codex.send(conversationId, prompt, opts.attachments);
+      return { conversationId, sessionId: store.getConversation(conversationId)?.sessionId || '', daemonShort: '' };
+    } catch (error) {
+      store.updateConversation(conversationId, { state: 'error', status: 'error', description: (error as Error).message });
+      broadcastConversations();
+      throw error;
+    }
+  }
 
   let mcpConfigPath: string | undefined;
   let appendSystemPrompt: string | undefined;
@@ -974,7 +1014,8 @@ ipcMain.handle('convs:spawn', async (_e, req: SpawnRequest): Promise<{ conversat
   if (!dir) throw new Error('directory not found');
   const prompt = req.prompt.trim();
   if (!prompt) throw new Error('prompt required');
-  return spawnConversation({ dir, prompt, attachments: req.attachments, model: req.model, pinned: true, peerAware: true });
+  if (req.provider && req.provider !== 'claude' && req.provider !== 'codex') throw new Error('Unknown agent provider');
+  return spawnConversation({ dir, prompt, provider: req.provider, attachments: req.attachments, model: req.model, pinned: true, peerAware: true });
 });
 
 // How long a freshly minted fork can absorb further ⑂ clicks on its source
@@ -995,6 +1036,17 @@ ipcMain.handle('convs:fork', async (_e, conversationId: string): Promise<{ conve
   const src = store.getConversations().find((c) => c.id === conversationId);
   if (!src) throw new Error(`conversation ${conversationId} not found`);
   if (!src.sessionId) throw new Error('source session has no sessionId yet — nothing to fork');
+
+  if (src.provider === 'codex') {
+    const fork: Conversation = { ...src, id: uuid(), sessionId: '', provider: 'codex', daemonShort: '',
+      title: forkTitle(src.title), description: 'Forked copy', state: 'idle', status: 'idle',
+      pinned: true, attachments: [], lastResult: '', createdAt: new Date().toISOString(),
+      forkFromSessionId: src.sessionId, delegatedByConversationId: undefined, unpinnedAt: undefined };
+    store.addConversation(fork, { afterConversationId: src.id });
+    broadcastConversations(); broadcastPinnedOrder();
+    await codex.snapshot(fork.id);
+    return { conversationId: fork.id };
+  }
 
   // Forking is one click, but each fork that gets opened costs a *persistent*
   // `claude --resume` PTY which lives until it has been both detached and silent
@@ -1081,12 +1133,14 @@ async function waitForDelegationCompletion(
   let lastSessionId = '';
   while (Date.now() - start < timeoutMs) {
     await new Promise((r) => setTimeout(r, 1200));
-    try { await refreshNow(); } catch { /* keep polling on transient CLI failure */ }
+    if (store.getConversation(conversationId)?.provider !== 'codex') {
+      try { await refreshNow(); } catch { /* retry on transient CLI failure */ }
+    }
     const conv = store.getConversations().find((c) => c.id === conversationId);
     if (!conv) return { status: 'failure', result: lastResult, sessionId: lastSessionId, error: 'delegated conversation was removed' };
     if (conv.sessionId) lastSessionId = conv.sessionId;
-    const job = readJobState(conv.daemonShort);
-    const r = (job?.output?.result || '').trim();
+    const job = conv.provider === 'codex' ? null : readJobState(conv.daemonShort);
+    const r = (conv.provider === 'codex' ? conv.lastResult || '' : job?.output?.result || '').trim();
     if (r) lastResult = r;
     const st = (conv.state || '').toLowerCase();
     if (Date.now() - start > minRunMs && FINISHED_STATES.has(st)) {
@@ -1120,10 +1174,14 @@ async function handleDelegate(req: DelegateRequest): Promise<Record<string, unkn
     return { status: 'failure', directory: dir.displayName, error: `Path does not exist: ${dir.path}` };
   }
 
+  const parent = store.getConversation(req.rootConversationId);
+  if (!parent || parent.delegatedByConversationId) return { status: 'failure', error: 'Delegation requires a root conversation and is limited to one hop.' };
+  if (req.provider && req.provider !== 'claude' && req.provider !== 'codex') return { status: 'failure', error: 'Unknown agent provider' };
   const started = Date.now();
   const prompt = buildDelegatePrompt(req.goal, req.deliverable || '');
   const spawn = await spawnConversation({
     dir,
+    provider: req.provider ?? parent.provider ?? 'claude',
     prompt,
     // The goal is the human-readable summary — use it as the row title instead
     // of the delegate-prompt boilerplate.
@@ -1257,14 +1315,18 @@ ipcMain.handle('convs:setPinned', (_e, id: string, pinned: boolean) => {
 ipcMain.handle('convs:stop', async (_e, id: string) => {
   const conv = store.getConversations().find((c) => c.id === id);
   if (!conv) return;
-  await cliStop(conv.daemonShort);
+  if (conv.provider === 'codex') await codex.stop(conv.id);
+  else await cliStop(conv.daemonShort);
 });
 
 ipcMain.handle('convs:remove', async (_e, id: string) => {
   const conv = store.getConversations().find((c) => c.id === id);
   if (!conv) return;
-  await cliStop(conv.daemonShort).catch(() => undefined);
-  await cliRemove(conv.daemonShort).catch(() => undefined);
+  if (conv.provider === 'codex') await codex.forget(conv.id);
+  else {
+    await cliStop(conv.daemonShort).catch(() => undefined);
+    await cliRemove(conv.daemonShort).catch(() => undefined);
+  }
   unwatchConversation(id);
   deleteAttachmentFiles(conv.attachments);
   store.removeConversation(id);
@@ -1279,8 +1341,11 @@ ipcMain.handle('dirs:removeWithHistory', async (_e, id: string): Promise<{ remov
   if (!dir) return { removedConversations: 0 };
   const targets = store.getConversations().filter((c) => c.directoryId === id);
   for (const c of targets) {
-    await cliStop(c.daemonShort).catch(() => undefined);
-    await cliRemove(c.daemonShort).catch(() => undefined);
+    if (c.provider === 'codex') await codex.forget(c.id);
+    else {
+      await cliStop(c.daemonShort).catch(() => undefined);
+      await cliRemove(c.daemonShort).catch(() => undefined);
+    }
     unwatchConversation(c.id);
     deleteAttachmentFiles(c.attachments);
     store.removeConversation(c.id);
@@ -1408,6 +1473,7 @@ ipcMain.handle('term:attach', async (_e, conversationId: string, cols: number, r
     console.error('[agentsflow] term:attach: conversation not found', { conversationId, all: store.getConversations().map((c) => c.id) });
     throw new Error(`conversation ${conversationId} not found`);
   }
+  if (conv.provider === 'codex') throw new Error('Codex uses the native chat view');
   if (!conv.sessionId) {
     console.error('[agentsflow] term:attach: no sessionId yet', conv);
     throw new Error('session not ready (sessionId is empty)');

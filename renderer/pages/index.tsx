@@ -574,7 +574,9 @@ export default function Home() {
     awaitingNewConvRef.current = new Set(
       pinnedItems.filter((it) => it.kind === 'conversation').map((it) => it.id),
     );
-    await api().spawnAgent({ directoryId: dir.id, prompt, attachments, model });
+    const provider = model?.startsWith('codex:') ? 'codex' : 'claude';
+    const selectedModel = model?.includes(':') ? model.split(':').slice(1).join(':') || undefined : model;
+    await api().spawnAgent({ directoryId: dir.id, prompt, attachments, model: selectedModel, provider });
     const c = await api().listConversations();
     setConvs(c);
   };
@@ -634,7 +636,7 @@ export default function Home() {
   const attach = (c: Conversation) => {
     // eslint-disable-next-line no-console
     console.log('[agentsflow] attach()', { id: c.id, sessionId: c.sessionId });
-    if (!c.sessionId) {
+    if (!c.sessionId && c.provider !== 'codex') {
       // eslint-disable-next-line no-console
       console.warn('[agentsflow] attach aborted: no sessionId yet');
       return;

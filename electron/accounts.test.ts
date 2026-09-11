@@ -5,6 +5,8 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import {
+  compareMembership,
+  createVaultDir,
   evaluateLogin,
   isEmailAddress,
   mergeOAuthAccount,
@@ -197,7 +199,7 @@ test('parseAuthStatus: reads the signed-in shape', () => {
     orgId: 'org-1',
     subscriptionType: 'max',
   }));
-  assert.deepEqual(s, { loggedIn: true, email: 'me@gmail.com', orgId: 'org-1', subscriptionType: 'max' });
+  assert.deepEqual(s, { loggedIn: true, email: 'me@gmail.com', orgId: 'org-1', orgName: undefined, subscriptionType: 'max' });
 });
 
 test('parseAuthStatus: signed-out and garbage both read as not logged in', () => {
@@ -368,4 +370,40 @@ test('revocationVerdict: one rejection with nothing usable left is enough', () =
   // anywhere that could work, so waiting for two more strikes only postpones
   // the switch that gets the agents moving again.
   assert.equal(revocationVerdict({ strikes: 1, accessTokenExpired: true }), true);
+});
+
+
+test('memberships: one person can use different organizations without being treated as active in both', () => {
+  const personal = { accountUuid: 'same-person', orgId: 'personal' };
+  const work = { accountUuid: 'same-person', orgId: 'work' };
+  assert.equal(compareMembership(personal, work), 'different');
+  assert.equal(compareMembership(personal, { ...personal }), 'same');
+  assert.equal(compareMembership(personal, { accountUuid: 'same-person' }), 'unknown');
+  assert.equal(compareMembership({}, work), 'unknown');
+  assert.equal(compareMembership(personal, { accountUuid: 'someone-else', orgId: 'personal' }), 'different');
+});
+
+test('evaluateLogin: same email and person, different organization is a separate membership', () => {
+  const existing = [account({ email: 'same@company.com', accountUuid: 'person', orgId: 'personal' })];
+  assert.equal(evaluateLogin({ status: { loggedIn: true, email: 'same@company.com', orgId: 'work' }, expectedEmail: 'same@company.com', accountUuid: 'person', existing }).verdict, 'ok');
+  assert.equal(evaluateLogin({ status: { loggedIn: true, email: 'same@company.com', orgId: 'personal' }, expectedEmail: 'same@company.com', accountUuid: 'person', existing }).verdict, 'duplicate');
+  assert.equal(evaluateLogin({ status: { loggedIn: true, email: 'same@company.com' }, expectedEmail: 'same@company.com', accountUuid: 'person', existing }).verdict, 'duplicate');
+});
+
+test('repeated-email login attempts use independent vaults and keychain services', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'peers-memberships-'));
+  try {
+    const first = createVaultDir('same@company.com', root);
+    fs.writeFileSync(path.join(first, 'existing-membership'), 'preserve');
+    const second = createVaultDir('same@company.com', root);
+    assert.notEqual(first, second);
+    assert.notEqual(serviceNameFor(first), serviceNameFor(second));
+    fs.rmSync(second, { recursive: true });
+    assert.equal(fs.readFileSync(path.join(first, 'existing-membership'), 'utf8'), 'preserve');
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+
+test('API-key authentication cannot complete a subscription-vault login', () => {
+  assert.equal(parseAuthStatus(JSON.stringify({ loggedIn: true, authMethod: 'api_key' })).loggedIn, false);
 });

@@ -1,3 +1,5 @@
+export type AgentProvider = 'claude' | 'codex';
+
 export interface TrackedDirectory {
   id: string;
   path: string;
@@ -7,6 +9,9 @@ export interface TrackedDirectory {
 
 // test
 export interface Conversation {
+  provider?: AgentProvider; // Missing on legacy records means Claude.
+  model?: string;
+  lastResult?: string;
   id: string;
   sessionId: string;
   daemonShort: string;
@@ -106,6 +111,7 @@ export interface SlashCommand {
 }
 
 export interface SpawnRequest {
+  provider?: AgentProvider;
   directoryId: string;
   prompt: string;
   attachments?: string[];
@@ -159,8 +165,8 @@ export interface McpPeerSummary {
 /**
  * Liveness of the delegation bridge — the unix-domain socket the MCP server
  * calls back on to spawn *tracked, watchable* peer sessions. When it is down,
- * `delegate` silently degrades to a headless `claude -p` (no sub-peer row, not
- * watchable), so the UI surfaces this so a dead bridge is never invisible.
+ * `delegate` returns an explicit failure. The UI surfaces a dead bridge instead
+ * of silently launching duplicate, untracked work.
  */
 export interface BridgeHealth {
   socketPath: string;
@@ -470,10 +476,13 @@ export interface Account {
   // included. Also its label in the UI and the value verified against
   // `claude auth status` after login.
   email: string;
+  // Optional friendly name; memberships sharing an email remain distinct.
+  label?: string;
+  orgName?: string;
   // Vault path passed as CLAUDE_CONFIG_DIR. Permanent — see above.
   configDir: string;
   // Identity as reported by the CLI after a successful login. `accountUuid` is
-  // what makes the duplicate guard reliable (two labels, one real account).
+  // paired with orgId distinguishes personal and managed memberships.
   accountUuid?: string;
   orgId?: string;
   // 'max' | 'pro' | … straight from `claude auth status --json`.
@@ -484,6 +493,15 @@ export interface Account {
   // short of a fresh login brings it back. Runtime-only: filled into snapshots
   // by the main process, never persisted.
   needsLogin?: string;
+}
+
+export interface CodexAccountStatus {
+  signedIn: boolean;
+  email?: string;
+  plan?: string;
+  authType?: string;
+  error?: string;
+  usage: UsageResult;
 }
 
 export interface AccountsSnapshot {
@@ -579,10 +597,11 @@ export interface AgentsFlowApi {
   // The switchable pool of Anthropic accounts. Switching swaps which account's
   // credentials sit in the keychain slot Claude Code reads — no browser, no
   // login: sessions already running pick it up on their next keychain read.
+  getCodexAccount: (force?: boolean) => Promise<CodexAccountStatus>;
   listAccounts: () => Promise<AccountsSnapshot>;
   // Starts an add for an email address. Rejects malformed addresses and ones
   // already in the pool without touching anything.
-  addAccount: (email: string) => Promise<AddAccountResult>;
+  addAccount: (email: string, label?: string) => Promise<AddAccountResult>;
   // Polled while the login terminal is open; finalises the account once the
   // browser flow lands, or tears the vault down if it authorised the wrong one.
   probeAccount: (pendingId: string) => Promise<ProbeAccountResult>;
@@ -605,6 +624,10 @@ export interface AgentsFlowApi {
   onRotationStatus: (cb: (status: RotationStatus) => void) => () => void;
 
   listConversations: () => Promise<Conversation[]>;
+  codexSnapshot: (id: string, older?: boolean) => Promise<import('./codex').CodexSnapshot>;
+  codexSend: (id: string, prompt: string, images?: string[]) => Promise<void>;
+  codexReply: (id: string, requestId: string | number, reply: import('./codex').CodexReply) => Promise<void>;
+  onCodexUpdated: (cb: (snapshot: import('./codex').CodexSnapshot) => void) => () => void;
   spawnAgent: (req: SpawnRequest) => Promise<SpawnResult>;
   // Branches a copy of an existing conversation's session (`--fork-session`):
   // full history, new session id, independent from the original — the escape

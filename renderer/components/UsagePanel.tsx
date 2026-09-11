@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { api } from '../lib/ipc';
+import { worstMeter } from '../../shared/usage';
 import type { UsageMeter, UsageResult } from '../../shared/types';
 
 // A persisted boolean keyed in localStorage. Starts at `fallback` to avoid an
@@ -90,115 +91,55 @@ function MeterRow({ meter }: { meter: UsageMeter }) {
 
 export default function UsagePanel() {
   const [open, setOpen] = usePersistedBool('agentsflow:usage:open', true);
-  const [result, setResult] = useState<UsageResult | null>(null);
+  const [results, setResults] = useState<Record<string, UsageResult | null>>({ Claude: null, Codex: null });
   const [loading, setLoading] = useState(false);
   const mounted = useRef(true);
-
   const load = useCallback(async (force: boolean) => {
-    const a = api();
-    if (typeof a.getUsage !== 'function') return;
     setLoading(true);
-    try {
-      const r = await a.getUsage(force);
-      if (mounted.current) setResult(r);
-    } catch {
-      if (mounted.current) {
-        setResult({ ok: false, reason: 'unknown', error: 'Could not reach the usage service.' });
-      }
-    } finally {
-      if (mounted.current) setLoading(false);
-    }
+    await Promise.all(['Claude', 'Codex'].map(async provider => {
+      let result: UsageResult;
+      try { result = provider === 'Claude' ? await api().getUsage(force) : (await api().getCodexAccount(force)).usage; }
+      catch { result = { ok: false, reason: 'unknown', error: `Could not read ${provider} usage.` }; }
+      if (mounted.current) setResults(previous => ({ ...previous, [provider]: result }));
+    }));
+    if (mounted.current) setLoading(false);
   }, []);
-
-  // Poll on a light cadence. We keep polling even while collapsed so the header
-  // badge stays fresh, but only once the panel has mounted.
   useEffect(() => {
     mounted.current = true;
-    load(false);
-    const t = setInterval(() => load(false), REFRESH_MS);
-    return () => { mounted.current = false; clearInterval(t); };
+    void load(false);
+    const timer = setInterval(() => load(false), REFRESH_MS);
+    const off = api().onAccountsUpdated?.(() => { void load(true); });
+    return () => { mounted.current = false; clearInterval(timer); off?.(); };
   }, [load]);
-
-  const unavailable = typeof api().getUsage !== 'function';
-  const snapshot = result?.ok ? result.snapshot : null;
-  const meters = snapshot?.meters ?? [];
-  const sessionMeters = meters.filter((m) => m.group === 'session');
-  const weeklyMeters = meters.filter((m) => m.group === 'weekly');
-
-  // Header badge: the binding weekly limit's percent, else the highest of all.
-  const badge = (() => {
-    if (!snapshot || meters.length === 0) return null;
-    const active = meters.find((m) => m.isActive) ?? meters.reduce((a, b) => (b.percent > a.percent ? b : a));
-    return active ? { percent: active.percent, color: SEVERITY_COLOR[active.severity] } : null;
-  })();
 
   return (
     <div className="shrink-0 rounded-lg border border-border bg-panel overflow-hidden flex flex-col min-h-0">
       <div className="shrink-0 flex items-center gap-2 px-2 py-2 bg-panel2/60 hover:bg-panel2">
-        {/* Section identity: a blue accent tick marks this as the Usage zone. */}
         <span className="w-1 h-4 rounded-full bg-info shrink-0" aria-hidden="true" />
-        <button
-          onClick={() => setOpen(!open)}
-          className="flex items-center gap-1.5 flex-1 min-w-0 text-left"
-          title={open ? 'Hide usage' : 'Show plan usage limits'}
-        >
+        <button onClick={() => setOpen(!open)} className="flex items-center gap-1.5 flex-1 min-w-0 text-left" title={open ? 'Hide usage' : 'Show plan usage limits'}>
           <span className="text-muted text-[10px] w-3 shrink-0">{open ? '▼' : '▶'}</span>
           <span className="text-[11px] uppercase tracking-wider text-text font-semibold">Usage</span>
-          {snapshot?.plan && (
-            <span className="text-[10px] text-muted truncate">{snapshot.plan}</span>
-          )}
-          {badge && (
-            <span className="ml-auto text-[10px] font-mono shrink-0" style={{ color: badge.color }}>{badge.percent}%</span>
-          )}
+          <span className="ml-auto flex gap-2">
+            {Object.entries(results).map(([provider, result]) => {
+              const meter = worstMeter(result);
+              return meter && <span key={provider} className="text-[10px] shrink-0" style={{ color: SEVERITY_COLOR[meter.severity] }}>{provider} {meter.percent}%</span>;
+            })}
+          </span>
         </button>
-        <button
-          onClick={() => load(true)}
-          disabled={unavailable || loading}
-          className={`shrink-0 text-muted hover:text-text px-1.5 py-0.5 rounded hover:bg-panel disabled:opacity-40 ${loading ? 'animate-spin' : ''}`}
-          title="Refresh usage now"
-          aria-label="Refresh usage"
-        >↻</button>
+        <button onClick={() => void load(true)} disabled={loading} className={`shrink-0 text-muted hover:text-text px-1.5 py-0.5 rounded disabled:opacity-40 ${loading ? 'animate-spin' : ''}`} title="Refresh usage now" aria-label="Refresh usage">↻</button>
       </div>
-
-      {/* The body is height-capped so the panel can never crowd out what it sits
-          above — the peer list at home, the file tree in a chat. The vh term
-          keeps it honest on short windows; the 240px ceiling keeps it identical
-          on normal ones. */}
-      {open && (
-        <div className="flex-1 min-h-0 overflow-y-auto border-t border-border/60 py-1" style={{ maxHeight: 'min(240px, 28vh)' }}>
-          {unavailable ? (
-            <div className="px-3 py-3 text-xs text-muted italic">
-              Restart the app to enable Usage (preload needs to refresh).
-            </div>
-          ) : !result ? (
-            <div className="px-3 py-3 text-xs text-muted italic">Loading usage…</div>
-          ) : !result.ok ? (
-            <div className="px-3 py-3 text-xs text-muted">
-              {result.reason === 'no-auth' && 'Sign in to Claude Code to see plan usage.'}
-              {result.reason === 'expired' && 'Sign-in expired — open a Claude Code session to refresh, then hit ↻.'}
-              {result.reason === 'network' && 'Offline — usage will update when the connection returns.'}
-              {result.reason === 'unknown' && (result.error || 'Usage unavailable right now.')}
-            </div>
-          ) : meters.length === 0 ? (
-            <div className="px-3 py-3 text-xs text-muted italic">No usage limits reported.</div>
-          ) : (
-            <div className="flex flex-col">
-              {sessionMeters.map((m) => <MeterRow key={m.key} meter={m} />)}
-              {weeklyMeters.length > 0 && (
-                <>
-                  {sessionMeters.length > 0 && <div className="mx-3 my-1 border-t border-border/50" />}
-                  <div className="px-3 pt-1 pb-0.5 text-[10px] uppercase tracking-wider text-subtle">Weekly limits</div>
-                  {weeklyMeters.map((m) => <MeterRow key={m.key} meter={m} />)}
-                </>
-              )}
-              <div className="px-3 pt-1.5 pb-0.5 flex items-center justify-between text-[10px] text-subtle">
-                <span>Updated {fetchedAgo(snapshot!.fetchedAt)}</span>
-                {loading && <span className="text-muted">refreshing…</span>}
-              </div>
-            </div>
-          )}
-        </div>
-      )}
+      {open && <div className="flex-1 min-h-0 overflow-y-auto border-t border-border/60 py-1" style={{ maxHeight: 'min(300px, 30vh)' }}>
+        {Object.entries(results).map(([provider, result]) => <div key={provider} data-testid={`usage-${provider.toLowerCase()}`} className="pb-1">
+          <div className="px-3 pt-2 pb-1 flex gap-2 text-[11px]"><strong>{provider}</strong><span className="text-muted">{result?.ok ? result.snapshot.plan : ''}</span></div>
+          {!result ? <div className="px-3 py-2 text-[11px] text-muted">Loading usage…</div>
+            : !result.ok ? <div className="px-3 py-2 text-[11px] text-muted">{result.error || `Sign in to ${provider} to see usage.`}</div>
+            : <>
+              {result.snapshot.meters.length ? result.snapshot.meters.map(meter => <MeterRow key={meter.key} meter={meter} />)
+                : <div className="px-3 py-2 text-[11px] text-muted">No usage limits reported.</div>}
+              <div className="px-3 py-1 text-[10px] text-subtle">Updated {fetchedAgo(result.snapshot.fetchedAt)}</div>
+            </>}
+        </div>)}
+      </div>}
     </div>
   );
 }

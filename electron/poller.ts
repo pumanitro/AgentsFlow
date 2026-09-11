@@ -273,6 +273,7 @@ const watchFailedAt = new Map<string, number>();
 const WATCH_RETRY_MS = 60_000;
 
 export function watchConversation(c: Conversation): void {
+  if (c.provider === 'codex') return;
   if (!c.daemonShort) return;
   if (watchers.has(c.id)) return;
   const failedAt = watchFailedAt.get(c.id);
@@ -411,8 +412,7 @@ async function fallbackTick(): Promise<void> {
 
 async function fallbackTickImpl(): Promise<void> {
   syncWatchers();
-  const convs = store.getConversations();
-  if (convs.length === 0) return;
+  if (!store.getConversations().some((c) => c.provider !== 'codex')) return;
 
   const listStart = Date.now();
   const result = await perf.timed('poll:listAgents', () => listAgentsResult());
@@ -426,6 +426,9 @@ async function fallbackTickImpl(): Promise<void> {
   const rows: ClaudeAgentJsonRow[] = result.rows;
   lastAgentRows = rows;
   const rowIndex = buildRowIndex(rows);
+  // Spawns and Codex events may mutate the store while the CLI list is in flight.
+  // Reconcile the current array so a stale poll cannot erase a new conversation.
+  const convs = store.getConversations();
 
   // Drop miss counters for conversations that no longer exist.
   const liveIds = new Set(convs.map((c) => c.id));
@@ -439,6 +442,7 @@ async function fallbackTickImpl(): Promise<void> {
   const changedRows: Conversation[] = [];
   let backfillsLeft = BACKFILL_PER_TICK;
   const updated = convs.map((c) => {
+    if (c.provider === 'codex') return c;
     // The indexed live-row lookup is O(1) and cheap, so we do it even for
     // terminal conversations: a FINISHED session that was re-opened (its daemon
     // is live again — now busy/waiting) must flip its dot back green→blue/amber,

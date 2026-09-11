@@ -11,6 +11,7 @@ import ShellArea, { appendShell, ShellNode } from '../components/ShellArea';
 import PaneErrorBoundary from '../components/PaneErrorBoundary';
 import paneLoading from '../components/PaneLoading';
 
+const CodexChat = dynamic(() => import('../components/CodexChat'), { ssr: false, loading: paneLoading('Codex') });
 const Terminal = dynamic(() => import('../components/Terminal'), { ssr: false, loading: paneLoading('terminal') });
 const FileTreeSidebar = dynamic(() => import('../components/FileTreeSidebar'), { ssr: false, loading: paneLoading('files') });
 const FileEditor = dynamic(() => import('../components/FileEditor'), { ssr: false, loading: paneLoading('editor') });
@@ -328,7 +329,7 @@ export default function SessionPage() {
                 </span>
                 <button
                   onClick={() => { if (child.sessionId) router.push({ pathname: '/session', query: { id: child.id } }); }}
-                  disabled={!child.sessionId}
+                  disabled={!child.sessionId && child.provider !== 'codex'}
                   className="shrink-0 text-[11px] uppercase tracking-wider px-2 py-0.5 rounded border border-border text-accent hover:bg-panel2 disabled:opacity-40 disabled:cursor-not-allowed"
                   title="Open the delegated peer and watch it live"
                 >
@@ -370,7 +371,7 @@ export default function SessionPage() {
         <div className="relative flex-1 bg-bg min-w-0">
           {/* Both panes stay mounted; toggling uses visibility so xterm size doesn't reset */}
           <div className={`absolute inset-0 ${rightPane === 'chat' ? 'visible' : 'invisible'}`}>
-            {conv?.sessionId ? (
+            {conv?.sessionId || conv?.provider === 'codex' ? (
               chatExited ? (
                 <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 px-6 text-center">
                   <div className="text-sm text-text">The chat terminal closed.</div>
@@ -397,7 +398,7 @@ export default function SessionPage() {
                 </div>
               ) : (
                 <PaneErrorBoundary key={chatGen} label="Terminal">
-                  <Terminal key={chatGen} conversationId={String(id)} baseDir={conv?.directoryPath} onExit={() => setChatExited(true)} autoFocus={rightPane === 'chat'} />
+                  {conv?.provider === 'codex' ? <CodexChat conversationId={String(id)} directoryPath={conv.directoryPath} /> : <Terminal key={chatGen} conversationId={String(id)} baseDir={conv?.directoryPath} onExit={() => setChatExited(true)} autoFocus={rightPane === 'chat'} />}
                 </PaneErrorBoundary>
               )
             ) : (

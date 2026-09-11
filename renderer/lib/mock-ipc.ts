@@ -343,10 +343,11 @@ export function createMockApi(): AgentsFlowApi {
     // Account pool. The browser demo has no keychain, so this is a static pool
     // that exercises the layout (active marker, per-account meters) without
     // pretending a switch is possible.
+    getCodexAccount: async () => ({ signedIn: true, email: 'demo@example.com', plan: 'pro', authType: 'chatgpt', usage: { ok: true, snapshot: { meters: [{ key: 'codex:primary', label: 'Codex · 5 hours', group: 'session', percent: 18, severity: 'normal', resetsAt: null, isActive: true }], plan: 'pro', fetchedAt: new Date().toISOString() } } }),
     listAccounts: async () => ({
       accounts: [
-        { id: 'acct-1', email: 'first@gmail.com', configDir: '/Users/demo/.agentsflow/accounts/first-a1b2c3', accountUuid: 'uuid-1', subscriptionType: 'max', addedAt: new Date(Date.now() - 12 * 864e5).toISOString() },
-        { id: 'acct-2', email: 'second@gmail.com', configDir: '/Users/demo/.agentsflow/accounts/second-d4e5f6', accountUuid: 'uuid-2', subscriptionType: 'max', addedAt: new Date(Date.now() - 3 * 864e5).toISOString() },
+        { id: 'acct-1', email: 'same@example.com', label: 'Personal', orgName: 'Personal', orgId: 'personal', configDir: '/Users/demo/.agentsflow/accounts/first-a1b2c3', accountUuid: 'uuid-1', subscriptionType: 'max', addedAt: new Date(Date.now() - 12 * 864e5).toISOString() },
+        { id: 'acct-2', email: 'same@example.com', label: 'Work', orgName: 'Example Company', orgId: 'work', configDir: '/Users/demo/.agentsflow/accounts/second-d4e5f6', accountUuid: 'uuid-2', subscriptionType: 'max', addedAt: new Date(Date.now() - 3 * 864e5).toISOString() },
       ],
       activeId: 'acct-1',
     }),
@@ -386,6 +387,10 @@ export function createMockApi(): AgentsFlowApi {
     onRotationStatus: () => () => undefined,
 
     listConversations: async () => state.conversations,
+    codexSnapshot: async () => { throw new Error('Codex requires the desktop app'); },
+    codexSend: async () => { throw new Error('Codex requires the desktop app'); },
+    codexReply: async () => {},
+    onCodexUpdated: () => () => {},
     spawnAgent: async (req: SpawnRequest) => {
       const dir = state.directories.find((d) => d.id === req.directoryId);
       if (!dir) throw new Error('directory not found');

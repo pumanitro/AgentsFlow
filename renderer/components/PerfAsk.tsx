@@ -15,8 +15,9 @@ import ImagePreviewModal from './ImagePreviewModal';
  * of them.
  */
 
-const MODELS = ['opus', 'fable', 'sonnet', 'haiku'] as const;
+const MODELS = ['claude:', 'codex:', 'opus', 'fable', 'sonnet', 'haiku'] as const;
 type ModelAlias = (typeof MODELS)[number];
+const modelLabel = (m: string) => m === 'codex:' ? 'Codex · default' : m === 'claude:' ? 'Claude · default' : `Claude · ${m}`;
 const MODEL_KEY = 'agentsflow:perf:askModel';
 const DIR_KEY = 'agentsflow:perf:askDir';
 
@@ -61,7 +62,7 @@ export default function PerfAsk({ dirs, defaultDir, rangeMin, rangeLabel, onSend
   const [previewing, setPreviewing] = useState<PastedImage | null>(null);
   const [busy, setBusy] = useState<null | 'report' | 'spawn'>(null);
   const [error, setError] = useState<string | null>(null);
-  const [model, setModel] = useState<ModelAlias>('opus');
+  const [model, setModel] = useState<ModelAlias>('claude:');
   const [dirId, setDirId] = useState<string | null>(defaultDir?.id ?? null);
   const [menu, setMenu] = useState<null | 'model' | 'dir'>(null);
   const menuRef = useRef<HTMLDivElement | null>(null);
@@ -253,11 +254,11 @@ export default function PerfAsk({ dirs, defaultDir, rangeMin, rangeLabel, onSend
               type="button"
               onClick={() => setMenu(menu === 'model' ? null : 'model')}
               className={`${btn} capitalize font-medium`}
-              title="Model the analysis session runs on (claude --model)"
+              title="Agent and model for the analysis"
               aria-haspopup="menu"
               aria-expanded={menu === 'model'}
             >
-              <span>{model}</span>
+              <span>{modelLabel(model)}</span>
               <span className="text-muted text-[9px]">▾</span>
             </button>
             {menu === 'model' && (
@@ -271,7 +272,7 @@ export default function PerfAsk({ dirs, defaultDir, rangeMin, rangeLabel, onSend
                     className={`w-full text-left pl-2 pr-4 py-1.5 text-[11px] capitalize flex items-center gap-1.5 ${m === model ? 'bg-accent text-bg' : 'text-text hover:bg-panel'}`}
                   >
                     <span className="w-3 shrink-0 text-center">{m === model ? '✓' : ''}</span>
-                    <span>{m}</span>
+                    <span>{modelLabel(m)}</span>
                   </button>
                 ))}
               </div>
