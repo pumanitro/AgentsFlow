@@ -574,7 +574,9 @@ export default function Home() {
     awaitingNewConvRef.current = new Set(
       pinnedItems.filter((it) => it.kind === 'conversation').map((it) => it.id),
     );
-    await api().spawnAgent({ directoryId: dir.id, prompt, attachments, model });
+    const provider = model?.startsWith('codex:') ? 'codex' : 'claude';
+    const selectedModel = model?.includes(':') ? model.split(':').slice(1).join(':') || undefined : model;
+    await api().spawnAgent({ directoryId: dir.id, prompt, attachments, model: selectedModel, provider });
     const c = await api().listConversations();
     setConvs(c);
   };

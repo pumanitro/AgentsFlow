@@ -38,6 +38,8 @@ export interface PeerInfo {
   path: string;
   exists: boolean;
   hasClaudeMd: boolean;
+  hasAgentsMd: boolean;
+  hasCodexConfig: boolean;
   // A project-level `.mcp.json` means this peer wires up its own MCP
   // connections (Slack, Gmail, …) — the capabilities a delegated sub-session
   // would inherit by running rooted there.
@@ -66,7 +68,7 @@ export const TOOL_DEFS = [
     name: 'delegate',
     title: 'Delegate work to a peer',
     description:
-      "Ask another peer (a tracked directory) to deliver something for you. Spawns a fresh Claude session rooted in that peer's directory (so it inherits that peer's skills and MCP connections, e.g. its Slack), runs your goal to completion, and returns a structured result you can rely on. The peer shares NONE of your conversation context, so make `goal` fully self-contained and state the exact `deliverable` you need back.",
+      "Ask another peer (a tracked directory) to deliver something for you. Spawns a fresh Claude or Codex session rooted in that peer's directory (so it inherits that peer's skills and MCP connections, e.g. its Slack), runs your goal to completion, and returns a structured result you can rely on. The peer shares NONE of your conversation context, so make `goal` fully self-contained and state the exact `deliverable` you need back.",
     usage: 'delegate({ directory, goal, deliverable?, timeout_ms? })',
     inputSchema: {
       type: 'object',
@@ -75,6 +77,7 @@ export const TOOL_DEFS = [
           type: 'string',
           description: 'Which peer to delegate to: its name (e.g. "arrow"), its absolute path, or its id — as shown by list_peers.',
         },
+        provider: { type: 'string', enum: ['claude', 'codex'], description: 'Agent to run the goal. Omit to use the calling conversation’s provider.' },
         goal: {
           type: 'string',
           description: 'A self-contained brief of what you need done and why. The peer has none of your conversation context — spell out everything it needs.',
@@ -182,18 +185,19 @@ export function readProjectSkills(dirPath: string): PeerSkill[] {
   };
   walk(commandsDir, '');
 
-  const skillsDir = path.join(claudeDir, 'skills');
-  let skillEntries: fs.Dirent[] = [];
-  try {
-    skillEntries = fs.readdirSync(skillsDir, { withFileTypes: true });
-  } catch {
-    /* no skills dir */
-  }
-  for (const ent of skillEntries) {
-    if (!ent.isDirectory()) continue;
-    const skillFile = path.join(skillsDir, ent.name, 'SKILL.md');
-    if (!fs.existsSync(skillFile)) continue;
-    out.push({ name: ent.name, description: describeMarkdown(skillFile), kind: 'skill' });
+  for (const skillsDir of [path.join(claudeDir, 'skills'), path.join(dirPath, '.agents', 'skills')]) {
+    let skillEntries: fs.Dirent[] = [];
+    try {
+      skillEntries = fs.readdirSync(skillsDir, { withFileTypes: true });
+    } catch {
+      /* no skills dir */
+    }
+    for (const ent of skillEntries) {
+      if (!ent.isDirectory() && !ent.isSymbolicLink()) continue;
+      const skillFile = path.join(skillsDir, ent.name, 'SKILL.md');
+      if (!fs.existsSync(skillFile)) continue;
+      if (!out.some((s) => s.name === ent.name && s.kind === 'skill')) out.push({ name: ent.name, description: describeMarkdown(skillFile), kind: 'skill' });
+    }
   }
 
   out.sort((a, b) => a.name.localeCompare(b.name));
@@ -215,6 +219,8 @@ export function buildPeerInfo(dir: TrackedDirectory): PeerInfo {
     path: dir.path,
     exists,
     hasClaudeMd,
+    hasAgentsMd: exists && fs.existsSync(path.join(dir.path, 'AGENTS.md')),
+    hasCodexConfig: exists && fs.existsSync(path.join(dir.path, '.codex', 'config.toml')),
     hasProjectMcp,
     skills: exists ? readProjectSkills(dir.path) : [],
   };
@@ -253,7 +259,7 @@ export function renderBootstrapPrompt(reg: Registry): string {
   lines.push('# Peers Flow — your peers & delegation');
   lines.push('');
   lines.push(
-    'This Claude session runs inside **Peers Flow**, which tracks several project directories. In Peers Flow each tracked directory is a **peer**: a sibling agent rooted in its own directory, with its own skills and MCP connections (Slack, Gmail, …). A peer is NOT one of your subagents — it is a lateral collaborator you can delegate to and rely on.',
+    'This agent session runs inside **Peers Flow**, which tracks several project directories. In Peers Flow each tracked directory is a **peer**: a sibling agent rooted in its own directory, with its own skills and MCP connections (Slack, Gmail, …). A peer is NOT one of your subagents — it is a lateral collaborator you can delegate to and rely on.',
   );
   lines.push('');
   lines.push(`## Your peers (live as of ${reg.generatedAt})`);
@@ -268,11 +274,13 @@ export function renderBootstrapPrompt(reg: Registry): string {
   }
   lines.push('');
   lines.push('## How to collaborate');
+  lines.push('Before project work, follow AGENTS.md. If the directory has only CLAUDE.md, read and follow that file as the repository guidance. Each provider uses its own configured connections; a configuration file is not proof of authentication.');
+  lines.push('Directory instructions and user approvals still apply. Connections do not grant permission to send messages or change external state. Tool prefixes differ between hosts; use the peersflow tools as exposed by your runtime.');
   lines.push(
     `- Call \`${qualifiedToolName('list_peers')}\` any time to refresh this list — the user adds/removes directories during a session.`,
   );
   lines.push(
-    `- Call \`${qualifiedToolName('delegate')}\` when a task needs another peer's capability (e.g. its Slack connection) or work done inside it. It spawns a fresh Claude rooted in that peer's directory, runs your goal to completion, and returns a structured result.`,
+    `- Call \`${qualifiedToolName('delegate')}\` when a task needs another peer's capability (e.g. its Slack connection) or work done inside it. It spawns a fresh agent (use provider: claude or codex to choose) rooted in that peer's directory, runs your goal to completion, and returns a structured result.`,
   );
   lines.push(
     '- The peer shares **none** of your context: make the `goal` self-contained and state the exact `deliverable` you need back.',
@@ -305,7 +313,9 @@ export function renderRegistryMarkdown(reg: Registry): string {
     lines.push(`- path: \`${p.path}\`${p.exists ? '' : ' (⚠️ missing)'}`);
     lines.push(`- delegate with: \`directory: "${p.displayName}"\``);
     if (p.hasProjectMcp) lines.push('- has its own MCP connections (`.mcp.json`)');
-    if (p.hasClaudeMd) lines.push('- has project instructions (`CLAUDE.md`)');
+    if (p.hasClaudeMd) lines.push('- Claude instructions: `CLAUDE.md`');
+    if (p.hasAgentsMd) lines.push('- Codex instructions: `AGENTS.md`');
+    if (p.hasCodexConfig) lines.push('- Codex project configuration: `.codex/config.toml`');
     if (p.skills.length > 0) {
       lines.push('- exposes:');
       for (const s of p.skills) {
@@ -327,6 +337,8 @@ export function renderRegistryMarkdown(reg: Registry): string {
 export function buildDelegatePrompt(goal: string, deliverable: string): string {
   const parts = [
     'You are being delegated a task by another Peers Flow agent (a "peer"). You share none of its context, so treat this brief as complete and self-contained.',
+    '',
+    'Follow AGENTS.md in your directory. If it is absent, read CLAUDE.md before doing project work.',
     '',
     '## Goal',
     goal,

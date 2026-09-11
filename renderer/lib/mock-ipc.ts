@@ -386,6 +386,10 @@ export function createMockApi(): AgentsFlowApi {
     onRotationStatus: () => () => undefined,
 
     listConversations: async () => state.conversations,
+    codexSnapshot: async () => { throw new Error('Codex requires the desktop app'); },
+    codexSend: async () => { throw new Error('Codex requires the desktop app'); },
+    codexReply: async () => {},
+    onCodexUpdated: () => () => {},
     spawnAgent: async (req: SpawnRequest) => {
       const dir = state.directories.find((d) => d.id === req.directoryId);
       if (!dir) throw new Error('directory not found');

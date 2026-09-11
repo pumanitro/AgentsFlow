@@ -143,7 +143,7 @@ export default function UsagePanel() {
           title={open ? 'Hide usage' : 'Show plan usage limits'}
         >
           <span className="text-muted text-[10px] w-3 shrink-0">{open ? '▼' : '▶'}</span>
-          <span className="text-[11px] uppercase tracking-wider text-text font-semibold">Usage</span>
+          <span className="text-[11px] uppercase tracking-wider text-text font-semibold">Claude usage</span>
           {snapshot?.plan && (
             <span className="text-[10px] text-muted truncate">{snapshot.plan}</span>
           )}

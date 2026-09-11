@@ -11,6 +11,7 @@ import ShellArea, { appendShell, ShellNode } from '../components/ShellArea';
 import PaneErrorBoundary from '../components/PaneErrorBoundary';
 import paneLoading from '../components/PaneLoading';
 
+const CodexChat = dynamic(() => import('../components/CodexChat'), { ssr: false, loading: paneLoading('Codex') });
 const Terminal = dynamic(() => import('../components/Terminal'), { ssr: false, loading: paneLoading('terminal') });
 const FileTreeSidebar = dynamic(() => import('../components/FileTreeSidebar'), { ssr: false, loading: paneLoading('files') });
 const FileEditor = dynamic(() => import('../components/FileEditor'), { ssr: false, loading: paneLoading('editor') });
@@ -397,7 +398,7 @@ export default function SessionPage() {
                 </div>
               ) : (
                 <PaneErrorBoundary key={chatGen} label="Terminal">
-                  <Terminal key={chatGen} conversationId={String(id)} baseDir={conv?.directoryPath} onExit={() => setChatExited(true)} autoFocus={rightPane === 'chat'} />
+                  {conv?.provider === 'codex' ? <CodexChat conversationId={String(id)} directoryPath={conv.directoryPath} /> : <Terminal key={chatGen} conversationId={String(id)} baseDir={conv?.directoryPath} onExit={() => setChatExited(true)} autoFocus={rightPane === 'chat'} />}
                 </PaneErrorBoundary>
               )
             ) : (

@@ -95,6 +95,12 @@ function migrateConversation(c: any): Conversation {
   if (/^agentsflow:[0-9a-f]+$/i.test(title)) title = '';
   return {
     id: c.id,
+    provider: c.provider === 'codex' ? 'codex' : 'claude',
+    model: typeof c.model === 'string' ? c.model : undefined,
+    lastResult: typeof c.lastResult === 'string' ? c.lastResult : undefined,
+    attachments: Array.isArray(c.attachments) ? c.attachments : [],
+    forkFromSessionId: typeof c.forkFromSessionId === 'string' ? c.forkFromSessionId : undefined,
+    worktreePath: typeof c.worktreePath === 'string' ? c.worktreePath : undefined,
     sessionId: c.sessionId ?? '',
     daemonShort: c.daemonShort ?? '',
     sessionName: c.sessionName ?? '',

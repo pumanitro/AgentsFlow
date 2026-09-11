@@ -2,6 +2,14 @@ import { contextBridge, ipcRenderer, IpcRendererEvent } from 'electron';
 import type { AccountsSnapshot, AgentsFlowApi, Conversation, OpenFileNavPayload, PinnedDivider, PinnedItemRef, PinnedTodo, RotationStatus, SpawnRequest } from '../shared/types';
 
 const api: AgentsFlowApi = {
+  codexSnapshot: (id, older) => ipcRenderer.invoke('codex:snapshot', id, older),
+  codexSend: (id, prompt, images) => ipcRenderer.invoke('codex:send', id, prompt, images),
+  codexReply: (id, requestId, reply) => ipcRenderer.invoke('codex:reply', id, requestId, reply),
+  onCodexUpdated: (cb) => {
+    const listener = (_e: IpcRendererEvent, snapshot: import('../shared/codex').CodexSnapshot) => cb(snapshot);
+    ipcRenderer.on('codex:updated', listener);
+    return () => ipcRenderer.removeListener('codex:updated', listener);
+  },
   listDirectories: () => ipcRenderer.invoke('dirs:list'),
   addDirectory: () => ipcRenderer.invoke('dirs:add'),
   removeDirectory: (id) => ipcRenderer.invoke('dirs:remove', id),

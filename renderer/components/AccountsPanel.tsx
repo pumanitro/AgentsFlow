@@ -557,7 +557,7 @@ export default function AccountsPanel() {
           title={open ? 'Hide accounts' : 'Show the account pool'}
         >
           <span className="text-muted text-[10px] w-3 shrink-0">{open ? '▼' : '▶'}</span>
-          <span className="text-[11px] uppercase tracking-wider text-text font-semibold">Accounts</span>
+          <span className="text-[11px] uppercase tracking-wider text-text font-semibold">Claude accounts</span>
           <span
             className={`text-[10px] text-muted truncate ${masked && activeAccount ? 'select-none' : ''}`}
             style={masked && activeAccount ? MASK : undefined}

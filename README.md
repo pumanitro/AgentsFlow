@@ -2,9 +2,21 @@
 
 ![Peers Flow — tracked peers, a rotating account pool with live plan-usage meters, and pinned conversations grouped under separators](./assets/screenshots/peers-flow.png)
 
-Electron + Next.js desktop UI for **Claude Code's background agents** — track the sessions this app launches, treat them like a to-do list, inspect each one's working tree without leaving the window, and let your agents **delegate work to one another across directories**.
+Electron + Next.js desktop UI for **Claude Code and Codex agents** — track the sessions this app launches, treat them like a to-do list, inspect each one's working tree without leaving the window, and let your agents **delegate work to one another across directories**.
 
 > Status: early. Built against Claude Code CLI **v2.1.139+** (`claude agents` / `claude --bg`).
+
+## Codex support
+
+This contribution branch adds Codex alongside Claude. Choose the provider in the
+composer; Codex uses your existing CLI sign-in and configured model, with an optional
+model override. Chats keep running while you browse other peers, and support streamed
+responses, approvals, stop, saved history, and forks. The `delegate` tool accepts
+`provider: "claude"` or `provider: "codex"`; omitting it inherits the caller's provider.
+
+See [CODEX.md](CODEX.md) for setup, architecture, verification, and current limits.
+Claude's terminal workflow remains available. The account pool, usage meters, and
+per-agent performance breakdown describe Claude.
 
 ## Why
 
@@ -59,8 +71,9 @@ Every process is billed to its nearest `claude` ancestor, so a delegated peer se
 
 ## Requirements
 
-- Node 18+
-- Claude Code CLI v2.1.139+ on `$PATH` (`claude --version`)
+- Node 20+
+- Claude Code CLI v2.1.139+ for Claude agents (`claude --version`)
+- Codex CLI 0.154.0+ for Codex agents (`codex --version`; `codex login` if needed)
 - macOS (the only platform tested so far)
 
 ## Develop

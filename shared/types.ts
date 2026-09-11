@@ -1,3 +1,5 @@
+export type AgentProvider = 'claude' | 'codex';
+
 export interface TrackedDirectory {
   id: string;
   path: string;
@@ -7,6 +9,9 @@ export interface TrackedDirectory {
 
 // test
 export interface Conversation {
+  provider?: AgentProvider; // Missing on legacy records means Claude.
+  model?: string;
+  lastResult?: string;
   id: string;
   sessionId: string;
   daemonShort: string;
@@ -106,6 +111,7 @@ export interface SlashCommand {
 }
 
 export interface SpawnRequest {
+  provider?: AgentProvider;
   directoryId: string;
   prompt: string;
   attachments?: string[];
@@ -159,8 +165,8 @@ export interface McpPeerSummary {
 /**
  * Liveness of the delegation bridge — the unix-domain socket the MCP server
  * calls back on to spawn *tracked, watchable* peer sessions. When it is down,
- * `delegate` silently degrades to a headless `claude -p` (no sub-peer row, not
- * watchable), so the UI surfaces this so a dead bridge is never invisible.
+ * `delegate` returns an explicit failure. The UI surfaces a dead bridge instead
+ * of silently launching duplicate, untracked work.
  */
 export interface BridgeHealth {
   socketPath: string;
@@ -605,6 +611,10 @@ export interface AgentsFlowApi {
   onRotationStatus: (cb: (status: RotationStatus) => void) => () => void;
 
   listConversations: () => Promise<Conversation[]>;
+  codexSnapshot: (id: string, older?: boolean) => Promise<import('./codex').CodexSnapshot>;
+  codexSend: (id: string, prompt: string, images?: string[]) => Promise<void>;
+  codexReply: (id: string, requestId: string | number, reply: import('./codex').CodexReply) => Promise<void>;
+  onCodexUpdated: (cb: (snapshot: import('./codex').CodexSnapshot) => void) => () => void;
   spawnAgent: (req: SpawnRequest) => Promise<SpawnResult>;
   // Branches a copy of an existing conversation's session (`--fork-session`):
   // full history, new session id, independent from the original — the escape
