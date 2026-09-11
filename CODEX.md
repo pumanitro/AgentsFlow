@@ -33,6 +33,23 @@ can select an existing separate data directory for tests. Do not point two runni
 instances at the same store. Repository-specific setup notes belong in the ignored
 `SETUP.local.md`; never commit user paths, account data, or sessions.
 
+## Accounts and usage
+
+The **Accounts** and **Usage** panels show Claude and Codex separately within the
+same sidebar sections. Codex displays the current CLI login, subscription, and
+live quota windows. Codex account switching/rotation is not part of the Claude pool.
+
+Use **Add Claude account**, enter the email and an optional label such as Personal
+or Work, and complete the browser sign-in. Select the intended personal subscription
+or organization. Multiple memberships may use the same email and Anthropic account
+UUID; each organization gets a separate entry and credential vault. Adding an already
+saved membership is rejected without changing the existing vault. Existing vault
+paths remain unchanged. Labels, organization names, and plans distinguish the rows.
+
+Adding a membership does not switch the current login. Click its row to switch;
+with two saved Claude memberships, enable automatic switching if desired. Switching
+changes the machine's Claude CLI login, including Claude sessions outside Peers Flow.
+
 ## Conversations and peers
 
 - Open a pinned Codex row for its chat, file tree, editor, and shell. Leaving the chat
@@ -79,6 +96,15 @@ and [CLI options](https://learn.chatgpt.com/docs/cli/reference).
 
 ## Verification — 2026-09-11
 
+The account update passes 296 tests, including Keychain credential isolation across
+organizations belonging to one account UUID, duplicate membership rejection, unique
+vaults for repeated emails, and Codex account/usage parsing. A desktop check accepted
+another login attempt for an existing email and cancelled it without touching saved
+memberships. Claude and Codex each completed a live test reply. Codex account/usage
+reads succeeded; Claude's usage endpoint returned HTTP 429 during that check, while
+its session authentication continued to work.
+
+
 Verified on macOS arm64, Node 24.18.0, Electron 32.3.3, Claude Code 2.1.268, and Codex
 0.154.0. The production renderer and Electron builds pass. Automated tests cover
 concurrent conversations, approval ownership, stale requests, interruption, history,
@@ -94,8 +120,8 @@ Live desktop checks covered:
 
 ## Current limits and inherited maintenance
 
-- Claude's account pool/rotation, usage meters, and per-conversation performance
-  attribution remain Claude features. Machine totals include all processes.
+- Account pool/rotation and per-conversation performance attribution remain
+  Claude features. Both providers have current-login usage meters. Machine totals include all processes.
 - Codex uses a native chat view; it is not the Codex terminal UI. Terminal slash
   commands such as `/model` are not interpreted. Set a model in the initial composer.
 - Codex project/worktree directory changes are not yet reflected automatically in the

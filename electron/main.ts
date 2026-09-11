@@ -90,6 +90,8 @@ const codex = new CodexAgents({
   },
 });
 
+ipcMain.handle('codex:account', (_e, force?: boolean) => codex.accountStatus(Boolean(force)));
+
 ipcMain.handle('codex:snapshot', (_e, id: string, older?: boolean) => codex.snapshot(id, older));
 ipcMain.handle('codex:send', (_e, id: string, prompt: string, images?: string[]) => codex.send(id, prompt, images));
 ipcMain.handle('codex:reply', (_e, id: string, requestId: string | number, reply: CodexReply) => codex.reply(id, requestId, reply));
@@ -679,17 +681,13 @@ const credentialSyncDeps: accounts.SyncDeps = {
 
 ipcMain.handle('accounts:list', () => accountsSnapshot());
 
-ipcMain.handle('accounts:add', (_e, email: string): AddAccountResult => {
+ipcMain.handle('accounts:add', (_e, email: string, label?: string): AddAccountResult => {
   const trimmed = (email ?? '').trim();
   if (!accounts.isEmailAddress(trimmed)) {
     return { ok: false, error: 'Enter an email address (…@gmail.com, or your work domain).' };
   }
-  const existing = store.getAccounts();
-  if (existing.some((a) => a.email.toLowerCase() === trimmed.toLowerCase())) {
-    return { ok: false, error: `${trimmed} is already in the pool.` };
-  }
   try {
-    const entry = accounts.beginAdd(trimmed);
+    const entry = accounts.beginAdd(trimmed, label);
     // Queue the one-time login so it starts the moment the terminal attaches.
     pty.queueShellCommand(entry.shellId, accounts.loginCommandFor(entry.configDir, entry.email));
     return { ok: true, pendingId: entry.pendingId, shellId: entry.shellId, email: entry.email, cwd: os.homedir() };
@@ -707,8 +705,7 @@ ipcMain.handle('accounts:probe', async (_e, pendingId: string): Promise<ProbeAcc
     // nobody is active until the user switched to the account they are already on.
     if (
       !store.getActiveAccountId() &&
-      result.account.accountUuid &&
-      result.account.accountUuid === accounts.currentLoginAccountUuid()
+      accounts.isCurrentMembership(result.account)
     ) {
       store.setActiveAccountId(result.account.id);
     }

@@ -23,8 +23,9 @@ const api: AgentsFlowApi = {
   getPerfHistory: () => ipcRenderer.invoke('perf:history'),
   savePerfReport: (rangeMin: number) => ipcRenderer.invoke('perf:report', rangeMin),
 
+  getCodexAccount: (force) => ipcRenderer.invoke('codex:account', force),
   listAccounts: () => ipcRenderer.invoke('accounts:list'),
-  addAccount: (email) => ipcRenderer.invoke('accounts:add', email),
+  addAccount: (email, label) => ipcRenderer.invoke('accounts:add', email, label),
   probeAccount: (pendingId) => ipcRenderer.invoke('accounts:probe', pendingId),
   cancelAddAccount: (pendingId) => ipcRenderer.invoke('accounts:cancelAdd', pendingId),
   removeAccount: (id) => ipcRenderer.invoke('accounts:remove', id),

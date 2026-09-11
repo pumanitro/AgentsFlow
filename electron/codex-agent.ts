@@ -1,3 +1,4 @@
+import { CodexAccountReader } from './codex-account';
 import type { Conversation } from '../shared/types';
 import type { CodexEntry, CodexReply, CodexRequest, CodexSnapshot } from '../shared/codex';
 import { CodexRpc, WireObject } from './codex-protocol';
@@ -45,10 +46,16 @@ export class CodexAgents {
   private loading = new Map<string, Promise<Session>>();
   private timers = new Map<string, NodeJS.Timeout>();
 
+  private accountReader: CodexAccountReader;
+  accountStatus(force = false) { return this.accountReader.read(force); }
+
   constructor(private deps: Dependencies, private rpc = new CodexRpc()) {
+    this.accountReader = new CodexAccountReader(rpc);
+    rpc.on('notification', (m) => { if (m.method === 'account/updated') this.accountReader.invalidate(); });
     rpc.on('notification', (m) => this.notification(m));
     rpc.on('request', (m) => this.serverRequest(m));
     rpc.on('disconnected', (error: Error) => {
+      this.accountReader.invalidate();
       if (this.closing) return;
       for (const [id, s] of this.sessions) {
         s.snapshot.requests = []; s.rawRequests.clear();

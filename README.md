@@ -15,7 +15,7 @@ responses, approvals, stop, saved history, and forks. The `delegate` tool accept
 `provider: "claude"` or `provider: "codex"`; omitting it inherits the caller's provider.
 
 See [CODEX.md](CODEX.md) for setup, architecture, verification, and current limits.
-Claude's terminal workflow remains available. The account pool, usage meters, and
+Claude's terminal workflow remains available. The account pool and
 per-agent performance breakdown describe Claude.
 
 ## Why

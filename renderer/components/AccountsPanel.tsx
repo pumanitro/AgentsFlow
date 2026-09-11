@@ -3,7 +3,7 @@ import { createPortal } from 'react-dom';
 import dynamic from 'next/dynamic';
 import { api } from '../lib/ipc';
 import type { CSSProperties, ReactNode } from 'react';
-import type { Account, AccountsSnapshot, RotationPolicy, RotationStatus, UsageMeter, UsageResult } from '../../shared/types';
+import type { Account, AccountsSnapshot, CodexAccountStatus, RotationPolicy, RotationStatus, UsageMeter, UsageResult } from '../../shared/types';
 import { worstMeter } from '../../shared/usage';
 
 const Terminal = dynamic(() => import('./Terminal'), { ssr: false });
@@ -213,7 +213,7 @@ function AccountRow({
         title={
           account.needsLogin
             ? (masked ? 'This account was signed out by the server — remove it and add it again' : account.needsLogin)
-            : active ? 'This account is signed in' : masked ? 'Switch to this account' : `Switch to ${account.email}`
+            : active ? 'This account is signed in' : masked ? 'Switch to this account' : `Switch to ${account.label || account.orgName || account.email}`
         }
       >
         <div className="flex items-baseline gap-1.5">
@@ -247,6 +247,11 @@ function AccountRow({
             </span>
           ) : null}
         </div>
+        <div className={`mt-0.5 text-[10px] text-muted truncate ${masked ? 'select-none' : ''}`} style={masked ? MASK : undefined}>
+          Claude · {account.label || account.orgName || (account.orgId ? `Organization ${account.orgId.slice(0, 8)}` : 'Saved account')}
+          {account.label && account.orgName && account.label.toLowerCase() !== account.orgName.toLowerCase() ? ` · ${account.orgName}` : ''}
+          {account.subscriptionType ? ` · ${account.subscriptionType}` : ''}
+        </div>
         <div className="mt-1 h-1 rounded-full overflow-hidden" style={{ backgroundColor: 'rgba(255,255,255,0.08)' }}>
           <div
             className="h-full rounded-full"
@@ -258,8 +263,8 @@ function AccountRow({
         onClick={onRemove}
         disabled={busy}
         className="shrink-0 opacity-0 group-hover:opacity-100 text-subtle hover:text-danger px-1 rounded disabled:opacity-30"
-        title={masked ? 'Remove this account from the pool' : `Remove ${account.email} from the pool`}
-        aria-label={masked ? 'Remove this account' : `Remove ${account.email}`}
+        title={masked ? 'Remove this account from the pool' : `Remove ${account.label || account.orgName || account.email} from the pool`}
+        aria-label={masked ? 'Remove this account' : `Remove ${account.label || account.orgName || account.email}`}
       >
         ✕
       </button>
@@ -303,7 +308,7 @@ function AddAccountModal({
         if (stop) return;
         if (r.status === 'ok') {
           settled.current = true;
-          setSignedIn(r.account.email);
+          setSignedIn([r.account.label || r.account.orgName, r.account.email, r.account.subscriptionType].filter(Boolean).join(' · '));
         } else if (r.status === 'mismatch' || r.status === 'duplicate') {
           settled.current = true;
           setError(r.error);
@@ -358,7 +363,8 @@ function AddAccountModal({
               <p className="mt-1 text-[11px] text-warning leading-relaxed">
                 Your browser can only hold one claude.ai session, so if you are already signed in as
                 another account, use an incognito window or a separate Chrome profile — otherwise
-                this will authorise the account you are already signed in as.
+                this will authorise the account you are already signed in as. For memberships sharing
+                an email, choose the intended organization or personal subscription during sign-in.
               </p>
             </>
           )}
@@ -416,6 +422,8 @@ export default function AccountsPanel() {
   const [usageById, setUsageById] = useState<Record<string, UsageResult>>({});
   const [adding, setAdding] = useState(false);
   const [email, setEmail] = useState('');
+  const [label, setLabel] = useState('');
+  const [codex, setCodex] = useState<CodexAccountStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [repairing, setRepairing] = useState(false);
@@ -423,6 +431,13 @@ export default function AccountsPanel() {
   const [policy, setPolicy] = useState<RotationPolicy>({ enabled: false, threshold: 95, resumeOnLimit: true });
   const [rotationStatus, setRotationStatus] = useState<RotationStatus | null>(null);
   const mounted = useRef(true);
+
+  useEffect(() => {
+    let stopped = false;
+    const load = async () => { try { const value = await api().getCodexAccount(); if (!stopped) setCodex(value); } catch { /* unavailable on older preloads */ } };
+    void load(); const timer = setInterval(load, 60_000);
+    return () => { stopped = true; clearInterval(timer); };
+  }, []);
 
   const unavailable = typeof api().listAccounts !== 'function';
 
@@ -491,20 +506,21 @@ export default function AccountsPanel() {
     setError(null);
     setBusy(true);
     try {
-      const r = await api().addAccount(email);
+      const r = await api().addAccount(email, label);
       if (!r.ok) {
         setError(r.error);
         return;
       }
       setPending({ pendingId: r.pendingId, shellId: r.shellId, email: r.email, cwd: r.cwd });
       setEmail('');
+      setLabel('');
       setAdding(false);
     } catch (err) {
       setError((err as Error)?.message ?? 'Could not start the sign-in.');
     } finally {
       setBusy(false);
     }
-  }, [email]);
+  }, [email, label]);
 
   const switchTo = useCallback(async (id: string) => {
     setError(null);
@@ -557,15 +573,15 @@ export default function AccountsPanel() {
           title={open ? 'Hide accounts' : 'Show the account pool'}
         >
           <span className="text-muted text-[10px] w-3 shrink-0">{open ? '▼' : '▶'}</span>
-          <span className="text-[11px] uppercase tracking-wider text-text font-semibold">Claude accounts</span>
+          <span className="text-[11px] uppercase tracking-wider text-text font-semibold">Accounts</span>
           <span
             className={`text-[10px] text-muted truncate ${masked && activeAccount ? 'select-none' : ''}`}
             style={masked && activeAccount ? MASK : undefined}
           >
-            {activeAccount ? activeAccount.email : snapshot.accounts.length === 0 ? 'none yet' : 'current login'}
+            {snapshot.accounts.length > 0 ? `${snapshot.accounts.length} Claude` : ''}{codex?.signedIn ? ' · Codex' : ''}
           </span>
         </button>
-        {snapshot.accounts.length > 0 && (
+        {(snapshot.accounts.length > 0 || codex?.signedIn) && (
           <button
             onClick={() => setMasked(!masked)}
             className={`shrink-0 p-0.5 rounded ${masked ? 'text-info' : 'text-subtle hover:text-text'}`}
@@ -600,8 +616,8 @@ export default function AccountsPanel() {
             <div className="flex flex-col">
               {snapshot.accounts.length === 0 && (
                 <div className="px-3 py-2 text-[11px] text-muted leading-relaxed">
-                  Add the accounts you want to rotate between — personal or work domain. Each signs
-                  in once; switching after that never opens a browser.
+                  Add Claude memberships to switch or rotate between them. Personal and work
+                  memberships can share an email. Your current CLI login is used until you switch.
                 </div>
               )}
               {snapshot.accounts.map((account) => (
@@ -717,10 +733,25 @@ export default function AccountsPanel() {
                 </div>
               )}
 
+              <div className="mx-3 my-2 border-t border-border/50" />
+              <div className="px-3 py-1.5" data-testid="codex-account">
+                <div className="flex items-center gap-2 text-[11px]"><strong>Codex</strong>
+                  {codex?.signedIn && <span className="text-info text-[9px] uppercase">current</span>}
+                  <span className="text-muted">{codex?.plan}</span>
+                </div>
+                <div className={`text-[12px] text-text truncate ${masked ? 'select-none' : ''}`} style={masked ? MASK : undefined}>
+                  {!codex ? 'Checking sign-in…' : codex.signedIn ? codex.email || codex.authType || 'Connected' : codex.error || 'Not signed in'}
+                </div>
+                <div className="text-[10px] text-muted mt-0.5">Uses the current Codex CLI login.</div>
+              </div>
               <div className="px-3 pt-1.5 pb-1">
                 {adding ? (
-                  <div className="flex items-center gap-1.5">
+                  <div className="flex flex-col gap-1.5">
+                    <input aria-label="Account label" value={label} onChange={(e) => setLabel(e.target.value)}
+                      placeholder="Label (e.g. Personal or Abilitie)" maxLength={80}
+                      className="w-full bg-panel2 border border-border rounded px-2 py-1 text-[12px] text-text placeholder:text-subtle" />
                     <input
+                      aria-label="Claude email"
                       autoFocus
                       value={email}
                       onChange={(e) => setEmail(e.target.value)}
@@ -744,7 +775,7 @@ export default function AccountsPanel() {
                     onClick={() => { setAdding(true); setError(null); }}
                     className="w-full text-left text-[11px] text-muted hover:text-text py-0.5"
                   >
-                    + Add account
+                    + Add Claude account
                   </button>
                 )}
               </div>

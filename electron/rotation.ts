@@ -300,7 +300,7 @@ export async function runOnce(
       if (urgent && activeId) provenFullAt.set(activeId, now());
       unreadableSince = 0;
       unreadableReason = '';
-      setStatus(deps, { lastEvent: `Switched to ${target.email} — ${decision.reason}`, disabledReason: null });
+      setStatus(deps, { lastEvent: `Switched to ${target.label || target.orgName || target.email} — ${decision.reason}`, disabledReason: null });
       return { switched: true, account: target, reason: decision.reason };
     } catch (err) {
       consecutiveFailures += 1;

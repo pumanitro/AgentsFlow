@@ -402,8 +402,9 @@ const freshenDistrustedAt = new Map<string, number>();
  * every case a caller's `activeId` could be wrong about.
  */
 async function holdsMainSlot(account: Account, creds: OAuthCredentials): Promise<boolean> {
-  const signedInAs = cachedLoginAccountUuid();
-  if (signedInAs && account.accountUuid === signedInAs) return true;
+  const signedInAs = cachedLoginIdentity();
+  if (signedInAs.accountUuid && signedInAs.accountUuid === account.accountUuid &&
+      compareMembership(signedInAs, account) !== 'different') return true;
   return sameCreds(parseOAuth(await readSlotRaw(MAIN_SERVICE)), creds);
 }
 
@@ -418,8 +419,7 @@ async function holdsMainSlot(account: Account, creds: OAuthCredentials): Promise
  * mistaken for a standby one.
  */
 export function provablyNotTheLogin(account: Account): boolean {
-  const signedInAs = cachedLoginAccountUuid();
-  return Boolean(signedInAs && account.accountUuid && account.accountUuid !== signedInAs);
+  return compareMembership(cachedLoginIdentity(), account) === 'different';
 }
 
 export interface FreshenOptions {
@@ -618,6 +618,7 @@ export interface AuthStatus {
   loggedIn: boolean;
   email?: string;
   orgId?: string;
+  orgName?: string;
   subscriptionType?: string;
 }
 
@@ -625,9 +626,10 @@ export function parseAuthStatus(stdout: string): AuthStatus {
   try {
     const j = JSON.parse(stdout.trim());
     return {
-      loggedIn: Boolean(j?.loggedIn),
+      loggedIn: Boolean(j?.loggedIn && j?.authMethod === 'claude.ai'),
       email: typeof j?.email === 'string' ? j.email : undefined,
       orgId: typeof j?.orgId === 'string' ? j.orgId : undefined,
+      orgName: typeof j?.orgName === 'string' ? j.orgName : undefined,
       subscriptionType: typeof j?.subscriptionType === 'string' ? j.subscriptionType : undefined,
     };
   } catch {
@@ -640,6 +642,11 @@ export function parseAuthStatus(stdout: string): AuthStatus {
  * the login-completed signal the add flow polls on.
  */
 export function authStatusIn(configDir: string): Promise<AuthStatus> {
+  const env: NodeJS.ProcessEnv = { ...process.env, CLAUDE_CONFIG_DIR: configDir, NO_COLOR: '1' };
+  // A shell API key must not make an unfinished subscription login look done.
+  delete env.ANTHROPIC_API_KEY;
+  delete env.ANTHROPIC_AUTH_TOKEN;
+  delete env.CLAUDE_CODE_OAUTH_TOKEN;
   return new Promise((resolve) => {
     execFile(
       CLAUDE_BIN,
@@ -647,7 +654,7 @@ export function authStatusIn(configDir: string): Promise<AuthStatus> {
       {
         timeout: 15_000,
         maxBuffer: 1024 * 1024,
-        env: { ...process.env, CLAUDE_CONFIG_DIR: configDir, NO_COLOR: '1' },
+        env,
       },
       (err, stdout) => {
         if (err && !stdout) resolve({ loggedIn: false });
@@ -657,7 +664,26 @@ export function authStatusIn(configDir: string): Promise<AuthStatus> {
   });
 }
 
-/** The `accountUuid` a vault recorded at login — the duplicate-detection key. */
+export interface ClaudeMembership { accountUuid?: string; orgId?: string }
+
+// Email identifies the person, not the subscription. The same person can have
+// a personal subscription and an organization membership with separate tokens.
+export function compareMembership(a: ClaudeMembership, b: ClaudeMembership): 'same' | 'different' | 'unknown' {
+  if (a.accountUuid && b.accountUuid && a.accountUuid !== b.accountUuid) return 'different';
+  if (a.orgId && b.orgId && a.orgId !== b.orgId) return 'different';
+  if (a.accountUuid && a.accountUuid === b.accountUuid && a.orgId && a.orgId === b.orgId) return 'same';
+  return 'unknown';
+}
+
+function readIdentity(file: string): ClaudeMembership {
+  try {
+    const a = JSON.parse(fs.readFileSync(file, 'utf8'))?.oauthAccount;
+    return { accountUuid: typeof a?.accountUuid === 'string' ? a.accountUuid : undefined,
+      orgId: typeof a?.organizationUuid === 'string' ? a.organizationUuid : undefined };
+  } catch { return {}; }
+}
+
+/** The account UUID is only one part of a membership's identity. */
 export function readVaultAccountUuid(configDir: string): string | undefined {
   try {
     const j = JSON.parse(fs.readFileSync(vaultConfigJsonPath(configDir), 'utf8'));
@@ -684,35 +710,41 @@ export function currentLoginAccountUuid(): string | undefined {
   }
 }
 
+export function isCurrentMembership(account: Account): boolean {
+  return compareMembership(cachedLoginIdentity(), account) === 'same';
+}
+
 /**
  * Same, memoised on the file's mtime. `~/.claude.json` is a large file that the
  * CLI rewrites constantly, and the reconcile loop below asks this question on a
  * timer — parsing megabytes every tick to answer "still the same account?" is
  * exactly the kind of thing that shows up in the perf log as a stall.
  */
-let identityCache: { mtimeMs: number; uuid?: string } | null = null;
-function cachedLoginAccountUuid(): string | undefined {
+let identityCache: { file: string; mtimeMs: number; identity: ClaudeMembership } | null = null;
+function cachedLoginIdentity(): ClaudeMembership {
   try {
-    const { mtimeMs } = fs.statSync(mainConfigJsonPath());
-    if (identityCache && identityCache.mtimeMs === mtimeMs) return identityCache.uuid;
-    const uuid = currentLoginAccountUuid();
-    identityCache = { mtimeMs, uuid };
-    return uuid;
+    const file = mainConfigJsonPath();
+    const { mtimeMs } = fs.statSync(file);
+    if (identityCache?.file === file && identityCache.mtimeMs === mtimeMs) return identityCache.identity;
+    const identity = readIdentity(file);
+    identityCache = { file, mtimeMs, identity };
+    return identity;
   } catch {
-    return undefined;
+    return {};
   }
 }
 
 /** The command run in the login terminal. One browser round-trip, once ever. */
 export function loginCommandFor(configDir: string, email: string): string {
   const q = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`;
-  return `CLAUDE_CONFIG_DIR=${q(configDir)} ${CLAUDE_BIN} auth login --email ${q(email)}`;
+  return `env -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN -u CLAUDE_CODE_OAUTH_TOKEN CLAUDE_CONFIG_DIR=${q(configDir)} ${q(CLAUDE_BIN)} auth login --claudeai --email ${q(email)}`;
 }
 
-export function createVaultDir(email: string): string {
-  const dir = path.join(vaultRoot(), slugForEmail(email));
-  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-  return dir;
+export function createVaultDir(email: string, root = vaultRoot()): string {
+  fs.mkdirSync(root, { recursive: true, mode: 0o700 });
+  // Every attempt gets its own vault. Cancelling a repeated email must never
+  // remove a previously saved membership's credentials.
+  return fs.mkdtempSync(path.join(root, `${slugForEmail(email)}-`));
 }
 
 /** Remove a vault directory and its keychain slot — used on reject and remove. */
@@ -747,11 +779,14 @@ export function evaluateLogin(opts: {
       error: `That browser was signed in as ${status.email}, not ${expectedEmail}. Sign out of claude.ai (or use an incognito window / separate Chrome profile) and try again.`,
     };
   }
-  if (accountUuid && existing.some((a) => a.accountUuid && a.accountUuid === accountUuid)) {
-    const dupe = existing.find((a) => a.accountUuid === accountUuid)!;
+  const dupe = existing.find((a) => accountUuid && a.accountUuid === accountUuid &&
+    compareMembership({ accountUuid, orgId: status.orgId }, {
+      accountUuid: a.accountUuid, orgId: a.orgId || readIdentity(vaultConfigJsonPath(a.configDir)).orgId,
+    }) !== 'different');
+  if (dupe) {
     return {
       verdict: 'duplicate',
-      error: `This authorised the same Anthropic account as ${dupe.email}, so it would not add any headroom. Use an incognito window or a separate Chrome profile to sign in as a different account.`,
+      error: `This membership is already saved as ${dupe.label || dupe.orgName || dupe.email}, or its organization could not be distinguished. Sign in again and choose a different Claude organization or personal subscription.`,
     };
   }
   return { verdict: 'ok' };
@@ -789,8 +824,9 @@ async function doSwitch(targetId: string, deps: SwitchDeps): Promise<Account> {
   // Switching to the account already in the main slot is a reconcile, not a
   // switch: its vault copy may well be the older of the two, and installing that
   // over the CLI's live token would break the very session doing the asking.
-  if (deps.activeId === target.id) {
-    await reconcileActive(target, deps.accounts);
+  if (isCurrentMembership(target)) {
+    const result = await reconcileActive(target, deps.accounts);
+    if (!['in-sync', 'adopted-main', 'repaired-main'].includes(result.outcome)) throw new Error('Could not verify the current Claude membership. Check its sign-in before switching.');
     deps.onSwitched(target);
     return target;
   }
@@ -808,7 +844,7 @@ async function doSwitch(targetId: string, deps: SwitchDeps): Promise<Account> {
   //    out, which would turn one broken account into two.
   const mainBlob = await readSlotRaw(MAIN_SERVICE);
   const mainCreds = parseOAuth(mainBlob);
-  const outgoing = deps.activeId ? deps.accounts.find((a) => a.id === deps.activeId) : undefined;
+  const outgoing = deps.accounts.find((a) => isCurrentMembership(a));
   if (mainCreds && outgoing && outgoing.id !== target.id) {
     const outgoingService = serviceNameFor(outgoing.configDir);
     const outgoingVault = parseOAuth(await readSlotRaw(outgoingService));
@@ -924,16 +960,16 @@ export type ReconcileResult =
  */
 let reconcileChain: Promise<void> = Promise.resolve();
 
-export function reconcileActive(account: Account, pool: Account[] = []): Promise<ReconcileResult> {
+export function reconcileActive(account: Account, pool: Account[] = [], getLoginIdentity: () => ClaudeMembership = cachedLoginIdentity): Promise<ReconcileResult> {
   // Serialised: the minute timer and the daily keep-warm sweep both land here,
   // and each pass is a read-then-write. Interleaving two of them could decide
   // "vault is newer" against a main slot the other one has already repaired.
-  const run = reconcileChain.then(() => doReconcile(account, pool));
+  const run = reconcileChain.then(() => doReconcile(account, pool, getLoginIdentity));
   reconcileChain = run.then(() => undefined, () => undefined);
   return run;
 }
 
-async function doReconcile(account: Account, pool: Account[]): Promise<ReconcileResult> {
+async function doReconcile(account: Account, pool: Account[], getLoginIdentity: () => ClaudeMembership): Promise<ReconcileResult> {
   const vaultService = serviceNameFor(account.configDir);
   const mainBlob = await readSlotRaw(MAIN_SERVICE);
   const mainCreds = parseOAuth(mainBlob);
@@ -954,9 +990,10 @@ async function doReconcile(account: Account, pool: Account[]): Promise<Reconcile
   // Only past this point do we write anything, and a write to the wrong account
   // is worse than the divergence we came to fix — so this is where (and only
   // where) it is worth reading the recorded identity.
-  const loginUuid = cachedLoginAccountUuid();
-  if (loginUuid && account.accountUuid && loginUuid !== account.accountUuid) {
-    const owner = pool.find((a) => a.accountUuid === loginUuid);
+  const login = getLoginIdentity();
+  const membership = compareMembership(login, account);
+  if (membership === 'different' || (membership === 'unknown' && mainCreds)) {
+    const owner = pool.find((a) => compareMembership(a, login) === 'same');
     return { outcome: 'foreign', ownerAccountId: owner?.id };
   }
 
@@ -1155,6 +1192,7 @@ export function startKeepWarm(getAccounts: () => Account[], getActiveId: () => s
 export interface PendingAdd {
   pendingId: string;
   email: string;
+  label?: string;
   configDir: string;
   shellId: string;
   startedAt: number;
@@ -1162,12 +1200,13 @@ export interface PendingAdd {
 
 const pending = new Map<string, PendingAdd>();
 
-export function beginAdd(email: string): PendingAdd {
+export function beginAdd(email: string, label?: string): PendingAdd {
   const configDir = createVaultDir(email);
   const pendingId = crypto.randomUUID();
   const entry: PendingAdd = {
     pendingId,
     email: email.trim(),
+    label: label?.trim().slice(0, 80) || undefined,
     configDir,
     shellId: `account-login-${pendingId.slice(0, 8)}`,
     startedAt: Date.now(),
@@ -1188,7 +1227,16 @@ export function clearPending(pendingId: string): void {
  * Poll an in-progress add. Returns 'pending' until the browser flow lands, then
  * either the finished Account or a rejection (which tears the vault down).
  */
-export async function probeAdd(
+const probes = new Map<string, Promise<ProbeAccountResult>>();
+export function probeAdd(pendingId: string, existing: Account[]): Promise<ProbeAccountResult> {
+  const previous = probes.get(pendingId);
+  if (previous) return previous;
+  const run = doProbeAdd(pendingId, existing).finally(() => probes.delete(pendingId));
+  probes.set(pendingId, run);
+  return run;
+}
+
+async function doProbeAdd(
   pendingId: string,
   existing: Account[],
 ): Promise<ProbeAccountResult> {
@@ -1196,6 +1244,7 @@ export async function probeAdd(
   if (!entry) return { status: 'pending' };
 
   const status = await authStatusIn(entry.configDir);
+  if (pending.get(pendingId) !== entry) return { status: 'pending' };
   const accountUuid = readVaultAccountUuid(entry.configDir);
   const verdict = evaluateLogin({ status, expectedEmail: entry.email, accountUuid, existing });
 
@@ -1211,6 +1260,8 @@ export async function probeAdd(
   const account: Account = {
     id: crypto.randomUUID(),
     email: status.email || entry.email,
+    label: entry.label,
+    orgName: status.orgName,
     configDir: entry.configDir,
     accountUuid,
     orgId: status.orgId,
