@@ -51,6 +51,13 @@ export default function SessionPage() {
   const [chatExited, setChatExited] = useState(false);
   // Bumped by Reopen to force a fresh Terminal mount (and a new attach).
   const [chatGen, setChatGen] = useState(0);
+  // Which pane a Codex row shows. The terminal is the default — it is the Codex
+  // CLI's own TUI attached to the live thread, so it is the same thing the user
+  // would see in a shell, approvals included. `CodexChat` stays one click away
+  // because its rendering of approval cards and the handover context line is
+  // easier to read than the TUI's, and because it is the only surface that can
+  // start a thread that does not exist yet.
+  const [codexView, setCodexView] = useState<'terminal' | 'native'>('terminal');
   // 1-based line to jump to when a file is opened from search. The nonce makes
   // re-opening the *same* file at the same line still trigger the jump.
   const [gotoLine, setGotoLine] = useState<{ line: number; nonce: number } | null>(null);
@@ -220,10 +227,48 @@ export default function SessionPage() {
     return () => { off(); offPatch(); };
   }, [id]);
 
-  // A conversation that moved provider gets a different pane entirely (Codex
-  // chat vs terminal), so a "chat ended" notice from the side it left would
-  // otherwise sit on top of the side it arrived at.
+  // A conversation that moved provider gets a fresh terminal, so a "chat ended"
+  // notice from the side it left would otherwise sit on top of the side it
+  // arrived at.
   useEffect(() => { setChatExited(false); }, [conv?.provider]);
+
+  // Terminal-vs-native is remembered per conversation: one Codex chat being
+  // read through the native view is not a reason for the next one to open that
+  // way. Hydrated on mount so SSR renders the default.
+  useEffect(() => {
+    if (!id || typeof localStorage === 'undefined') return;
+    let stored: string | null = null;
+    try { stored = localStorage.getItem(`agentsflow:conv:${id}:codexView`); } catch { /* ignore */ }
+    setCodexView(stored === 'native' ? 'native' : 'terminal');
+  }, [id]);
+
+  const chooseCodexView = useCallback((next: 'terminal' | 'native') => {
+    setCodexView(next);
+    // Switching back to the terminal re-attaches: the thread is still alive in
+    // the app-server, so a previous exit notice is stale the moment we return.
+    setChatExited(false);
+    if (!id || typeof localStorage === 'undefined') return;
+    try { localStorage.setItem(`agentsflow:conv:${id}:codexView`, next); } catch { /* ignore */ }
+  }, [id]);
+
+  // Start the Codex thread for a row handed over from Claude. `continue` is the
+  // ordinary first turn — the main process seeds it with the handover context
+  // built from the Claude transcript — and the conversations broadcast then
+  // fills in the sessionId (the thread id) the terminal attaches to.
+  const [startingCodex, setStartingCodex] = useState(false);
+  const [startCodexError, setStartCodexError] = useState<string | null>(null);
+  const startOnCodex = useCallback(async () => {
+    if (!id || startingCodex) return;
+    setStartingCodex(true);
+    setStartCodexError(null);
+    try {
+      await api().codexSend(String(id), 'continue');
+    } catch (err) {
+      setStartCodexError((err as Error)?.message ?? 'Could not start this conversation on Codex.');
+    } finally {
+      setStartingCodex(false);
+    }
+  }, [id, startingCodex]);
 
   // Continue a conversation that was handed over to Claude: the main process
   // starts a fresh session seeded with the other agent's transcript, and the
@@ -267,6 +312,11 @@ export default function SessionPage() {
   }, [conv, forking, router]);
 
   const backHint = useBackNavKeys(goBack);
+
+  // Claude rows are always the terminal; Codex rows are the terminal unless the
+  // reader asked for the native view. Drives which pane mounts AND whether a
+  // stale "terminal closed" notice is allowed to cover it.
+  const showingTerminal = conv?.provider !== 'codex' || codexView === 'terminal';
 
   if (!id) return null;
 
@@ -316,6 +366,16 @@ export default function SessionPage() {
             title={openFile ? 'Show file editor' : 'Click a file in the sidebar to open it'}
           >File</button>
         </div>
+        {conv?.provider === 'codex' && (
+          <button
+            onClick={() => chooseCodexView(codexView === 'native' ? 'terminal' : 'native')}
+            style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
+            className={`shrink-0 px-3 py-1 text-[11px] uppercase tracking-wider rounded-md border ${codexView === 'native' ? 'bg-accent text-bg font-semibold border-accent' : 'bg-panel text-muted border-border hover:text-text hover:bg-panel2'}`}
+            title={codexView === 'native'
+              ? 'Back to the Codex terminal (the CLI’s own TUI, attached to the live thread)'
+              : 'Show the built-in Codex view instead — approval cards and the handover note, rendered by Peers Flow'}
+          >Native view</button>
+        )}
         <button
           onClick={forkChat}
           disabled={!conv?.sessionId || forking}
@@ -395,14 +455,14 @@ export default function SessionPage() {
         <div className="relative flex-1 bg-bg min-w-0">
           {/* Both panes stay mounted; toggling uses visibility so xterm size doesn't reset */}
           <div className={`absolute inset-0 ${rightPane === 'chat' ? 'visible' : 'invisible'}`}>
-            {conv?.sessionId || conv?.provider === 'codex' ? (
-              chatExited ? (
+            {conv?.sessionId ? (
+              chatExited && showingTerminal ? (
                 <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 px-6 text-center">
                   <div className="text-sm text-text">The chat terminal closed.</div>
                   <div className="text-xs text-muted max-w-sm">
-                    The session ended or couldn’t attach (a finished agent just replays and exits).
-                    Reopen to reconnect — a finished session resumes where it left off. If it keeps
-                    failing, Fork branches an independent copy with the full history.
+                    {conv.provider === 'codex'
+                      ? 'Closing the Codex terminal only detaches the view — the thread keeps running in the background. Reopen to attach again; it comes back with its full history and any turn still in flight.'
+                      : 'The session ended or couldn’t attach (a finished agent just replays and exits). Reopen to reconnect — a finished session resumes where it left off. If it keeps failing, Fork branches an independent copy with the full history.'}
                   </div>
                   <div className="flex items-center gap-2">
                     <button
@@ -421,16 +481,58 @@ export default function SessionPage() {
                   </div>
                 </div>
               ) : (
-                <PaneErrorBoundary key={chatGen} label="Terminal">
-                  {conv?.provider === 'codex' ? <CodexChat conversationId={String(id)} directoryPath={conv.directoryPath} /> : <Terminal key={chatGen} conversationId={String(id)} baseDir={conv?.directoryPath} onExit={() => setChatExited(true)} autoFocus={rightPane === 'chat'} />}
+                <PaneErrorBoundary key={chatGen} label={showingTerminal ? 'Terminal' : 'Codex'}>
+                  {showingTerminal
+                    ? <Terminal key={chatGen} conversationId={String(id)} baseDir={conv.provider === 'codex' ? (conv.worktreePath || conv.directoryPath) : conv.directoryPath} onExit={() => setChatExited(true)} autoFocus={rightPane === 'chat'} />
+                    : <CodexChat conversationId={String(id)} directoryPath={conv.directoryPath} />}
+                </PaneErrorBoundary>
+              )
+            ) : conv && conv.provider === 'codex' ? (
+              // A Codex row with no thread. Two ways to get here, and only one
+              // of them is a dead end for the terminal:
+              //
+              //  • handed over from Claude and never continued — there is no
+              //    thread to attach a TUI to until the first turn creates one,
+              //    so the pane is the button that starts it. The conversations
+              //    broadcast then carries the thread id back and the terminal
+              //    mounts on the next render.
+              //  • brand new, first turn still in flight — the native composer
+              //    is the surface that starts a thread, so it stands in until
+              //    the id arrives, whatever the remembered preference says.
+              conv.handover && codexView !== 'native' ? (
+                <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 px-6 text-center">
+                  <div className="text-sm text-text font-medium">
+                    Handed over from {conv.handover.from === 'codex' ? 'Codex' : 'Claude'}
+                  </div>
+                  <div className="text-xs text-muted max-w-sm leading-relaxed">
+                    {conv.handover.reason ? `${conv.handover.reason} ` : ''}
+                    Starting opens a Codex thread seeded with what the other agent did
+                    {conv.handover.at ? ` (moved ${new Date(conv.handover.at).toLocaleString()})` : ''}.
+                    The terminal attaches to it as soon as it exists.
+                  </div>
+                  {startCodexError && <div className="text-xs text-danger max-w-sm">{startCodexError}</div>}
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={() => void startOnCodex()}
+                      disabled={startingCodex}
+                      className="px-3 py-1 text-[11px] uppercase tracking-wider rounded-md bg-accent text-bg font-semibold hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed"
+                    >{startingCodex ? 'Starting…' : 'Start on Codex'}</button>
+                    <button
+                      onClick={goBack}
+                      className="px-3 py-1 text-[11px] uppercase tracking-wider rounded-md border border-border bg-panel text-muted hover:text-text hover:bg-panel2"
+                    >← Back</button>
+                  </div>
+                </div>
+              ) : (
+                <PaneErrorBoundary label="Codex">
+                  <CodexChat conversationId={String(id)} directoryPath={conv.directoryPath} />
                 </PaneErrorBoundary>
               )
             ) : conv?.handover ? (
-              // Reached only when this is a Claude-side conversation with no
-              // session: the branch above already took every Codex one.
-              // Handed over from the other agent and not yet continued here.
-              // There is nothing to attach to until someone says go, so the
-              // pane is the button that says go.
+              // A Claude-side conversation with no session: handed over from the
+              // other agent and not yet continued here. There is nothing to
+              // attach to until someone says go, so the pane is the button that
+              // says go.
               <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 px-6 text-center">
                 <div className="text-sm text-text font-medium">
                   Handed over from {conv.handover.from === 'codex' ? 'Codex' : 'Claude'}

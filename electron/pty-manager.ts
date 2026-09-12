@@ -7,6 +7,12 @@ import { promisify } from 'util';
 import type { IPty } from 'node-pty';
 import { terminalEnvironment } from './terminal-environment';
 import { buildResumeArgs, redactResumeArgs } from './resume-args';
+import { codexResumeArgs } from './codex-resume-args';
+
+// Re-exported so the PTY layer stays the single import site for terminal argv,
+// while the builder itself lives in a module that pulls in neither `electron`
+// nor `node-pty` and can therefore be unit-tested directly.
+export { codexResumeArgs, codexRemoteUrl } from './codex-resume-args';
 
 const execFileAsync = promisify(execFile);
 
@@ -20,6 +26,7 @@ function getPty(): typeof import('node-pty') {
 }
 
 const CLAUDE_BIN = process.env.CLAUDE_BIN || 'claude';
+const CODEX_BIN = process.env.CODEX_BIN || 'codex';
 
 // ---------- node-pty callback safety ----------
 // node-pty invokes our onData/onExit callbacks from a *native* N-API
@@ -56,8 +63,8 @@ function safeSend(win: BrowserWindow, channel: string, ...args: unknown[]): void
   }
 }
 
-// ---------- Claude attaches ----------
-// Two flavors, with deliberately different lifecycles:
+// ---------- Agent attaches ----------
+// Three flavors, with deliberately different lifecycles:
 //
 //  - 'attach' mode: a viewer for a live *background daemon*. The daemon owns
 //    execution and outlives this PTY, so the PTY is disposable — killed on
@@ -68,8 +75,29 @@ function safeSend(win: BrowserWindow, channel: string, ...args: unknown[]): void
 //    renderer detach exactly like a shell does: one persistent PTY per
 //    sessionId, subscriber-tracked, with a replay buffer. Killing it on detach
 //    is what was aborting in-progress turns when switching/closing the view.
+//
+//  - 'codex' mode: `codex resume <thread> --remote unix://<sock>` — the Codex
+//    CLI's own TUI, pointed at the app-server this app owns. Execution lives in
+//    that server, so this PTY is a *viewer* like 'attach'… but it shares
+//    'resume' mode's plumbing (one PTY per thread id, subscriber-tracked,
+//    replay-buffered) because two views of the same chat must show the same
+//    screen and a detach must not tear the TUI down under the other one.
+//    Measured (probe E4): killing the PTY is a pure detach — the thread stays
+//    loaded, keeps its in-flight turn, and other clients see no event at all.
+//    So the idle reaper reclaiming a Codex PTY costs a redraw, never a turn.
 
 const env = terminalEnvironment;
+
+// terminalEnvironment() + the scrubbing agentEnvironment() does. `codex` treats
+// CODEX_THREAD_ID as "you are already inside thread X"; inheriting the one from
+// whatever spawned Peers Flow would point the TUI at a foreign thread. The rest
+// identify the parent session, which this child is not part of.
+const CODEX_SCRUBBED_VARS = ['CODEX_THREAD_ID', 'ELECTRON_RUN_AS_NODE', 'CLAUDECODE', 'ITERM_SESSION_ID'];
+function codexEnv(): Record<string, string> {
+  const e = env();
+  for (const key of CODEX_SCRUBBED_VARS) delete e[key];
+  return e;
+}
 
 interface ClaudeChannel { id: string; pty: IPty; win: BrowserWindow; sessionId: string; }
 const claudeChannels = new Map<string, ClaudeChannel>();
@@ -257,6 +285,10 @@ async function ensurePtyCapacity(win: BrowserWindow | null, channelId: string, l
 // silent past a TTL: nobody's watching and nothing's happening. Resume sessions
 // get a longer TTL, and "idle" requires zero output, so an actively printing
 // turn is never reaped — only a quiet, detached (very likely finished) one.
+//
+// For a Codex PTY the trade is strictly cheaper still: the thread runs in the
+// app-server, so reaping the viewer is a DETACH and never a stop. The worst
+// case is a redraw on the next open.
 const SHELL_IDLE_TTL_MS = Number(process.env.AGENTSFLOW_SHELL_IDLE_TTL_MS) || 30 * 60 * 1000;
 // Lowered 60 min → 10 min. A detached `claude --resume` is not a dormant handle:
 // it is a full Claude TUI process that keeps its MCP servers alive, keeps a PTY
@@ -321,10 +353,14 @@ export async function attach(opts: {
   win: BrowserWindow;
   // 'attach' — connect to a live background daemon (default, original behavior)
   // 'resume' — load a saved transcript from disk and continue interactively
-  mode?: 'attach' | 'resume';
-  // Required when mode==='resume'; ignored otherwise. The directory the
-  // session was originally run in, so Claude finds the right .claude project.
+  // 'codex'  — the Codex TUI attached to a thread in our app-server
+  mode?: 'attach' | 'resume' | 'codex';
+  // Required when mode is 'resume' or 'codex'; ignored otherwise. The directory
+  // the session was originally run in, so the CLI finds the right project.
   cwd?: string;
+  // Required when mode==='codex': absolute path to the app-server control
+  // socket. `sessionId` is the Codex thread id in that mode.
+  codexSocket?: string;
   // Fork mode (resume only): branch a copy of THIS session id instead of
   // resuming `sessionId` itself. Spawns `--resume <forkFrom> --fork-session
   // --session-id <sessionId>`, so the new transcript lands at the caller's
@@ -338,6 +374,10 @@ export async function attach(opts: {
 }): Promise<string> {
   startPtyReaper();
   const mode = opts.mode ?? 'attach';
+  if (mode === 'codex') {
+    if (!opts.codexSocket) throw new Error('codex attach needs the app-server socket path');
+    return attachResume({ ...opts, codexSocket: opts.codexSocket });
+  }
   if (mode === 'resume') return attachResume(opts);
 
   const args = ['attach', opts.sessionId];
@@ -396,9 +436,15 @@ export function ptyStats(): Record<string, number> {
   };
 }
 
-// Persistent, subscriber-based attach for `claude --resume`. Mirrors attachShell:
-// spawn once per sessionId, reuse on re-attach, and return a replay buffer so a
-// re-mounted terminal can reconstruct the screen. Returns '' on spawn failure.
+// Persistent, subscriber-based attach for `claude --resume` and for the Codex
+// TUI (`codex resume --remote`). Mirrors attachShell: spawn once per session id,
+// reuse on re-attach, and return a replay buffer so a re-mounted terminal can
+// reconstruct the screen. Returns '' on spawn failure.
+//
+// Both agents share one map because the key spaces cannot collide — a Claude
+// session id comes from the CLI, a Codex thread id from the app-server — and
+// because everything downstream (write/resize/detach/reap) wants exactly the
+// same behaviour for both.
 async function attachResume(opts: {
   channelId: string;
   sessionId: string;
@@ -409,30 +455,36 @@ async function attachResume(opts: {
   forkFrom?: string;
   mcpConfigPath?: string;
   appendSystemPrompt?: string;
+  // Present ⇒ this is a Codex attach: `sessionId` is a thread id, and the PTY
+  // is a viewer of a thread that runs in the app-server at this socket.
+  codexSocket?: string;
 }): Promise<string> {
+  const isCodex = Boolean(opts.codexSocket);
+  const label = isCodex ? 'codex' : 'resume';
   let sess = resumeSessions.get(opts.sessionId);
 
   if (!sess) {
-    const args = buildResumeArgs(opts);
+    const bin = isCodex ? CODEX_BIN : CLAUDE_BIN;
+    const args = isCodex ? codexResumeArgs(opts.sessionId, opts.codexSocket!) : buildResumeArgs(opts);
     const cwd = opts.cwd || os.homedir();
-    console.log('[agentsflow][pty] spawning resume', { bin: CLAUDE_BIN, args: redactResumeArgs(args), cwd, cols: opts.cols, rows: opts.rows });
-    if (!(await ensurePtyCapacity(opts.win, opts.channelId, 'resume'))) return '';
+    console.log(`[agentsflow][pty] spawning ${label}`, { bin, args: redactResumeArgs(args), cwd, cols: opts.cols, rows: opts.rows });
+    if (!(await ensurePtyCapacity(opts.win, opts.channelId, label))) return '';
     let pty: IPty;
     try {
-      pty = getPty().spawn(CLAUDE_BIN, args, {
+      pty = getPty().spawn(bin, args, {
         name: 'xterm-256color',
         cols: Math.max(opts.cols, 20),
         rows: Math.max(opts.rows, 5),
         cwd,
-        env: env(),
+        env: isCodex ? codexEnv() : env(),
       });
     } catch (err) {
-      console.error('[agentsflow][pty] resume spawn failed', err);
+      console.error(`[agentsflow][pty] ${label} spawn failed`, err);
       safeSend(opts.win, 'terminal:data', opts.channelId, `\r\n\x1b[31m[pty spawn failed] ${(err as Error)?.message ?? err}\x1b[0m\r\n`);
       safeSend(opts.win, 'terminal:exit', opts.channelId);
       return '';
     }
-    console.log('[agentsflow][pty] resume spawn ok', { sessionId: opts.sessionId, pid: pty.pid });
+    console.log(`[agentsflow][pty] ${label} spawn ok`, { sessionId: opts.sessionId, pid: pty.pid });
 
     const newSess: ResumeSession = {
       sessionId: opts.sessionId,
@@ -446,7 +498,7 @@ async function attachResume(opts: {
     resumeSessions.set(opts.sessionId, newSess);
     sess = newSess;
 
-    pty.onData(guardCb('resume onData', (data) => {
+    pty.onData(guardCb(`${label} onData`, (data) => {
       const s = resumeSessions.get(opts.sessionId);
       if (!s) return;
       s.lastDataAt = Date.now();
@@ -455,8 +507,8 @@ async function attachResume(opts: {
         safeSend(sub.win, 'terminal:data', sub.channelId, data);
       }
     }));
-    pty.onExit(guardCb('resume onExit', (e) => {
-      console.log('[agentsflow][pty] resume onExit', { sessionId: opts.sessionId, exitCode: e.exitCode, signal: e.signal });
+    pty.onExit(guardCb(`${label} onExit`, (e) => {
+      console.log(`[agentsflow][pty] ${label} onExit`, { sessionId: opts.sessionId, exitCode: e.exitCode, signal: e.signal });
       const s = resumeSessions.get(opts.sessionId);
       if (!s) return;
       for (const sub of s.subscribers.values()) {
@@ -466,8 +518,8 @@ async function attachResume(opts: {
       resumeSessions.delete(opts.sessionId);
     }));
   } else {
-    // Re-attaching to a running resume session — resize to the new viewer's
-    // geometry, which also nudges Claude to redraw the current screen.
+    // Re-attaching to a running session — resize to the new viewer's geometry,
+    // which also nudges the TUI to redraw the current screen.
     try {
       sess.pty.resize(Math.max(opts.cols, 20), Math.max(opts.rows, 5));
     } catch {
@@ -887,8 +939,9 @@ export function detach(channelId: string): void {
     claudeChannels.delete(channelId);
     return;
   }
-  // Claude resume session: just unsubscribe — the agent keeps running in the
-  // background so the in-progress turn isn't aborted by detaching the view.
+  // Resume session (Claude `--resume`, or the Codex TUI): just unsubscribe —
+  // the agent keeps running (in the PTY for Claude, in the app-server for
+  // Codex) so the in-progress turn isn't aborted by detaching the view.
   const rsid = resumeChannelToSessionId.get(channelId);
   if (rsid) {
     const rs = resumeSessions.get(rsid);
