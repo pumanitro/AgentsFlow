@@ -814,7 +814,6 @@ export default function AccountsPanel() {
     }
   }, [loadAccounts, loadCodex]);
 
-  const activeAccount = snapshot.accounts.find((a) => a.id === snapshot.activeId) ?? null;
   const activeCodex = snapshot.codexAccounts.find((a) => a.id === snapshot.activeCodexId) ?? null;
   // The CLI's current login is "saved" when the pool points at it, or when a
   // saved sign-in carries the same address (the pool was filled before this
@@ -823,9 +822,9 @@ export default function AccountsPanel() {
     activeCodex
     || (codex?.email && snapshot.codexAccounts.some((a) => a.email && a.email.toLowerCase() === codex.email!.toLowerCase())),
   );
-  const usingLabel = snapshot.activeProvider === 'codex'
-    ? (activeCodex?.label || activeCodex?.email || codex?.email || '')
-    : (activeAccount?.label || activeAccount?.email || 'current login');
+  // Rotation needs somewhere to rotate to: a second Claude account, or a
+  // signed-in Codex for provider rotation.
+  const canRotate = snapshot.accounts.length >= 2 || Boolean(codex?.signedIn);
 
   return (
     <div className="shrink-0 rounded-lg border border-border bg-panel overflow-hidden flex flex-col min-h-0">
@@ -834,25 +833,27 @@ export default function AccountsPanel() {
         <span className="w-1 h-4 rounded-full shrink-0" style={{ backgroundColor: '#a78bfa' }} aria-hidden="true" />
         <button
           onClick={() => setOpen(!open)}
-          className="flex items-center gap-1.5 flex-1 min-w-0 text-left"
+          // Wraps rather than truncates: in a narrow sidebar the chip drops to a
+          // second line, where it is still readable, instead of being shaved to
+          // a couple of characters on the first.
+          className="flex flex-wrap items-center gap-x-2 gap-y-1 flex-1 min-w-0 text-left"
           title={open ? 'Hide accounts' : 'Show the account pool'}
         >
-          <span className="text-muted text-[10px] w-3 shrink-0">{open ? '▼' : '▶'}</span>
-          <span className="text-[11px] uppercase tracking-wider text-text font-semibold shrink-0">Accounts</span>
-          {/* The one-line answer to "which licence am I on?" — provider first,
-              then the account inside it. */}
-          <span className="flex items-center gap-1 min-w-0 text-[10px] text-muted">
-            <span className="shrink-0">Using</span>
+          <span className="flex items-center gap-1.5 shrink-0">
+            <span className="text-muted text-[10px] w-3 shrink-0">{open ? '▼' : '▶'}</span>
+            <span className="text-[11px] uppercase tracking-wider text-text font-semibold">Accounts</span>
+          </span>
+          {/* Which licence is being spent — the provider, and only the provider.
+              Which account inside it is already marked ACTIVE (Claude) or
+              CURRENT (Codex) in the section below, and naming it here bought a
+              second ellipsis at the cost of the first being legible. */}
+          <span
+            className="shrink-0 flex items-center gap-1 rounded-full border border-border bg-panel2 px-1.5 py-0.5 text-[10px] text-muted"
+            title={`New chats and the Usage panel use ${providerName(snapshot.activeProvider)}`}
+          >
+            <span>Using</span>
             <ProviderIcon provider={snapshot.activeProvider} size={11} className="text-accent" />
-            <span className="text-text shrink-0">{providerName(snapshot.activeProvider)}</span>
-            {usingLabel && (
-              <>
-                <span className="shrink-0">·</span>
-                <span className={`truncate ${masked ? 'select-none' : ''}`} style={masked ? MASK : undefined}>
-                  {usingLabel}
-                </span>
-              </>
-            )}
+            <span className="text-[11px] text-text font-medium">{providerName(snapshot.activeProvider)}</span>
           </span>
         </button>
         {(snapshot.accounts.length > 0 || snapshot.codexAccounts.length > 0 || codex?.signedIn) && (
@@ -935,106 +936,6 @@ export default function AccountsPanel() {
                 {error && (
                   <div className="mx-3 my-1.5 px-2 py-1.5 rounded border border-danger/40 bg-danger/10 text-[11px] text-danger leading-relaxed">
                     {maskEmails(error, masked)}
-                  </div>
-                )}
-
-                {/* Auto-rotation. Needs somewhere to rotate to: a second Claude
-                    account, or a signed-in Codex for provider rotation. */}
-                {(snapshot.accounts.length >= 2 || codex?.signedIn) && (
-                  <div className="mx-3 my-1 pt-1.5 border-t border-border/50">
-                    <label className="flex items-center gap-2 cursor-pointer">
-                      <input
-                        type="checkbox"
-                        checked={policy.enabled}
-                        onChange={(e) => void savePolicy({ ...policy, enabled: e.target.checked })}
-                        className="accent-info"
-                      />
-                      {/* The label is the only part allowed to give up room: a
-                          narrow sidebar should clip the sentence, not shove the
-                          threshold or the ⓘ off the edge. */}
-                      <span className="text-[11px] text-text min-w-0 truncate">Switch automatically at</span>
-                      <input
-                        type="number"
-                        min={50}
-                        max={99}
-                        value={policy.threshold}
-                        onChange={(e) => {
-                          const n = Number(e.target.value);
-                          if (Number.isFinite(n)) void savePolicy({ ...policy, threshold: n });
-                        }}
-                        className="shrink-0 w-11 bg-panel2 border border-border rounded px-1 py-0.5 text-[11px] text-text text-right focus:outline-none focus:border-info"
-                      />
-                      <span className="shrink-0 text-[11px] text-muted">%</span>
-                      {/* The explainer is one-time knowledge, so it lives behind
-                          the ⓘ rather than costing three lines of sidebar forever. */}
-                      <span className="ml-auto flex items-center" onClick={(e) => e.preventDefault()}>
-                        <InfoHint label="About automatic switching">
-                          Runs in the background even with the window closed, so an overnight run rolls
-                          onto a fresh account instead of hitting the wall.
-                        </InfoHint>
-                      </span>
-                    </label>
-                    {/* The backstop, indented under the threshold it backs up:
-                        thresholds are a forecast, and a chat that hits the wall
-                        anyway would otherwise sit dead until someone looks. */}
-                    <label className="mt-1 flex items-center gap-2 cursor-pointer pl-5">
-                      <input
-                        type="checkbox"
-                        checked={policy.resumeOnLimit}
-                        disabled={!policy.enabled}
-                        onChange={(e) => void savePolicy({ ...policy, resumeOnLimit: e.target.checked })}
-                        className="accent-info disabled:opacity-40"
-                      />
-                      <span className={`text-[11px] min-w-0 truncate ${policy.enabled ? 'text-text' : 'text-subtle'}`}>
-                        Resume chats that hit the limit
-                      </span>
-                      <span className="ml-auto flex items-center" onClick={(e) => e.preventDefault()}>
-                        <InfoHint label="About resuming after a limit">
-                          If a chat is refused with “You’ve hit your session limit”, switch account
-                          straight away and send it “continue”, so it picks up where it stopped instead
-                          of waiting for the window to reset.
-                        </InfoHint>
-                      </span>
-                    </label>
-                    {/* The last resort, one level further in: when the whole
-                        provider is out of headroom, the only move left is the
-                        other provider — and that means carrying the work over. */}
-                    <label className="mt-1 flex items-center gap-2 cursor-pointer pl-5">
-                      <input
-                        type="checkbox"
-                        checked={policy.crossProvider}
-                        disabled={!policy.enabled}
-                        onChange={(e) => void savePolicy({ ...policy, crossProvider: e.target.checked })}
-                        className="accent-info disabled:opacity-40"
-                      />
-                      <span className={`text-[11px] min-w-0 truncate ${policy.enabled ? 'text-text' : 'text-subtle'}`}>
-                        Rotate across providers (Claude ⇄ Codex)
-                      </span>
-                      <span className="ml-auto flex items-center" onClick={(e) => e.preventDefault()}>
-                        <InfoHint label="About rotating across providers">
-                          When the selected provider has no headroom left, switch to the other one and
-                          hand every unfinished conversation over to it. Off means rotation stays
-                          inside the selected provider.
-                        </InfoHint>
-                      </span>
-                    </label>
-                    {rotationStatus?.disabledReason && (
-                      <p className="mt-1 text-[10px] text-danger leading-relaxed">
-                        {maskEmails(rotationStatus.disabledReason, masked)}
-                      </p>
-                    )}
-                    {/* The whole line goes behind the eye, not just the address in
-                        it: "switched to X at 96%" is a readout of the account and
-                        its headroom, which is the thing you are hiding. */}
-                    {!rotationStatus?.disabledReason && rotationStatus?.lastEvent && (
-                      <p
-                        className={`mt-1 text-[10px] text-muted leading-relaxed ${masked ? 'select-none' : ''}`}
-                        style={masked ? MASK : undefined}
-                        title={masked ? 'Hidden — use the eye icon to show' : undefined}
-                      >
-                        {rotationStatus.lastEvent}
-                      </p>
-                    )}
                   </div>
                 )}
 
@@ -1166,6 +1067,108 @@ export default function AccountsPanel() {
                   )}
                 </div>
               </ProviderSection>
+
+              {/* Auto-rotation is a property of the pool, not of Claude: it
+                  moves work between Claude accounts and, when allowed, hands it
+                  across to Codex. So it sits under both sections rather than
+                  inside one of them. */}
+              {canRotate && (
+                <div className="border-t border-border/60 px-3 py-2">
+                  <label className="flex items-center gap-2 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={policy.enabled}
+                      onChange={(e) => void savePolicy({ ...policy, enabled: e.target.checked })}
+                      className="accent-info"
+                    />
+                    {/* The label is the only part allowed to give up room: a
+                        narrow sidebar should clip the sentence, not shove the
+                        threshold or the ⓘ off the edge. */}
+                    <span className="text-[11px] text-text min-w-0 truncate">Switch automatically at</span>
+                    <input
+                      type="number"
+                      min={50}
+                      max={99}
+                      value={policy.threshold}
+                      onChange={(e) => {
+                        const n = Number(e.target.value);
+                        if (Number.isFinite(n)) void savePolicy({ ...policy, threshold: n });
+                      }}
+                      className="shrink-0 w-11 bg-panel2 border border-border rounded px-1 py-0.5 text-[11px] text-text text-right focus:outline-none focus:border-info"
+                    />
+                    <span className="shrink-0 text-[11px] text-muted">%</span>
+                    {/* The explainer is one-time knowledge, so it lives behind
+                        the ⓘ rather than costing three lines of sidebar forever. */}
+                    <span className="ml-auto flex items-center" onClick={(e) => e.preventDefault()}>
+                      <InfoHint label="About automatic switching">
+                        Runs in the background even with the window closed, so an overnight run rolls
+                        onto a fresh account instead of hitting the wall.
+                      </InfoHint>
+                    </span>
+                  </label>
+                  {/* The backstop, indented under the threshold it backs up:
+                      thresholds are a forecast, and a chat that hits the wall
+                      anyway would otherwise sit dead until someone looks. */}
+                  <label className="mt-1 flex items-center gap-2 cursor-pointer pl-5">
+                    <input
+                      type="checkbox"
+                      checked={policy.resumeOnLimit}
+                      disabled={!policy.enabled}
+                      onChange={(e) => void savePolicy({ ...policy, resumeOnLimit: e.target.checked })}
+                      className="accent-info disabled:opacity-40"
+                    />
+                    <span className={`text-[11px] min-w-0 truncate ${policy.enabled ? 'text-text' : 'text-subtle'}`}>
+                      Resume chats that hit the limit
+                    </span>
+                    <span className="ml-auto flex items-center" onClick={(e) => e.preventDefault()}>
+                      <InfoHint label="About resuming after a limit">
+                        If a chat is refused with “You’ve hit your session limit”, switch account
+                        straight away and send it “continue”, so it picks up where it stopped instead
+                        of waiting for the window to reset.
+                      </InfoHint>
+                    </span>
+                  </label>
+                  {/* The last resort, one level further in: when the whole
+                      provider is out of headroom, the only move left is the
+                      other provider — and that means carrying the work over. */}
+                  <label className="mt-1 flex items-center gap-2 cursor-pointer pl-5">
+                    <input
+                      type="checkbox"
+                      checked={policy.crossProvider}
+                      disabled={!policy.enabled}
+                      onChange={(e) => void savePolicy({ ...policy, crossProvider: e.target.checked })}
+                      className="accent-info disabled:opacity-40"
+                    />
+                    <span className={`text-[11px] min-w-0 truncate ${policy.enabled ? 'text-text' : 'text-subtle'}`}>
+                      Rotate across providers (Claude ⇄ Codex)
+                    </span>
+                    <span className="ml-auto flex items-center" onClick={(e) => e.preventDefault()}>
+                      <InfoHint label="About rotating across providers">
+                        When the selected provider has no headroom left, switch to the other one and
+                        hand every unfinished conversation over to it. Off means rotation stays
+                        inside the selected provider.
+                      </InfoHint>
+                    </span>
+                  </label>
+                  {rotationStatus?.disabledReason && (
+                    <p className="mt-1 text-[10px] text-danger leading-relaxed">
+                      {maskEmails(rotationStatus.disabledReason, masked)}
+                    </p>
+                  )}
+                  {/* The whole line goes behind the eye, not just the address in
+                      it: "switched to X at 96%" is a readout of the account and
+                      its headroom, which is the thing you are hiding. */}
+                  {!rotationStatus?.disabledReason && rotationStatus?.lastEvent && (
+                    <p
+                      className={`mt-1 text-[10px] text-muted leading-relaxed ${masked ? 'select-none' : ''}`}
+                      style={masked ? MASK : undefined}
+                      title={masked ? 'Hidden — use the eye icon to show' : undefined}
+                    >
+                      {rotationStatus.lastEvent}
+                    </p>
+                  )}
+                </div>
+              )}
             </div>
           )}
         </div>

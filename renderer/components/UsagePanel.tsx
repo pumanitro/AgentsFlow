@@ -148,6 +148,10 @@ export default function UsagePanel() {
   }, [load]);
 
   const badge = worstMeter(result);
+  // The plan rides in the header beside the provider name. It used to head the
+  // body under a second copy of "⟨icon⟩ Claude", which spent a line of a narrow
+  // sidebar repeating what the header had already said.
+  const plan = result?.ok ? result.snapshot.plan : '';
 
   return (
     <div className="shrink-0 rounded-lg border border-border bg-panel overflow-hidden flex flex-col min-h-0">
@@ -156,9 +160,10 @@ export default function UsagePanel() {
         <button onClick={() => setOpen(!open)} className="flex items-center gap-1.5 flex-1 min-w-0 text-left" title={open ? 'Hide usage' : `Show ${name} plan usage limits`}>
           <span className="text-muted text-[10px] w-3 shrink-0">{open ? '▼' : '▶'}</span>
           <span className="text-[11px] uppercase tracking-wider text-text font-semibold">Usage</span>
-          <span className="flex items-center gap-1 min-w-0 text-muted">
-            <ProviderIcon provider={provider} size={12} />
-            <span className="text-[11px] text-text truncate">{name}</span>
+          <span className="flex items-baseline gap-1 min-w-0 text-muted">
+            <ProviderIcon provider={provider} size={12} className="self-center shrink-0" />
+            <span className="text-[11px] text-text shrink-0">{name}</span>
+            {plan && <span className="text-[10px] text-muted truncate">{plan}</span>}
           </span>
           {badge && (
             <span className="ml-auto text-[10px] font-mono shrink-0" style={{ color: SEVERITY_COLOR[badge.severity] }}>
@@ -169,12 +174,9 @@ export default function UsagePanel() {
         <button onClick={() => void load(true)} disabled={loading} className={`shrink-0 text-muted hover:text-text px-1.5 py-0.5 rounded disabled:opacity-40 ${loading ? 'animate-spin' : ''}`} title={`Refresh ${name} usage now`} aria-label="Refresh usage">↻</button>
       </div>
       {open && <div className="flex-1 min-h-0 overflow-y-auto border-t border-border/60 py-1" style={{ maxHeight: 'min(300px, 30vh)' }}>
-        <div data-testid={`usage-${provider}`} className="pb-1">
-          <div className="px-3 pt-2 pb-1 flex items-center gap-2 text-[11px]">
-            <ProviderIcon provider={provider} size={12} className="text-muted" />
-            <strong className="text-text">{name}</strong>
-            <span className="text-muted truncate">{result?.ok ? result.snapshot.plan : ''}</span>
-          </div>
+        {/* Straight into the meters: the header above already names the
+            provider and its plan. */}
+        <div data-testid={`usage-${provider}`} className="pt-1 pb-1">
           {!result ? <div className="px-3 py-2 text-[11px] text-muted">Loading usage…</div>
             : !result.ok ? <div className="px-3 py-2 text-[11px] text-muted">{result.error || `Sign in to ${name} to see usage.`}</div>
             : <>
