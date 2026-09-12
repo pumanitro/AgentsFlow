@@ -24,9 +24,9 @@ export function codexHome(): string {
   return process.env.CODEX_HOME || path.join(os.homedir(), '.codex');
 }
 
-/** Beside the Claude vaults (`~/.agentsflow/accounts`). */
+/** Beside the Claude vaults (`~/.agentsflow/accounts`). Env override is a test seam. */
 export function codexVaultRoot(): string {
-  return path.join(os.homedir(), '.agentsflow', 'codex-accounts');
+  return process.env.AGENTSFLOW_CODEX_VAULTS || path.join(os.homedir(), '.agentsflow', 'codex-accounts');
 }
 
 export interface CodexIdentity {
@@ -211,20 +211,33 @@ export function saveCurrentLogin(label: string | undefined, existing: CodexAccou
   return { ok: true, account: accountFrom(identity, configDir, label?.trim().slice(0, 80) || undefined) };
 }
 
+export interface SwitchCodexOutcome {
+  // Set when the login being replaced belonged to nobody in the pool: it was
+  // copied into a vault of its own first, and the caller must persist this row
+  // or the user has just lost a sign-in the app never had a copy of.
+  savedOutgoing?: CodexAccount;
+}
+
 /**
- * Make `account` the login the Codex CLI uses. The outgoing login is saved back
- * into the vault of whichever pooled account it belongs to first, so switching
- * back later restores its newest tokens rather than a stale copy.
+ * Make `account` the login the Codex CLI uses. The outgoing login is saved
+ * first — back into the vault of whichever pooled account it belongs to, so
+ * switching back later restores its newest tokens rather than a stale copy, or
+ * into a brand-new vault when it belongs to no pooled account at all (the
+ * pre-existing `codex login`, which is otherwise overwritten and gone).
  */
-export function switchTo(account: CodexAccount, pool: CodexAccount[]): void {
+export function switchTo(account: CodexAccount, pool: CodexAccount[]): SwitchCodexOutcome {
   const home = codexHome();
   const mainFile = path.join(home, 'auth.json');
   const src = path.join(account.configDir, 'auth.json');
   if (!fs.existsSync(src)) throw new Error('This Codex account has no saved sign-in. Remove it and add it again.');
   const outgoing = currentIdentity();
   const owner = outgoing ? pool.find((a) => sameIdentity(outgoing, a)) : undefined;
+  let savedOutgoing: CodexAccount | undefined;
   if (owner && owner.id !== account.id) {
     try { fs.copyFileSync(mainFile, path.join(owner.configDir, 'auth.json')); } catch { /* keep the vault's older copy */ }
+  } else if (outgoing && !owner && !sameIdentity(outgoing, account)) {
+    const saved = saveCurrentLogin('Previous login', pool);
+    if (saved.ok) savedOutgoing = saved.account;
   }
   fs.mkdirSync(home, { recursive: true });
   const tmp = `${mainFile}.agentsflow-tmp`;
@@ -232,6 +245,7 @@ export function switchTo(account: CodexAccount, pool: CodexAccount[]): void {
   fs.chmodSync(tmp, 0o600);
   fs.renameSync(tmp, mainFile);
   currentCache = null;
+  return { savedOutgoing };
 }
 
 /** Test seam. */

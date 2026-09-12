@@ -8,6 +8,7 @@ import { agentEnvironment } from './cli-environment';
 export type WireObject = Record<string, any>;
 export class CodexRpc extends EventEmitter {
   private child: ChildProcessWithoutNullStreams | null = null;
+  private lines: ReturnType<typeof createInterface> | null = null;
   private ready: Promise<void> | null = null;
   private sequence = 0;
   private pending = new Map<number, { resolve: (v: any) => void; reject: (e: Error) => void; timer: NodeJS.Timeout }>();
@@ -18,6 +19,22 @@ export class CodexRpc extends EventEmitter {
     return this.ready;
   }
 
+  /**
+   * Forget the child and fail everything waiting on it. Synchronous on purpose:
+   * `ready` must be null before the next `start()` can be called, otherwise a
+   * deliberate reconnect would hand back the promise of the process we just
+   * killed.
+   */
+  private reset(error: Error, announce: boolean): void {
+    this.child = null;
+    this.lines?.close();
+    this.lines = null;
+    this.ready = null;
+    for (const p of this.pending.values()) { clearTimeout(p.timer); p.reject(error); }
+    this.pending.clear();
+    if (announce) this.emit('disconnected', error);
+  }
+
   private async launch(): Promise<void> {
     const child = spawn(process.env.CODEX_BIN || 'codex', ['app-server', '--stdio'], {
       env: agentEnvironment(), stdio: ['pipe', 'pipe', 'pipe'],
@@ -26,18 +43,14 @@ export class CodexRpc extends EventEmitter {
     let stderr = '';
     child.stderr.on('data', (chunk: Buffer) => { stderr = (stderr + chunk.toString()).slice(-4000); });
     const lines = createInterface({ input: child.stdout });
+    this.lines = lines;
     lines.on('line', (line) => {
       try { this.receive(JSON.parse(line)); }
       catch (error) { this.emit('diagnostic', error); }
     });
     const failed = (error: Error) => {
-      if (this.child !== child) return;
-      this.child = null;
-      this.ready = null;
-      lines.close();
-      for (const p of this.pending.values()) { clearTimeout(p.timer); p.reject(error); }
-      this.pending.clear();
-      this.emit('disconnected', error);
+      if (this.child !== child) return; // Already torn down by close() or an earlier failure.
+      this.reset(error, true);
     };
     child.on('error', (e) => failed(new Error(`Cannot start Codex: ${e.message}. Check CODEX_BIN or your CLI installation.`)));
     child.on('exit', (code) => failed(new Error(`Codex app-server exited (${code}). ${stderr}`)));
@@ -81,5 +94,11 @@ export class CodexRpc extends EventEmitter {
 
   reply(id: number | string, result: WireObject): void { this.write({ id, result }); }
   rejectRequest(id: number | string, message: string): void { this.write({ id, error: { code: -32601, message } }); }
-  close(): void { this.child?.kill(); }
+
+  /** Stop the app-server. A later `start()` launches a fresh one. */
+  close(): void {
+    const child = this.child;
+    if (child || this.ready) this.reset(new Error('Codex app-server was stopped.'), true);
+    child?.kill();
+  }
 }

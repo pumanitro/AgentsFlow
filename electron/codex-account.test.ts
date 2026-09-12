@@ -49,3 +49,18 @@ test('unavailable Codex usage does not erase a valid account, and API keys never
   type='apiKey'; const r=await reader.read(true);
   assert.equal(r.signedIn,true); assert.equal(r.usage.ok,false); assert.equal(rateCalls,1);
 });
+
+test('every Codex limit is labelled by its own name and window, and keyed so two buckets never collide', () => {
+  const r = codexUsage({ rateLimitsByLimitId: {
+    codex: { primary: { usedPercent: 10, windowDurationMins: 300 }, secondary: { usedPercent: 20, windowDurationMins: 10080 } },
+    'gpt-6-astra': { limitName: 'GPT-6-Astra', primary: { usedPercent: 30, windowDurationMins: 60 }, secondary: { usedPercent: 40, windowDurationMins: 45 } },
+  } });
+  assert.ok(r.ok);
+  assert.deepEqual(r.snapshot.meters.map(m => m.key), ['codex:primary', 'codex:secondary', 'gpt-6-astra:primary', 'gpt-6-astra:secondary']);
+  assert.deepEqual(r.snapshot.meters.map(m => m.label), ['Codex · 5 hours', 'Codex · Weekly', 'GPT-6-Astra · 1 hours', 'GPT-6-Astra · 45 minutes']);
+  assert.deepEqual(r.snapshot.meters.map(m => m.group), ['session', 'weekly', 'session', 'session']);
+  // A bucket with no window length still gets a usable label rather than "undefined".
+  const fallback = codexUsage({ rateLimits: { primary: { usedPercent: 5 }, secondary: { usedPercent: 6 } } });
+  assert.ok(fallback.ok);
+  assert.deepEqual(fallback.snapshot.meters.map(m => m.label), ['Codex · Session', 'Codex · Longer window']);
+});
