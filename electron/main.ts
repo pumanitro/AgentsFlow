@@ -1,5 +1,6 @@
 import './cli-environment';
 import { CodexAgents } from './codex-agent';
+import * as codexServer from './codex-server';
 import type { CodexReply } from '../shared/codex';
 import { app, BrowserWindow, clipboard, dialog, ipcMain, nativeImage, powerMonitor, shell } from 'electron';
 import * as path from 'path';
@@ -1940,16 +1941,9 @@ function resumePeerAwareness(conv: Conversation): { mcpConfigPath?: string; appe
   }
 }
 
-/**
- * The Codex app-server's control socket.
- *
- * WIRING NOTE: this is the same formula Lane S exports as
- * `codexSocketPath(userData)` from `./codex-server`. Swap this local copy for
- * that import when the transport lands — it exists only so the terminal attach
- * compiles and runs before that merge.
- */
+// The socket the detached Codex server listens on (see codex-server.ts).
 function codexSocketPath(): string {
-  return path.join(app.getPath('userData'), 'codex', 'app-server.sock');
+  return codexServer.codexSocketPath(app.getPath('userData'));
 }
 
 ipcMain.handle('term:attach', async (_e, conversationId: string, cols: number, rows: number) => {
