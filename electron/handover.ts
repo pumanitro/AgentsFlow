@@ -18,6 +18,25 @@ const TAIL_BYTES = 1024 * 1024;
 
 interface Turn { role: 'user' | 'assistant'; text: string }
 
+// What a tool call is worth carrying across. The file paths are the part the
+// next agent cannot re-derive: "[used tool Edit]" says work happened somewhere,
+// "[edited src/app.ts]" says where, which is the difference between continuing
+// the work and starting it again. Tool RESULTS are dropped entirely — they are
+// the bulk of a transcript and the least transferable part of it.
+function toolUseText(block: Record<string, unknown>): string {
+  const name = String(block.name ?? '');
+  const input = (block.input ?? {}) as Record<string, unknown>;
+  if (name === 'Edit' || name === 'Write' || name === 'MultiEdit') {
+    const file = typeof input.file_path === 'string' ? input.file_path : '';
+    return file ? `[edited ${file}]` : `[used tool ${name}]`;
+  }
+  if (name === 'Bash') {
+    const command = typeof input.command === 'string' ? input.command : '';
+    return command ? `[ran: ${command.slice(0, 200)}]` : `[used tool ${name}]`;
+  }
+  return `[used tool ${name}]`;
+}
+
 function textOfContent(content: unknown): string {
   if (typeof content === 'string') return content;
   if (!Array.isArray(content)) return '';
@@ -25,8 +44,8 @@ function textOfContent(content: unknown): string {
   for (const block of content as Array<Record<string, unknown>>) {
     if (!block || typeof block !== 'object') continue;
     if (block.type === 'text' && typeof block.text === 'string') parts.push(block.text);
-    else if (block.type === 'tool_use') parts.push(`[used tool ${String(block.name ?? '')}]`);
-    else if (block.type === 'tool_result') parts.push('[tool result omitted]');
+    else if (block.type === 'tool_use') parts.push(toolUseText(block));
+    // tool_result: skipped — see above.
   }
   return parts.join('\n');
 }
@@ -43,9 +62,9 @@ export function extractClaudeTurns(jsonl: string): Turn[] {
     if (entry.isApiErrorMessage) continue;
     const message = entry.message as { content?: unknown } | undefined;
     const text = textOfContent(message?.content).trim();
+    // Tool results come back as user turns holding nothing else; dropping the
+    // blocks above leaves them empty, and the check on `text` removes them.
     if (!text) continue;
-    // Tool results come back as user turns; they are noise for a handover.
-    if (entry.type === 'user' && /^\[tool result omitted\]$/.test(text)) continue;
     turns.push({ role: entry.type, text });
   }
   return turns;

@@ -131,19 +131,20 @@ function harness(opts: {
   switched?: boolean;
   nudgeFails?: string;
   conversations?: Conversation[];
+  /** Set when the rotation pass moved the whole app to the other agent. */
+  switchedProvider?: 'claude' | 'codex';
 }) {
   const nudged: string[] = [];
   const rotations: number[] = [];
   const events: string[] = [];
   const deps: LimitWatchDeps = {
-    getPolicy: () => ({ enabled: true, threshold: 95, resumeOnLimit: true, ...opts.policy }),
+    getPolicy: () => ({ enabled: true, threshold: 95, resumeOnLimit: true, crossProvider: false, ...opts.policy }),
     getConversations: () => opts.conversations ?? [conv()],
     readHit: () => (opts.hit === undefined ? WALLED : opts.hit),
     rotate: async () => {
       rotations.push(Date.now());
-      return opts.switched === false
-        ? { switched: false, reason: 'no other account is below 95%' }
-        : { switched: true, reason: 'switched' };
+      if (opts.switched === false) return { switched: false, reason: 'no other account is below 95%' };
+      return { switched: true, reason: 'switched', provider: opts.switchedProvider };
     },
     nudge: async (c, text) => {
       nudged.push(`${c.id}:${text}`);
@@ -229,4 +230,26 @@ test('runOnce: a failed nudge is reported, not retried in a loop', async () => {
   await runOnce(deps);
   assert.equal(nudged.length, 1);
   assert.match(events[0], /couldn't resume it/);
+});
+
+// ---------------------------------------------------------------------------
+// When the rescue lands on the other provider
+// ---------------------------------------------------------------------------
+// An account switch moves one chat's login; a PROVIDER switch has already moved
+// every unfinished chat to a different agent, where each of them needs a
+// message before it does anything at all. So the "one rescue per pass" rule —
+// which exists to avoid a burst of switches and attach PTYs — does not apply:
+// there is only ever one switch, and the nudges that follow it are the whole
+// point of having switched.
+
+test('runOnce: a provider switch is named in the event and rescues every walled chat', async () => {
+  __resetForTests();
+  const { deps, nudged, rotations, events } = harness({
+    switchedProvider: 'codex',
+    conversations: [conv({ id: 'c1' }), conv({ id: 'c2' }), conv({ id: 'c3' })],
+  });
+  await runOnce(deps);
+  assert.equal(rotations.length, 1, 'one switch, not one per chat');
+  assert.deepEqual(nudged, ['c1:continue', 'c2:continue', 'c3:continue']);
+  assert.match(events[0], /switched to Codex and resumed it/);
 });

@@ -32,7 +32,7 @@
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import type { Conversation, RotationPolicy } from '../shared/types';
+import type { AgentProvider, Conversation, RotationPolicy } from '../shared/types';
 import { findTranscript } from './transcript-path';
 
 // How often transcripts are checked. Well under the ~10-minute retry cadence an
@@ -257,8 +257,12 @@ export interface LimitWatchDeps {
   getConversations: () => Conversation[];
   /** Defaults to the real transcript read; injected in tests. */
   readHit?: (conv: Conversation) => LimitHit | null;
-  /** One urgent rotation pass. True when an account switch actually happened. */
-  rotate: () => Promise<{ switched: boolean; reason: string }>;
+  /**
+   * One urgent rotation pass. True when a switch actually happened; `provider`
+   * is set when that switch moved the whole app to the other agent rather than
+   * to another account of the same one.
+   */
+  rotate: () => Promise<{ switched: boolean; reason: string; provider?: AgentProvider }>;
   /** Type a message into the session. */
   nudge: (conv: Conversation, text: string) => Promise<{ ok: boolean; error?: string }>;
   /** Surfaced on the same status line the rotation events use. */
@@ -303,6 +307,12 @@ export async function runOnce(deps: LimitWatchDeps): Promise<void> {
       if (!live.has(id)) { scanCache.delete(id); pathCache.delete(id); }
     }
 
+    // Set once a pass has moved the app to the other provider. A provider
+    // switch is not one account swapped for another: EVERY unfinished chat has
+    // been handed over by it, so the rest of this pass has nothing left to
+    // rotate and everything left to restart.
+    let switchedProvider: AgentProvider | null = null;
+
     for (const conv of convs) {
       const hit = readHit(conv);
       if (!hit) {
@@ -325,8 +335,14 @@ export async function runOnce(deps: LimitWatchDeps): Promise<void> {
       });
 
       // Switch first. Nudging before the account changes just spends the
-      // attempt budget re-hitting the same wall.
-      const rotated = await deps.rotate();
+      // attempt budget re-hitting the same wall. Once a provider switch has
+      // happened in this pass there is nothing left to ask rotation for — the
+      // move already covered every chat, so asking again would only risk
+      // bouncing the whole app back.
+      const rotated: { switched: boolean; reason: string; provider?: AgentProvider } = switchedProvider
+        ? { switched: true, reason: 'the provider already changed in this pass', provider: switchedProvider }
+        : await deps.rotate();
+      if (rotated.switched && rotated.provider) switchedProvider = rotated.provider;
       if (!rotated.switched) {
         // Rotation already writes its own status line for the interesting case
         // ("no other account is below 95%"), so don't overwrite it — just stop.
@@ -343,19 +359,25 @@ export async function runOnce(deps: LimitWatchDeps): Promise<void> {
       };
       attempts.set(conv.id, attempt);
 
+      const what = rotated.provider
+        ? `switched to ${rotated.provider === 'codex' ? 'Codex' : 'Claude'}`
+        : 'switched account';
       const sent = await deps.nudge(conv, RESUME_MESSAGE);
       if (sent.ok) {
-        console.log('[agentsflow][limit-watch] resumed a walled chat', { title: conv.title, attempt: attempt.count });
-        deps.onEvent(`Hit the limit in “${conv.title}” — switched account and resumed it.`);
+        console.log('[agentsflow][limit-watch] resumed a walled chat', { title: conv.title, attempt: attempt.count, provider: rotated.provider });
+        deps.onEvent(`Hit the limit in “${conv.title}” — ${what} and resumed it.`);
       } else {
         console.warn('[agentsflow][limit-watch] could not resume the chat', { title: conv.title, error: sent.error });
-        deps.onEvent(`Hit the limit in “${conv.title}” — switched account, but couldn't resume it (${sent.error}).`);
+        deps.onEvent(`Hit the limit in “${conv.title}” — ${what}, but couldn't resume it (${sent.error}).`);
       }
-      // One rescue per pass. A wall is usually account-wide, so the next pass
-      // will find the other chats already unblocked by this same switch, and
-      // the ones that aren't get their turn 30 seconds later rather than a
-      // burst of switches and attach PTYs all at once.
-      break;
+      // One rescue per pass, for an ACCOUNT switch. A wall is usually
+      // account-wide, so the next pass will find the other chats already
+      // unblocked by this same switch, and the ones that aren't get their turn
+      // 30 seconds later rather than a burst of switches and attach PTYs all at
+      // once. A PROVIDER switch is different: it has already moved every chat,
+      // and each one needs a message before it does anything at all — leaving
+      // them for later passes would park them behind this one's cooldown.
+      if (!switchedProvider) break;
     }
   } finally {
     running = false;

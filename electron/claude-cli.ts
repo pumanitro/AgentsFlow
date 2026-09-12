@@ -340,7 +340,16 @@ export async function dispatchBackground(opts: {
   if (opts.mcpConfigPath) args.push('--mcp-config', opts.mcpConfigPath);
   if (opts.appendSystemPrompt) args.push('--append-system-prompt', opts.appendSystemPrompt);
   args.push(opts.prompt);
-  console.log('[agentsflow][dispatch] invoking claude', { bin: CLAUDE_BIN, cwd: opts.cwd, args });
+  // The prompt itself never goes to the log. A handover seeds a session with a
+  // condensed transcript — up to 12 k characters — and one line per spawn of
+  // that is how an unrotated main.log has frozen this app before (see the
+  // log-storm incident). Its length is the part worth keeping.
+  console.log('[agentsflow][dispatch] invoking claude', {
+    bin: CLAUDE_BIN,
+    cwd: opts.cwd,
+    args: args.slice(0, -1),
+    promptChars: opts.prompt.length,
+  });
   const { code, stdout, stderr } = await runCmd(args, { cwd: opts.cwd, timeoutMs: 15000 });
   const cleanStdout = stripAnsi(stdout);
   const cleanStderr = stripAnsi(stderr);
