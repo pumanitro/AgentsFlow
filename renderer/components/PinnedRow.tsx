@@ -68,7 +68,9 @@ export default function PinnedRow({ conv, onAttach, onSaveTitle, onMarkDone, onA
     setDraft(conv.title);
   };
 
-  const ready = !!conv.sessionId || conv.provider === 'codex';
+  // A handed-over conversation has no session on this side yet — opening it is
+  // how you start one, so the row must not be parked at "starting…".
+  const ready = !!conv.sessionId || conv.provider === 'codex' || !!conv.handover;
 
   const handleRowClick = () => {
     // eslint-disable-next-line no-console
@@ -132,7 +134,6 @@ export default function PinnedRow({ conv, onAttach, onSaveTitle, onMarkDone, onA
               className="min-w-0 truncate text-left text-sm select-text rounded px-1 -mx-1 hover:bg-bg/40 text-text/90"
               title="Double-click to rename"
             >
-              <span className="mr-2 text-[10px] text-muted uppercase">{conv.provider || 'claude'}</span>
               {conv.title || <span className="text-muted italic">—</span>}
             </button>
             <button

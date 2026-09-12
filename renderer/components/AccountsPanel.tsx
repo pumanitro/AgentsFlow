@@ -2,8 +2,10 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import dynamic from 'next/dynamic';
 import { api } from '../lib/ipc';
+import { useAccountsSnapshot } from '../lib/use-accounts';
+import ProviderIcon, { providerName } from './ProviderIcon';
 import type { CSSProperties, ReactNode } from 'react';
-import type { Account, AccountsSnapshot, CodexAccountStatus, RotationPolicy, RotationStatus, UsageMeter, UsageResult } from '../../shared/types';
+import type { Account, AgentProvider, CodexAccount, CodexAccountStatus, RotationPolicy, RotationStatus, UsageMeter, UsageResult } from '../../shared/types';
 import { worstMeter } from '../../shared/usage';
 
 const Terminal = dynamic(() => import('./Terminal'), { ssr: false });
@@ -276,12 +278,18 @@ function AccountRow({
  * The one-time browser login for a new account, shown in a real terminal so the
  * user can complete the OAuth flow (and paste the code back) exactly as they
  * would in a CLI. Polls until the login lands, then hands back the Account.
+ *
+ * Both providers use it: Claude's flow is started from an email address and
+ * probed with `probeAccount`; Codex's runs `codex login` in the same terminal
+ * and is probed with `probeCodexAccount`, which is the only difference the user
+ * should be able to feel.
  */
 function AddAccountModal({
   pendingId,
   shellId,
   email,
   cwd,
+  provider = 'claude',
   onDone,
   onCancel,
 }: {
@@ -289,6 +297,7 @@ function AddAccountModal({
   shellId: string;
   email: string;
   cwd: string;
+  provider?: AgentProvider;
   onDone: () => void;
   onCancel: (reason?: string) => void;
 }) {
@@ -304,6 +313,18 @@ function AddAccountModal({
     const tick = async () => {
       if (stop || settled.current) return;
       try {
+        if (provider === 'codex') {
+          const r = await api().probeCodexAccount(pendingId);
+          if (stop) return;
+          if (r.status === 'ok') {
+            settled.current = true;
+            setSignedIn([r.account.label, r.account.email, r.account.plan].filter(Boolean).join(' · ') || 'your Codex account');
+          } else if (r.status === 'duplicate') {
+            settled.current = true;
+            setError(r.error);
+          }
+          return;
+        }
         const r = await api().probeAccount(pendingId);
         if (stop) return;
         if (r.status === 'ok') {
@@ -317,7 +338,7 @@ function AddAccountModal({
     };
     const t = setInterval(tick, PROBE_MS);
     return () => { stop = true; clearInterval(t); };
-  }, [pendingId]);
+  }, [pendingId, provider]);
 
   // Escape always gets you out. The terminal owns the keyboard while it has
   // focus, so this listens at the window level in the capture phase.
@@ -341,7 +362,10 @@ function AddAccountModal({
         <div className="shrink-0 px-4 py-3 border-b border-border">
           <div className="flex items-center gap-2">
             <span className="w-1 h-4 rounded-full bg-accent shrink-0" aria-hidden="true" />
-            <span className="text-[13px] text-text font-semibold">Sign in as {email}</span>
+            <span className="text-[13px] text-text font-semibold flex items-center gap-1.5">
+              <ProviderIcon provider={provider} size={13} />
+              {provider === 'codex' ? 'Sign in to Codex' : `Sign in as ${email}`}
+            </span>
             <button
               onClick={() => (signedIn ? onDone() : onCancel())}
               className="ml-auto text-subtle hover:text-text px-2 py-0.5 rounded hover:bg-panel2"
@@ -353,6 +377,20 @@ function AddAccountModal({
             <p className="mt-2 text-[11px] text-muted leading-relaxed">
               Done — nothing else is needed here.
             </p>
+          ) : provider === 'codex' ? (
+            <>
+              <p className="mt-2 text-[11px] text-muted leading-relaxed">
+                The terminal below is running <code className="text-text">codex login</code>, which
+                opens a browser tab — authorise there with the ChatGPT account you want. This happens{' '}
+                <strong className="text-text">once</strong>; switching to it later never opens a
+                browser.
+              </p>
+              <p className="mt-1 text-[11px] text-warning leading-relaxed">
+                Your browser can only hold one ChatGPT session, so if you are already signed in as
+                another account, use an incognito window or a separate Chrome profile — otherwise
+                this will authorise the account you are already signed in as.
+              </p>
+            </>
           ) : (
             <>
               <p className="mt-2 text-[11px] text-muted leading-relaxed">
@@ -412,43 +450,183 @@ function AddAccountModal({
   );
 }
 
+/**
+ * One saved Codex sign-in. No meters: the Codex CLI reports usage only for the
+ * login it currently holds, so a stored account's headroom is genuinely unknown
+ * until it is switched to — and a fake bar would be worse than no bar.
+ */
+function CodexRow({
+  account,
+  active,
+  busy,
+  masked,
+  onSwitch,
+  onRemove,
+}: {
+  account: CodexAccount;
+  active: boolean;
+  busy: boolean;
+  masked: boolean;
+  onSwitch: () => void;
+  onRemove: () => void;
+}) {
+  const name = account.label || account.email || 'Saved sign-in';
+  return (
+    <div
+      className={`group flex items-center gap-2 px-3 py-1.5 ${
+        active ? 'bg-info/10 border-l-2 border-info' : 'border-l-2 border-transparent hover:bg-panel2/60'
+      }`}
+    >
+      <button
+        onClick={onSwitch}
+        disabled={active || busy}
+        className="flex-1 min-w-0 text-left disabled:cursor-default"
+        title={active ? 'This Codex sign-in is in use' : masked ? 'Switch to this Codex sign-in' : `Switch to ${name}`}
+      >
+        <div className="flex items-baseline gap-1.5">
+          <span
+            className={`text-[12px] truncate ${active ? 'text-text font-semibold' : 'text-text'} ${masked ? 'select-none' : ''}`}
+            style={masked ? MASK : undefined}
+          >
+            {account.email || name}
+          </span>
+          {active && <span className="text-[9px] uppercase tracking-wider text-info shrink-0">active</span>}
+        </div>
+        <div className={`mt-0.5 text-[10px] text-muted truncate ${masked ? 'select-none' : ''}`} style={masked ? MASK : undefined}>
+          Codex{account.label ? ` · ${account.label}` : ''}{account.plan ? ` · ${account.plan}` : ''}
+        </div>
+      </button>
+      <button
+        onClick={onRemove}
+        disabled={busy}
+        className="shrink-0 opacity-0 group-hover:opacity-100 text-subtle hover:text-danger px-1 rounded disabled:opacity-30"
+        title={masked ? 'Remove this Codex sign-in' : `Remove ${name}`}
+        aria-label={masked ? 'Remove this Codex sign-in' : `Remove ${name}`}
+      >
+        ✕
+      </button>
+    </div>
+  );
+}
+
+/**
+ * The header of a provider section — and the answer to "which licence am I
+ * using?". Exactly one section carries the USING pill; the other offers the
+ * button that moves it.
+ */
+function ProviderSection({
+  provider,
+  open,
+  onToggle,
+  active,
+  onUse,
+  busy,
+  error,
+  children,
+}: {
+  provider: AgentProvider;
+  open: boolean;
+  onToggle: () => void;
+  active: boolean;
+  onUse: () => void;
+  busy: boolean;
+  error: string | null;
+  children: ReactNode;
+}) {
+  const name = providerName(provider);
+  return (
+    <div className={`border-t border-border/60 first:border-t-0 ${active ? 'bg-accent/[0.04]' : ''}`}>
+      <div className="flex items-center gap-2 px-2 py-1.5">
+        <button
+          onClick={onToggle}
+          className="flex items-center gap-1.5 flex-1 min-w-0 text-left"
+          title={open ? `Hide ${name} accounts` : `Show ${name} accounts`}
+          aria-expanded={open}
+        >
+          <span className="text-muted text-[10px] w-3 shrink-0">{open ? '▼' : '▶'}</span>
+          <ProviderIcon provider={provider} size={13} className={active ? 'text-accent' : 'text-muted'} />
+          <span className={`text-[11px] font-semibold truncate ${active ? 'text-text' : 'text-muted'}`}>{name}</span>
+        </button>
+        {active ? (
+          <span
+            className="shrink-0 text-[9px] uppercase tracking-wider font-semibold px-1.5 py-0.5 rounded-full bg-accent text-bg"
+            title={`New chats and the Usage panel use ${name}`}
+          >
+            using
+          </span>
+        ) : (
+          <button
+            onClick={onUse}
+            disabled={busy}
+            className="shrink-0 text-[10px] px-2 py-0.5 rounded border border-border text-muted hover:text-text hover:border-accent/60 disabled:opacity-40"
+            title={`Use ${name} for new chats — unfinished conversations move across`}
+          >
+            Use
+          </button>
+        )}
+      </div>
+      {error && (
+        <div className="mx-3 mb-1.5 px-2 py-1.5 rounded border border-danger/40 bg-danger/10 text-[11px] text-danger leading-relaxed">
+          {error}
+        </div>
+      )}
+      {open && children}
+    </div>
+  );
+}
+
 export default function AccountsPanel() {
   const [open, setOpen] = usePersistedBool('agentsflow:accounts:open', true);
   // Screen-sharing privacy: the pool is a list of the user's personal and work
   // addresses sitting permanently in the sidebar. Persisted, so it stays hidden
   // across restarts once you have decided you want it hidden.
   const [masked, setMasked] = usePersistedBool('agentsflow:accounts:maskEmails', false);
-  const [snapshot, setSnapshot] = useState<AccountsSnapshot>({ accounts: [], activeId: null });
+  // One live snapshot for the whole app — the composer and the Usage panel read
+  // the same hook, so "which licence am I using" has exactly one answer.
+  const { snapshot, reload: loadAccounts } = useAccountsSnapshot();
+  const [claudeOpen, setClaudeOpen] = usePersistedBool('agentsflow:accounts:claudeOpen', true);
+  const [codexOpen, setCodexOpen] = usePersistedBool('agentsflow:accounts:codexOpen', true);
   const [usageById, setUsageById] = useState<Record<string, UsageResult>>({});
   const [adding, setAdding] = useState(false);
   const [email, setEmail] = useState('');
   const [label, setLabel] = useState('');
   const [codex, setCodex] = useState<CodexAccountStatus | null>(null);
+  const [codexAdding, setCodexAdding] = useState(false);
+  const [codexLabel, setCodexLabel] = useState('');
+  const [codexError, setCodexError] = useState<string | null>(null);
+  // Refused provider switches (e.g. "Codex is not signed in") belong next to the
+  // section whose button was pressed, not in the Claude error slot.
+  const [providerError, setProviderError] = useState<Partial<Record<AgentProvider, string>>>({});
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [repairing, setRepairing] = useState(false);
-  const [pending, setPending] = useState<{ pendingId: string; shellId: string; email: string; cwd: string } | null>(null);
-  const [policy, setPolicy] = useState<RotationPolicy>({ enabled: false, threshold: 95, resumeOnLimit: true });
+  const [pending, setPending] = useState<{ pendingId: string; shellId: string; email: string; cwd: string; provider: AgentProvider } | null>(null);
+  const [policy, setPolicy] = useState<RotationPolicy>({ enabled: false, threshold: 95, resumeOnLimit: true, crossProvider: false });
   const [rotationStatus, setRotationStatus] = useState<RotationStatus | null>(null);
   const mounted = useRef(true);
 
+  // Declared before every other effect here on purpose: effects run in source
+  // order, so a remount (React strict mode unmounts and remounts) must flip this
+  // back to true before anything that guards on it loads.
   useEffect(() => {
-    let stopped = false;
-    const load = async () => { try { const value = await api().getCodexAccount(); if (!stopped) setCodex(value); } catch { /* unavailable on older preloads */ } };
-    void load(); const timer = setInterval(load, 60_000);
-    return () => { stopped = true; clearInterval(timer); };
+    mounted.current = true;
+    return () => { mounted.current = false; };
   }, []);
+
+  const loadCodex = useCallback(async () => {
+    try {
+      const value = await api().getCodexAccount();
+      if (mounted.current) setCodex(value);
+    } catch { /* unavailable on older preloads */ }
+  }, []);
+
+  useEffect(() => {
+    void loadCodex();
+    const timer = setInterval(() => { void loadCodex(); }, 60_000);
+    return () => clearInterval(timer);
+  }, [loadCodex]);
 
   const unavailable = typeof api().listAccounts !== 'function';
-
-  const loadAccounts = useCallback(async () => {
-    const a = api();
-    if (typeof a.listAccounts !== 'function') return;
-    try {
-      const s = await a.listAccounts();
-      if (mounted.current) setSnapshot(s);
-    } catch { /* ignore */ }
-  }, []);
 
   // Meters are fetched per account with that account's own token, so the pool
   // shows real headroom for accounts you are not currently signed in as.
@@ -466,8 +644,6 @@ export default function AccountsPanel() {
   }, []);
 
   useEffect(() => {
-    mounted.current = true;
-    void loadAccounts();
     const a = api();
     if (typeof a.getRotationPolicy === 'function') {
       void a.getRotationPolicy().then((r) => {
@@ -476,14 +652,11 @@ export default function AccountsPanel() {
         setRotationStatus(r.status);
       }).catch(() => {});
     }
-    const off = typeof a.onAccountsUpdated === 'function' ? a.onAccountsUpdated((s) => {
-      if (mounted.current) setSnapshot(s);
-    }) : undefined;
     const offRotation = typeof a.onRotationStatus === 'function' ? a.onRotationStatus((s) => {
       if (mounted.current) setRotationStatus(s);
     }) : undefined;
-    return () => { mounted.current = false; off?.(); offRotation?.(); };
-  }, [loadAccounts]);
+    return () => { offRotation?.(); };
+  }, []);
 
   const savePolicy = useCallback(async (next: RotationPolicy) => {
     setPolicy(next);
@@ -511,7 +684,7 @@ export default function AccountsPanel() {
         setError(r.error);
         return;
       }
-      setPending({ pendingId: r.pendingId, shellId: r.shellId, email: r.email, cwd: r.cwd });
+      setPending({ pendingId: r.pendingId, shellId: r.shellId, email: r.email, cwd: r.cwd, provider: 'claude' });
       setEmail('');
       setLabel('');
       setAdding(false);
@@ -541,14 +714,14 @@ export default function AccountsPanel() {
     setRepairing(true);
     try {
       const s = await api().repairAccounts();
-      if (mounted.current) setSnapshot(s);
+      await loadAccounts();
       // A successful repair leaves the meters reading "signed out" until they
       // are re-fetched, which would look like the repair had not worked.
       if (mounted.current && !s.authIssue) await loadUsage(s.accounts, true);
     } catch { /* the banner stays up; the loop retries every minute anyway */ } finally {
       if (mounted.current) setRepairing(false);
     }
-  }, [loadUsage]);
+  }, [loadAccounts, loadUsage]);
 
   const remove = useCallback(async (account: Account) => {
     setBusy(true);
@@ -560,7 +733,99 @@ export default function AccountsPanel() {
     }
   }, [loadAccounts]);
 
+  // ---- Provider selection + the Codex pool --------------------------------
+
+  const useProvider = useCallback(async (provider: AgentProvider) => {
+    setProviderError((prev) => ({ ...prev, [provider]: undefined }));
+    setBusy(true);
+    try {
+      await api().setActiveProvider(provider);
+      await loadAccounts();
+      void loadCodex();
+    } catch (err) {
+      // The main process refuses with a sentence worth showing — "Codex is not
+      // signed in" is the whole reason the button did nothing.
+      const message = (err as Error)?.message ?? `Could not switch to ${providerName(provider)}.`;
+      if (mounted.current) setProviderError((prev) => ({ ...prev, [provider]: message.replace(/^Error:\s*/, '') }));
+    } finally {
+      if (mounted.current) setBusy(false);
+    }
+  }, [loadAccounts, loadCodex]);
+
+  const startCodexAdd = useCallback(async () => {
+    setCodexError(null);
+    setBusy(true);
+    try {
+      const r = await api().addCodexAccount(codexLabel.trim() || undefined);
+      if (!r.ok) {
+        setCodexError(r.error);
+        return;
+      }
+      setPending({ pendingId: r.pendingId, shellId: r.shellId, email: r.email, cwd: r.cwd, provider: 'codex' });
+      setCodexLabel('');
+      setCodexAdding(false);
+    } catch (err) {
+      setCodexError((err as Error)?.message ?? 'Could not start the Codex sign-in.');
+    } finally {
+      setBusy(false);
+    }
+  }, [codexLabel]);
+
+  const switchCodex = useCallback(async (id: string) => {
+    setCodexError(null);
+    setBusy(true);
+    try {
+      const r = await api().switchCodexAccount(id);
+      if (!r.ok) setCodexError(r.error);
+    } catch (err) {
+      setCodexError((err as Error)?.message ?? 'Switch failed.');
+    } finally {
+      setBusy(false);
+      void loadAccounts();
+      void loadCodex();
+    }
+  }, [loadAccounts, loadCodex]);
+
+  const removeCodex = useCallback(async (id: string) => {
+    setCodexError(null);
+    setBusy(true);
+    try {
+      await api().removeCodexAccount(id);
+    } catch (err) {
+      setCodexError((err as Error)?.message ?? 'Could not remove that sign-in.');
+    } finally {
+      setBusy(false);
+      void loadAccounts();
+    }
+  }, [loadAccounts]);
+
+  const saveCurrentCodex = useCallback(async () => {
+    setCodexError(null);
+    setBusy(true);
+    try {
+      const r = await api().saveCurrentCodexLogin();
+      if (!r.ok) setCodexError(r.error);
+    } catch (err) {
+      setCodexError((err as Error)?.message ?? 'Could not save the current login.');
+    } finally {
+      setBusy(false);
+      void loadAccounts();
+      void loadCodex();
+    }
+  }, [loadAccounts, loadCodex]);
+
   const activeAccount = snapshot.accounts.find((a) => a.id === snapshot.activeId) ?? null;
+  const activeCodex = snapshot.codexAccounts.find((a) => a.id === snapshot.activeCodexId) ?? null;
+  // The CLI's current login is "saved" when the pool points at it, or when a
+  // saved sign-in carries the same address (the pool was filled before this
+  // account was switched to).
+  const currentCodexSaved = Boolean(
+    activeCodex
+    || (codex?.email && snapshot.codexAccounts.some((a) => a.email && a.email.toLowerCase() === codex.email!.toLowerCase())),
+  );
+  const usingLabel = snapshot.activeProvider === 'codex'
+    ? (activeCodex?.label || activeCodex?.email || codex?.email || '')
+    : (activeAccount?.label || activeAccount?.email || 'current login');
 
   return (
     <div className="shrink-0 rounded-lg border border-border bg-panel overflow-hidden flex flex-col min-h-0">
@@ -573,15 +838,24 @@ export default function AccountsPanel() {
           title={open ? 'Hide accounts' : 'Show the account pool'}
         >
           <span className="text-muted text-[10px] w-3 shrink-0">{open ? '▼' : '▶'}</span>
-          <span className="text-[11px] uppercase tracking-wider text-text font-semibold">Accounts</span>
-          <span
-            className={`text-[10px] text-muted truncate ${masked && activeAccount ? 'select-none' : ''}`}
-            style={masked && activeAccount ? MASK : undefined}
-          >
-            {snapshot.accounts.length > 0 ? `${snapshot.accounts.length} Claude` : ''}{codex?.signedIn ? ' · Codex' : ''}
+          <span className="text-[11px] uppercase tracking-wider text-text font-semibold shrink-0">Accounts</span>
+          {/* The one-line answer to "which licence am I on?" — provider first,
+              then the account inside it. */}
+          <span className="flex items-center gap-1 min-w-0 text-[10px] text-muted">
+            <span className="shrink-0">Using</span>
+            <ProviderIcon provider={snapshot.activeProvider} size={11} className="text-accent" />
+            <span className="text-text shrink-0">{providerName(snapshot.activeProvider)}</span>
+            {usingLabel && (
+              <>
+                <span className="shrink-0">·</span>
+                <span className={`truncate ${masked ? 'select-none' : ''}`} style={masked ? MASK : undefined}>
+                  {usingLabel}
+                </span>
+              </>
+            )}
           </span>
         </button>
-        {(snapshot.accounts.length > 0 || codex?.signedIn) && (
+        {(snapshot.accounts.length > 0 || snapshot.codexAccounts.length > 0 || codex?.signedIn) && (
           <button
             onClick={() => setMasked(!masked)}
             className={`shrink-0 p-0.5 rounded ${masked ? 'text-info' : 'text-subtle hover:text-text'}`}
@@ -607,178 +881,291 @@ export default function AccountsPanel() {
       </div>
 
       {open && (
-        <div className="flex-1 min-h-0 overflow-y-auto border-t border-border/60 py-1" style={{ maxHeight: 'min(240px, 28vh)' }}>
+        <div className="flex-1 min-h-0 overflow-y-auto border-t border-border/60" style={{ maxHeight: 'min(420px, 45vh)' }}>
           {unavailable ? (
             <div className="px-3 py-3 text-xs text-muted italic">
               Restart the app to enable Accounts (preload needs to refresh).
             </div>
           ) : (
             <div className="flex flex-col">
-              {snapshot.accounts.length === 0 && (
-                <div className="px-3 py-2 text-[11px] text-muted leading-relaxed">
-                  Add Claude memberships to switch or rotate between them. Personal and work
-                  memberships can share an email. Your current CLI login is used until you switch.
-                </div>
-              )}
-              {snapshot.accounts.map((account) => (
-                <AccountRow
-                  key={account.id}
-                  account={account}
-                  active={account.id === snapshot.activeId}
-                  usage={usageById[account.id]}
-                  busy={busy}
-                  masked={masked}
-                  onSwitch={() => switchTo(account.id)}
-                  onRemove={() => remove(account)}
-                />
-              ))}
+              <ProviderSection
+                provider="claude"
+                open={claudeOpen}
+                onToggle={() => setClaudeOpen(!claudeOpen)}
+                active={snapshot.activeProvider === 'claude'}
+                onUse={() => void useProvider('claude')}
+                busy={busy}
+                error={providerError.claude ?? null}
+              >
+                {snapshot.accounts.length === 0 && (
+                  <div className="px-3 py-2 text-[11px] text-muted leading-relaxed">
+                    Add Claude memberships to switch or rotate between them. Personal and work
+                    memberships can share an email. Your current CLI login is used until you switch.
+                  </div>
+                )}
+                {snapshot.accounts.map((account) => (
+                  <AccountRow
+                    key={account.id}
+                    account={account}
+                    active={account.id === snapshot.activeId}
+                    usage={usageById[account.id]}
+                    busy={busy}
+                    masked={masked}
+                    onSwitch={() => switchTo(account.id)}
+                    onRemove={() => remove(account)}
+                  />
+                ))}
 
-              {/* Divergence between the two stored copies of a token is repaired
-                  silently on a timer; this banner is only for the residue that
-                  needs a human, so it stays absent essentially always. */}
-              {snapshot.authIssue && (
-                <div className="mx-3 my-1.5 px-2 py-1.5 rounded border border-warning/40 bg-warning/10 text-[11px] text-warning leading-relaxed">
-                  <div>{maskEmails(snapshot.authIssue, masked)}</div>
-                  <button
-                    onClick={() => void repair()}
-                    disabled={repairing}
-                    className="mt-1 text-[11px] px-2 py-0.5 rounded border border-warning/50 text-warning hover:bg-warning/15 disabled:opacity-40"
-                  >
-                    {repairing ? 'Checking…' : 'Check again'}
-                  </button>
-                </div>
-              )}
-
-              {error && (
-                <div className="mx-3 my-1.5 px-2 py-1.5 rounded border border-danger/40 bg-danger/10 text-[11px] text-danger leading-relaxed">
-                  {maskEmails(error, masked)}
-                </div>
-              )}
-
-              {/* Auto-rotation. Needs two accounts to mean anything, so it only
-                  appears once there is somewhere to rotate to. */}
-              {snapshot.accounts.length >= 2 && (
-                <div className="mx-3 my-1 pt-1.5 border-t border-border/50">
-                  <label className="flex items-center gap-2 cursor-pointer">
-                    <input
-                      type="checkbox"
-                      checked={policy.enabled}
-                      onChange={(e) => void savePolicy({ ...policy, enabled: e.target.checked })}
-                      className="accent-info"
-                    />
-                    {/* The label is the only part allowed to give up room: a
-                        narrow sidebar should clip the sentence, not shove the
-                        threshold or the ⓘ off the edge. */}
-                    <span className="text-[11px] text-text min-w-0 truncate">Switch automatically at</span>
-                    <input
-                      type="number"
-                      min={50}
-                      max={99}
-                      value={policy.threshold}
-                      onChange={(e) => {
-                        const n = Number(e.target.value);
-                        if (Number.isFinite(n)) void savePolicy({ ...policy, threshold: n });
-                      }}
-                      className="shrink-0 w-11 bg-panel2 border border-border rounded px-1 py-0.5 text-[11px] text-text text-right focus:outline-none focus:border-info"
-                    />
-                    <span className="shrink-0 text-[11px] text-muted">%</span>
-                    {/* The explainer is one-time knowledge, so it lives behind
-                        the ⓘ rather than costing three lines of sidebar forever. */}
-                    <span className="ml-auto flex items-center" onClick={(e) => e.preventDefault()}>
-                      <InfoHint label="About automatic switching">
-                        Runs in the background even with the window closed, so an overnight run rolls
-                        onto a fresh account instead of hitting the wall.
-                      </InfoHint>
-                    </span>
-                  </label>
-                  {/* The backstop, indented under the threshold it backs up:
-                      thresholds are a forecast, and a chat that hits the wall
-                      anyway would otherwise sit dead until someone looks. */}
-                  <label className="mt-1 flex items-center gap-2 cursor-pointer pl-5">
-                    <input
-                      type="checkbox"
-                      checked={policy.resumeOnLimit}
-                      disabled={!policy.enabled}
-                      onChange={(e) => void savePolicy({ ...policy, resumeOnLimit: e.target.checked })}
-                      className="accent-info disabled:opacity-40"
-                    />
-                    <span className={`text-[11px] min-w-0 truncate ${policy.enabled ? 'text-text' : 'text-subtle'}`}>
-                      Resume chats that hit the limit
-                    </span>
-                    <span className="ml-auto flex items-center" onClick={(e) => e.preventDefault()}>
-                      <InfoHint label="About resuming after a limit">
-                        If a chat is refused with “You’ve hit your session limit”, switch account
-                        straight away and send it “continue”, so it picks up where it stopped instead
-                        of waiting for the window to reset.
-                      </InfoHint>
-                    </span>
-                  </label>
-                  {rotationStatus?.disabledReason && (
-                    <p className="mt-1 text-[10px] text-danger leading-relaxed">
-                      {maskEmails(rotationStatus.disabledReason, masked)}
-                    </p>
-                  )}
-                  {/* The whole line goes behind the eye, not just the address in
-                      it: "switched to X at 96%" is a readout of the account and
-                      its headroom, which is the thing you are hiding. */}
-                  {!rotationStatus?.disabledReason && rotationStatus?.lastEvent && (
-                    <p
-                      className={`mt-1 text-[10px] text-muted leading-relaxed ${masked ? 'select-none' : ''}`}
-                      style={masked ? MASK : undefined}
-                      title={masked ? 'Hidden — use the eye icon to show' : undefined}
-                    >
-                      {rotationStatus.lastEvent}
-                    </p>
-                  )}
-                </div>
-              )}
-
-              <div className="mx-3 my-2 border-t border-border/50" />
-              <div className="px-3 py-1.5" data-testid="codex-account">
-                <div className="flex items-center gap-2 text-[11px]"><strong>Codex</strong>
-                  {codex?.signedIn && <span className="text-info text-[9px] uppercase">current</span>}
-                  <span className="text-muted">{codex?.plan}</span>
-                </div>
-                <div className={`text-[12px] text-text truncate ${masked ? 'select-none' : ''}`} style={masked ? MASK : undefined}>
-                  {!codex ? 'Checking sign-in…' : codex.signedIn ? codex.email || codex.authType || 'Connected' : codex.error || 'Not signed in'}
-                </div>
-                <div className="text-[10px] text-muted mt-0.5">Uses the current Codex CLI login.</div>
-              </div>
-              <div className="px-3 pt-1.5 pb-1">
-                {adding ? (
-                  <div className="flex flex-col gap-1.5">
-                    <input aria-label="Account label" value={label} onChange={(e) => setLabel(e.target.value)}
-                      placeholder="Label (e.g. Personal or Abilitie)" maxLength={80}
-                      className="w-full bg-panel2 border border-border rounded px-2 py-1 text-[12px] text-text placeholder:text-subtle" />
-                    <input
-                      aria-label="Claude email"
-                      autoFocus
-                      value={email}
-                      onChange={(e) => setEmail(e.target.value)}
-                      onKeyDown={(e) => {
-                        if (e.key === 'Enter') void startAdd();
-                        if (e.key === 'Escape') { setAdding(false); setError(null); }
-                      }}
-                      placeholder="you@gmail.com or you@company.com"
-                      className="flex-1 min-w-0 bg-panel2 border border-border rounded px-2 py-1 text-[12px] text-text placeholder:text-subtle focus:outline-none focus:border-info"
-                    />
+                {/* Divergence between the two stored copies of a token is repaired
+                    silently on a timer; this banner is only for the residue that
+                    needs a human, so it stays absent essentially always. */}
+                {snapshot.authIssue && (
+                  <div className="mx-3 my-1.5 px-2 py-1.5 rounded border border-warning/40 bg-warning/10 text-[11px] text-warning leading-relaxed">
+                    <div>{maskEmails(snapshot.authIssue, masked)}</div>
                     <button
-                      onClick={() => void startAdd()}
-                      disabled={busy || !email.trim()}
-                      className="shrink-0 text-[11px] px-2 py-1 rounded border border-border text-text hover:bg-panel2 disabled:opacity-40"
+                      onClick={() => void repair()}
+                      disabled={repairing}
+                      className="mt-1 text-[11px] px-2 py-0.5 rounded border border-warning/50 text-warning hover:bg-warning/15 disabled:opacity-40"
                     >
-                      Sign in
+                      {repairing ? 'Checking…' : 'Check again'}
                     </button>
                   </div>
-                ) : (
-                  <button
-                    onClick={() => { setAdding(true); setError(null); }}
-                    className="w-full text-left text-[11px] text-muted hover:text-text py-0.5"
-                  >
-                    + Add Claude account
-                  </button>
                 )}
-              </div>
+
+                {error && (
+                  <div className="mx-3 my-1.5 px-2 py-1.5 rounded border border-danger/40 bg-danger/10 text-[11px] text-danger leading-relaxed">
+                    {maskEmails(error, masked)}
+                  </div>
+                )}
+
+                {/* Auto-rotation. Needs two accounts to mean anything, so it only
+                    appears once there is somewhere to rotate to. */}
+                {snapshot.accounts.length >= 2 && (
+                  <div className="mx-3 my-1 pt-1.5 border-t border-border/50">
+                    <label className="flex items-center gap-2 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={policy.enabled}
+                        onChange={(e) => void savePolicy({ ...policy, enabled: e.target.checked })}
+                        className="accent-info"
+                      />
+                      {/* The label is the only part allowed to give up room: a
+                          narrow sidebar should clip the sentence, not shove the
+                          threshold or the ⓘ off the edge. */}
+                      <span className="text-[11px] text-text min-w-0 truncate">Switch automatically at</span>
+                      <input
+                        type="number"
+                        min={50}
+                        max={99}
+                        value={policy.threshold}
+                        onChange={(e) => {
+                          const n = Number(e.target.value);
+                          if (Number.isFinite(n)) void savePolicy({ ...policy, threshold: n });
+                        }}
+                        className="shrink-0 w-11 bg-panel2 border border-border rounded px-1 py-0.5 text-[11px] text-text text-right focus:outline-none focus:border-info"
+                      />
+                      <span className="shrink-0 text-[11px] text-muted">%</span>
+                      {/* The explainer is one-time knowledge, so it lives behind
+                          the ⓘ rather than costing three lines of sidebar forever. */}
+                      <span className="ml-auto flex items-center" onClick={(e) => e.preventDefault()}>
+                        <InfoHint label="About automatic switching">
+                          Runs in the background even with the window closed, so an overnight run rolls
+                          onto a fresh account instead of hitting the wall.
+                        </InfoHint>
+                      </span>
+                    </label>
+                    {/* The backstop, indented under the threshold it backs up:
+                        thresholds are a forecast, and a chat that hits the wall
+                        anyway would otherwise sit dead until someone looks. */}
+                    <label className="mt-1 flex items-center gap-2 cursor-pointer pl-5">
+                      <input
+                        type="checkbox"
+                        checked={policy.resumeOnLimit}
+                        disabled={!policy.enabled}
+                        onChange={(e) => void savePolicy({ ...policy, resumeOnLimit: e.target.checked })}
+                        className="accent-info disabled:opacity-40"
+                      />
+                      <span className={`text-[11px] min-w-0 truncate ${policy.enabled ? 'text-text' : 'text-subtle'}`}>
+                        Resume chats that hit the limit
+                      </span>
+                      <span className="ml-auto flex items-center" onClick={(e) => e.preventDefault()}>
+                        <InfoHint label="About resuming after a limit">
+                          If a chat is refused with “You’ve hit your session limit”, switch account
+                          straight away and send it “continue”, so it picks up where it stopped instead
+                          of waiting for the window to reset.
+                        </InfoHint>
+                      </span>
+                    </label>
+                    {/* The last resort, one level further in: when the whole
+                        provider is out of headroom, the only move left is the
+                        other provider — and that means carrying the work over. */}
+                    <label className="mt-1 flex items-center gap-2 cursor-pointer pl-5">
+                      <input
+                        type="checkbox"
+                        checked={policy.crossProvider}
+                        disabled={!policy.enabled}
+                        onChange={(e) => void savePolicy({ ...policy, crossProvider: e.target.checked })}
+                        className="accent-info disabled:opacity-40"
+                      />
+                      <span className={`text-[11px] min-w-0 truncate ${policy.enabled ? 'text-text' : 'text-subtle'}`}>
+                        Rotate across providers (Claude ⇄ Codex)
+                      </span>
+                      <span className="ml-auto flex items-center" onClick={(e) => e.preventDefault()}>
+                        <InfoHint label="About rotating across providers">
+                          When the selected provider has no headroom left, switch to the other one and
+                          hand every unfinished conversation over to it. Off means rotation stays
+                          inside the selected provider.
+                        </InfoHint>
+                      </span>
+                    </label>
+                    {rotationStatus?.disabledReason && (
+                      <p className="mt-1 text-[10px] text-danger leading-relaxed">
+                        {maskEmails(rotationStatus.disabledReason, masked)}
+                      </p>
+                    )}
+                    {/* The whole line goes behind the eye, not just the address in
+                        it: "switched to X at 96%" is a readout of the account and
+                        its headroom, which is the thing you are hiding. */}
+                    {!rotationStatus?.disabledReason && rotationStatus?.lastEvent && (
+                      <p
+                        className={`mt-1 text-[10px] text-muted leading-relaxed ${masked ? 'select-none' : ''}`}
+                        style={masked ? MASK : undefined}
+                        title={masked ? 'Hidden — use the eye icon to show' : undefined}
+                      >
+                        {rotationStatus.lastEvent}
+                      </p>
+                    )}
+                  </div>
+                )}
+
+                <div className="px-3 pt-1.5 pb-2">
+                  {adding ? (
+                    <div className="flex flex-col gap-1.5">
+                      <input aria-label="Account label" value={label} onChange={(e) => setLabel(e.target.value)}
+                        placeholder="Label (e.g. Personal or Abilitie)" maxLength={80}
+                        className="w-full bg-panel2 border border-border rounded px-2 py-1 text-[12px] text-text placeholder:text-subtle" />
+                      <input
+                        aria-label="Claude email"
+                        autoFocus
+                        value={email}
+                        onChange={(e) => setEmail(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') void startAdd();
+                          if (e.key === 'Escape') { setAdding(false); setError(null); }
+                        }}
+                        placeholder="you@gmail.com or you@company.com"
+                        className="flex-1 min-w-0 bg-panel2 border border-border rounded px-2 py-1 text-[12px] text-text placeholder:text-subtle focus:outline-none focus:border-info"
+                      />
+                      <button
+                        onClick={() => void startAdd()}
+                        disabled={busy || !email.trim()}
+                        className="shrink-0 text-[11px] px-2 py-1 rounded border border-border text-text hover:bg-panel2 disabled:opacity-40"
+                      >
+                        Sign in
+                      </button>
+                    </div>
+                  ) : (
+                    <button
+                      onClick={() => { setAdding(true); setError(null); }}
+                      className="w-full text-left text-[11px] text-muted hover:text-text py-0.5"
+                    >
+                      + Add Claude account
+                    </button>
+                  )}
+                </div>
+              </ProviderSection>
+
+              <ProviderSection
+                provider="codex"
+                open={codexOpen}
+                onToggle={() => setCodexOpen(!codexOpen)}
+                active={snapshot.activeProvider === 'codex'}
+                onUse={() => void useProvider('codex')}
+                busy={busy}
+                error={providerError.codex ?? null}
+              >
+                <div data-testid="codex-account" className="px-3 py-1.5 border-l-2 border-transparent">
+                  <div className="flex items-baseline gap-1.5">
+                    <span className={`text-[12px] truncate ${codex?.signedIn ? 'text-text' : 'text-muted'}`}>
+                      {!codex
+                        ? 'Checking sign-in…'
+                        : codex.signedIn
+                          ? maskEmails(codex.email || codex.authType || 'Connected', masked)
+                          : maskEmails(codex.error || 'Not signed in', masked)}
+                    </span>
+                    {codex?.signedIn && (
+                      <span className="text-[9px] uppercase tracking-wider text-info shrink-0">current</span>
+                    )}
+                  </div>
+                  <div className="mt-0.5 text-[10px] text-muted truncate">
+                    The Codex CLI’s current login{codex?.plan ? ` · ${codex.plan}` : ''}
+                  </div>
+                  {/* An unsaved current login is the one Codex state the pool
+                      cannot switch back to later, so the fix is offered here. */}
+                  {codex?.signedIn && !currentCodexSaved && (
+                    <button
+                      onClick={() => void saveCurrentCodex()}
+                      disabled={busy}
+                      className="mt-1 text-[10px] px-2 py-0.5 rounded border border-border text-muted hover:text-text hover:border-accent/60 disabled:opacity-40"
+                      title="Copy this sign-in into the pool so you can switch back to it later"
+                    >
+                      Save current login
+                    </button>
+                  )}
+                </div>
+
+                {snapshot.codexAccounts.map((account) => (
+                  <CodexRow
+                    key={account.id}
+                    account={account}
+                    active={account.id === snapshot.activeCodexId}
+                    busy={busy}
+                    masked={masked}
+                    onSwitch={() => void switchCodex(account.id)}
+                    onRemove={() => void removeCodex(account.id)}
+                  />
+                ))}
+
+                {codexError && (
+                  <div className="mx-3 my-1.5 px-2 py-1.5 rounded border border-danger/40 bg-danger/10 text-[11px] text-danger leading-relaxed">
+                    {maskEmails(codexError, masked)}
+                  </div>
+                )}
+
+                <div className="px-3 pt-1.5 pb-2">
+                  {codexAdding ? (
+                    <div className="flex flex-col gap-1.5">
+                      <input
+                        aria-label="Codex account label"
+                        autoFocus
+                        value={codexLabel}
+                        onChange={(e) => setCodexLabel(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') void startCodexAdd();
+                          if (e.key === 'Escape') { setCodexAdding(false); setCodexError(null); }
+                        }}
+                        placeholder="Label (optional, e.g. Personal)"
+                        maxLength={80}
+                        className="w-full bg-panel2 border border-border rounded px-2 py-1 text-[12px] text-text placeholder:text-subtle focus:outline-none focus:border-info"
+                      />
+                      <button
+                        onClick={() => void startCodexAdd()}
+                        disabled={busy}
+                        className="shrink-0 text-[11px] px-2 py-1 rounded border border-border text-text hover:bg-panel2 disabled:opacity-40"
+                      >
+                        Sign in with codex login
+                      </button>
+                    </div>
+                  ) : (
+                    <button
+                      onClick={() => { setCodexAdding(true); setCodexError(null); }}
+                      className="w-full text-left text-[11px] text-muted hover:text-text py-0.5"
+                    >
+                      + Add Codex account
+                    </button>
+                  )}
+                </div>
+              </ProviderSection>
             </div>
           )}
         </div>
@@ -790,21 +1177,25 @@ export default function AccountsPanel() {
           shellId={pending.shellId}
           email={pending.email}
           cwd={pending.cwd}
+          provider={pending.provider}
           // Either way the login shell has done its job — leaving it running
           // would leak a PTY per account added.
           onDone={() => {
-            const { shellId } = pending;
+            const { shellId, provider } = pending;
             setPending(null);
             void api().killShell(shellId).catch(() => {});
             void loadAccounts();
+            if (provider === 'codex') void loadCodex();
           }}
           onCancel={(reason) => {
-            const { pendingId, shellId } = pending;
+            const { pendingId, shellId, provider } = pending;
             setPending(null);
-            if (reason) setError(reason);
+            if (reason) (provider === 'codex' ? setCodexError : setError)(reason);
             void api().killShell(shellId).catch(() => {});
-            void api().cancelAddAccount(pendingId).catch(() => {});
+            if (provider === 'codex') void api().cancelAddCodexAccount(pendingId).catch(() => {});
+            else void api().cancelAddAccount(pendingId).catch(() => {});
             void loadAccounts();
+            if (provider === 'codex') void loadCodex();
           }}
         />
       )}

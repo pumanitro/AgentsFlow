@@ -18,6 +18,14 @@ import { useUIState } from '../lib/ui-state';
 import { BridgeHealth, Conversation, PinnedDivider, PinnedItemRef, PinnedTodo, TrackedDirectory } from '../../shared/types';
 import { blockStepDropIndex, marqueeHits, moveRefsTo, refKey } from '../../shared/pinned-selection';
 
+/**
+ * Whether a row has something to open. A Claude chat needs its session; a Codex
+ * chat has a thread instead; a handed-over chat has neither yet and opening it
+ * is how you continue it on the other side. Same rule as PinnedRow's `ready`.
+ */
+const canOpen = (c: Conversation | undefined | null): boolean =>
+  Boolean(c && (c.sessionId || c.provider === 'codex' || c.handover));
+
 // Both touch the Electron-only `api()` at render time, so they must be
 // client-only — this page is server-rendered by Next, where `api()` throws.
 // FileEditor (CodeMirror / BlockNote) also only loads when a note is previewed.
@@ -500,10 +508,10 @@ export default function Home() {
           e.preventDefault();
           if (selectedChildId) {
             const child = convs.find((c) => c.id === selectedChildId);
-            if (child?.sessionId) router.push({ pathname: '/session', query: { id: child.id } });
+            if (canOpen(child)) router.push({ pathname: '/session', query: { id: child!.id } });
           } else if (focusedIdx >= 0 && focusedIdx < pinnedItems.length) {
             const item = pinnedItems[focusedIdx];
-            if (item.kind === 'conversation' && item.conv.sessionId) {
+            if (item.kind === 'conversation' && canOpen(item.conv)) {
               router.push({ pathname: '/session', query: { id: item.id } });
             } else if (item.kind === 'todo') {
               // Nothing to open — a task has no session; edit it instead.
@@ -636,7 +644,10 @@ export default function Home() {
   const attach = (c: Conversation) => {
     // eslint-disable-next-line no-console
     console.log('[agentsflow] attach()', { id: c.id, sessionId: c.sessionId });
-    if (!c.sessionId && c.provider !== 'codex') {
+    // A Codex chat has a thread instead of a session, and a handed-over one has
+    // neither until it is continued — both open, and the session view offers
+    // the right thing once it is there.
+    if (!canOpen(c)) {
       // eslint-disable-next-line no-console
       console.warn('[agentsflow] attach aborted: no sessionId yet');
       return;
