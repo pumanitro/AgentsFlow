@@ -802,29 +802,10 @@ export default function AccountsPanel() {
     }
   }, [loadAccounts]);
 
-  const saveCurrentCodex = useCallback(async () => {
-    setCodexError(null);
-    setBusy(true);
-    try {
-      const r = await api().saveCurrentCodexLogin();
-      if (!r.ok) setCodexError(r.error);
-    } catch (err) {
-      setCodexError((err as Error)?.message ?? 'Could not save the current login.');
-    } finally {
-      setBusy(false);
-      void loadAccounts();
-      void loadCodex();
-    }
-  }, [loadAccounts, loadCodex]);
-
   const activeCodex = snapshot.codexAccounts.find((a) => a.id === snapshot.activeCodexId) ?? null;
   // The CLI's current login is "saved" when the pool points at it, or when a
   // saved sign-in carries the same address (the pool was filled before this
   // account was switched to).
-  const currentCodexSaved = Boolean(
-    activeCodex
-    || (codex?.email && snapshot.codexAccounts.some((a) => a.email && a.email.toLowerCase() === codex.email!.toLowerCase())),
-  );
   // Rotation needs somewhere to rotate to: a second Claude account, or a
   // signed-in Codex for provider rotation.
   const canRotate = snapshot.accounts.length >= 2 || Boolean(codex?.signedIn);
@@ -1008,18 +989,6 @@ export default function AccountsPanel() {
                   <div className="mt-0.5 text-[10px] text-muted truncate">
                     The Codex CLI’s current login{codex?.plan ? ` · ${codex.plan}` : ''}
                   </div>
-                  {/* An unsaved current login is the one Codex state the pool
-                      cannot switch back to later, so the fix is offered here. */}
-                  {codex?.signedIn && !currentCodexSaved && (
-                    <button
-                      onClick={() => void saveCurrentCodex()}
-                      disabled={busy}
-                      className="mt-1 text-[10px] px-2 py-0.5 rounded border border-border text-muted hover:text-text hover:border-accent/60 disabled:opacity-40"
-                      title="Copy this sign-in into the pool so you can switch back to it later"
-                    >
-                      Save current login
-                    </button>
-                  )}
                 </div>
 
                 {snapshot.codexAccounts.map((account) => (
