@@ -89,13 +89,13 @@ const codexDeps = {
   update: (id: string, patch: Partial<Conversation>) => { store.updateConversation(id, patch); broadcastConversations(); },
   // Every row, so a reconnect can find the pinned Codex threads to rejoin, and
   // the directory the app-server's own socket lives under.
-  list: () => store.getConversations(),
-  userData: app.getPath('userData'),
   options: (conv: Conversation) => {
     const configPath = !conv.delegatedByConversationId ? writeMcpConfigForConversation(conv.id, conv.directoryPath) : undefined;
     const server = configPath ? JSON.parse(fs.readFileSync(configPath, 'utf8')).mcpServers.peersflow : undefined;
     return {
-      approvalPolicy: 'on-request', sandbox: 'workspace-write', approvalsReviewer: 'user',
+      // approvalPolicy / sandbox come from CodexAgents' unattended defaults
+      // ('never' + workspace-write): a detached turn must never park on a prompt.
+      approvalsReviewer: 'user',
       ...(server ? {
         config: { 'mcp_servers.peersflow': { ...server, required: true, tool_timeout_sec: 1860 } },
         developerInstructions: buildBootstrapSystemPrompt(store.getDirectories()),
@@ -1044,7 +1044,12 @@ const limitWatchDeps: limitWatch.LimitWatchDeps = {
       // There is no PTY on this side, and no thread either until the first
       // message — which is the message that carries the handover context.
       try {
-        await codex.send(live.id, text);
+        try {
+          await codex.send(live.id, text);
+        } catch (err) {
+          if (!/still working/i.test(String((err as Error)?.message ?? err))) throw err;
+          await codex.queue(live.id, text);
+        }
         return { ok: true };
       } catch (err) {
         return { ok: false, error: (err as Error)?.message ?? String(err) };
