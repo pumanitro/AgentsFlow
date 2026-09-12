@@ -173,7 +173,11 @@ export default function UsagePanel() {
         </button>
         <button onClick={() => void load(true)} disabled={loading} className={`shrink-0 text-muted hover:text-text px-1.5 py-0.5 rounded disabled:opacity-40 ${loading ? 'animate-spin' : ''}`} title={`Refresh ${name} usage now`} aria-label="Refresh usage">↻</button>
       </div>
-      {open && <div className="flex-1 min-h-0 overflow-y-auto border-t border-border/60 py-1" style={{ maxHeight: 'min(300px, 30vh)' }}>
+      {/* The body keeps its own 30vh design cap AND obeys the docked cluster's
+          measured budget when there is one (see DockedPanes). Outside a budgeted
+          cluster --dock-body-max is unset, the 100vh fallback never bites, and
+          the cap is exactly what it always was. */}
+      {open && <div className="flex-1 min-h-0 overflow-y-auto border-t border-border/60 py-1" style={{ maxHeight: 'min(300px, 30vh, var(--dock-body-max, 100vh))' }}>
         {/* Straight into the meters: the header above already names the
             provider and its plan. */}
         <div data-testid={`usage-${provider}`} className="pt-1 pb-1">

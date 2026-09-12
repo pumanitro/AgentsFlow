@@ -884,8 +884,12 @@ export default function AccountsPanel() {
         )}
       </div>
 
+      {/* The body keeps its own 45vh design cap AND obeys the docked cluster's
+          measured budget when there is one (see DockedPanes). Outside a budgeted
+          cluster --dock-body-max is unset, the 100vh fallback never bites, and
+          the cap is exactly what it always was. */}
       {open && (
-        <div className="flex-1 min-h-0 overflow-y-auto border-t border-border/60" style={{ maxHeight: 'min(420px, 45vh)' }}>
+        <div className="flex-1 min-h-0 overflow-y-auto border-t border-border/60" style={{ maxHeight: 'min(420px, 45vh, var(--dock-body-max, 100vh))' }}>
           {unavailable ? (
             <div className="px-3 py-3 text-xs text-muted italic">
               Restart the app to enable Accounts (preload needs to refresh).

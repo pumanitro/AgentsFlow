@@ -13,6 +13,7 @@ import HistoryTimeline from '../components/HistoryTimeline';
 import HelpModal from '../components/HelpModal';
 import McpModal from '../components/McpModal';
 import StatsView from '../components/StatsView';
+import DockedPanes, { TOP_REGION_MIN } from '../components/DockedPanes';
 import { api } from '../lib/ipc';
 import { useUIState } from '../lib/ui-state';
 import { BridgeHealth, Conversation, PinnedDivider, PinnedItemRef, PinnedTodo, TrackedDirectory } from '../../shared/types';
@@ -90,6 +91,19 @@ export default function Home() {
   const listRef = useRef<HTMLDivElement | null>(null);
   // The gutter area a band may start in — the padding around the list.
   const bandAreaRef = useRef<HTMLElement | null>(null);
+  // Peer-sidebar geometry, measured by DockedPanes so the docked cluster below
+  // can work out how much room it may take. The three inset refs are the rows
+  // that scroll WITH the peers list but are not peers — they are added to the
+  // list's floor so its 100px minimum is 100px of actual peers.
+  const peerColumnRef = useRef<HTMLElement | null>(null);
+  const peerListRef = useRef<HTMLDivElement | null>(null);
+  const peerHeadingRef = useRef<HTMLHeadingElement | null>(null);
+  const peerSearchRef = useRef<HTMLInputElement | null>(null);
+  const peerAddRef = useRef<HTMLButtonElement | null>(null);
+  const peerInsetRefs = useMemo(
+    () => [peerHeadingRef, peerSearchRef, peerAddRef],
+    [],
+  );
   // The band being dragged right now, in coordinates relative to the list box.
   const [marquee, setMarquee] = useState<{ left: number; top: number; width: number; height: number } | null>(null);
   // Tears down the in-flight band drag (its window listeners and visuals).
@@ -910,16 +924,25 @@ export default function Home() {
         // Two independently scrolling panes: the Tracked Peers picker as a
         // compact left sidebar, conversations + history on the right.
         <div className="h-full flex">
-        <aside className="w-72 shrink-0 border-r border-border flex flex-col min-h-0">
-          <div className="flex-1 min-h-0 overflow-y-auto px-3 pb-4">
+        <aside ref={peerColumnRef} className="w-72 shrink-0 border-r border-border flex flex-col min-h-0">
+          {/* The flexible region of this column: it gives way first, down to
+              --dock-top-min — 100px of peers plus the three rows below that
+              scroll with them — and scrolls inside itself. DockedPanes measures
+              the column and publishes that variable on the <aside>. */}
+          <div
+            ref={peerListRef}
+            className="flex-1 min-h-0 overflow-y-auto px-3 pb-4"
+            style={{ minHeight: `var(--dock-top-min, ${TOP_REGION_MIN}px)` }}
+          >
           {/* Sticky, color-marked zone header so "these are the peers" reads at a
               glance and stays labeled while the list scrolls. Orange marker ties
               it to the peer selection accent. */}
-          <h2 className="sticky top-0 z-10 -mx-3 px-3 py-2.5 mb-1 bg-bg/95 backdrop-blur-sm border-b border-border/40 flex items-center gap-2 text-xs uppercase tracking-wider text-muted">
+          <h2 ref={peerHeadingRef} className="sticky top-0 z-10 -mx-3 px-3 py-2.5 mb-1 bg-bg/95 backdrop-blur-sm border-b border-border/40 flex items-center gap-2 text-xs uppercase tracking-wider text-muted">
             <span className="w-1 h-4 rounded-full bg-accent shrink-0" aria-hidden="true" />
             Tracked Peers
           </h2>
           <input
+            ref={peerSearchRef}
             value={peerQuery}
             onChange={(e) => setPeerQuery(e.target.value)}
             onKeyDown={(e) => {
@@ -934,6 +957,7 @@ export default function Home() {
             className="w-full mb-2 bg-panel border border-border rounded-md px-2.5 py-1.5 text-sm text-text outline-none focus:border-accent placeholder:text-muted/70"
           />
           <button
+            ref={peerAddRef}
             onClick={handleAddDirectory}
             className="w-full rounded-md border-2 border-dashed border-border bg-transparent hover:border-accent hover:bg-panel/40 transition-colors px-2.5 py-1.5 text-left mb-2"
           >
@@ -959,27 +983,28 @@ export default function Home() {
             ))}
           </div>
           </div>
-          {/* Bottom utility cluster — Usage + Global Notes as INSET CARDS on the
-              darker app background, with real gaps, so they read as a separate
-              docked layer rather than melting into the scrolling peer list. */}
-          <div className="shrink-0 min-h-0 flex flex-col gap-2 px-2 py-2 border-t-2 border-border bg-bg shadow-[0_-10px_18px_-10px_rgba(0,0,0,0.7)]">
-            {/* The switchable Anthropic account pool, directly above the meters
-                it explains: when one account runs dry, click another and every
-                session — running and new — continues on its tokens. */}
-            <AccountsPanel />
-            {/* Live plan-usage meters (Current session / All models / per-model
-                weekly). Polls the same authenticated endpoint that backs Claude
-                Code's /usage screen. */}
-            <UsagePanel />
-            {/* Global notes — shared across every peer. Collapsed by default;
-                open/expanded state persists just like a peer's own notes.
-                Clicking a note opens the quick-look modal. */}
-            <NotesPanel
-              variant="global"
-              onFileOpen={(abs) => setGlobalNoteFile(abs)}
-              openedFilePath={globalNoteFile}
-            />
-          </div>
+          {/* Bottom utility cluster — INSET CARDS on the darker app background,
+              with real gaps, so they read as a separate docked layer rather than
+              melting into the scrolling peer list. Budgeted by DockedPanes, the
+              same component the session sidebar uses, so Notes is always fully
+              on screen here too however long the peer list or the account pool
+              gets. Order is fixed by the component: Accounts (the switchable
+              pool) directly above the Usage meters it explains, then the global
+              notes shared across every peer, last and never shrunk. */}
+          <DockedPanes
+            columnRef={peerColumnRef}
+            topRegionRef={peerListRef}
+            topRegionInsetRefs={peerInsetRefs}
+            accounts={<AccountsPanel />}
+            usage={<UsagePanel />}
+            notes={(
+              <NotesPanel
+                variant="global"
+                onFileOpen={(abs) => setGlobalNoteFile(abs)}
+                openedFilePath={globalNoteFile}
+              />
+            )}
+          />
         </aside>
 
         <div className="flex-1 min-w-0 overflow-y-auto pb-4">

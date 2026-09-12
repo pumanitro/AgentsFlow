@@ -281,8 +281,15 @@ export default function NotesPanel({ dirPath, variant = 'peer', onFileOpen, open
       // bottom utility cluster — one design language across the home page and
       // the preview page. The open cap is viewport-based because the cluster
       // wrapper has no fixed height for a % to resolve against.
+      //
+      // --dock-notes-max is the docked cluster's last-resort guard (see
+      // DockedPanes): Notes is the one pane the budget never shrinks, so in a
+      // column too short even for Notes plus the other two headers, this caps
+      // the LIST — which scrolls — instead of letting the pane be clipped off
+      // the bottom. It is unset in every normal window, where the 100vh
+      // fallback never bites and the cap is the plain 25vh it always was.
       className="shrink-0 bg-panel flex flex-col min-h-0 rounded-lg border border-border overflow-hidden"
-      style={open ? { maxHeight: '25vh' } : undefined}
+      style={open ? { maxHeight: 'min(25vh, var(--dock-notes-max, 100vh))' } : undefined}
     >
       <div className="shrink-0 flex items-center gap-2 px-2 py-2 bg-panel2/60 hover:bg-panel2">
         {/* Section identity: a green accent tick marks this as the Notes zone. */}
