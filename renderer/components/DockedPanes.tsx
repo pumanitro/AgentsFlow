@@ -129,12 +129,19 @@ export interface DockMeasurements {
 // The column then sums exactly: chrome + topMin + clusterFloor + openPanes ×
 // bodyMax === columnInner whenever slack ≥ 0, and chrome + 0 + available ===
 // columnInner when it is not.
+// Measured heights carry fractions (38.5px headers, 2px cluster border, a
+// scrollbar that appears once a body scrolls), and a budget that sums to the
+// column exactly overflowed it by 4–7 px in practice (12 Sep 2026). This margin
+// is what keeps Notes' bottom edge inside the column.
+export const DOCK_SAFETY = 10;
+
 export function computeDockBudget(m: DockMeasurements): Budget {
   const clusterFloor = m.notesHeight + m.accountsHeader + m.usageHeader + m.clusterExtra;
+  const usable = m.columnInner - DOCK_SAFETY;
   // The top region's floor is itself given up — last — when the column is too
   // short to pay for both it and the cluster floor.
-  const topMin = Math.max(0, Math.min(m.topRegionMin + m.inset, m.columnInner - m.chrome - clusterFloor));
-  const available = Math.max(0, m.columnInner - m.chrome - topMin);
+  const topMin = Math.max(0, Math.min(m.topRegionMin + m.inset, usable - m.chrome - clusterFloor));
+  const available = Math.max(0, usable - m.chrome - topMin);
   const slack = available - clusterFloor;
   return {
     bodyMax: m.openPanes > 0 ? Math.max(0, Math.floor(slack / m.openPanes)) : 0,
