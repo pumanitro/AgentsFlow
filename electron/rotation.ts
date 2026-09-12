@@ -34,7 +34,7 @@
 // healthy accounts beside it. Blindness about the TARGET is a reason not to
 // switch; blindness about the SOURCE is, after a grace, the reason to.
 
-import type { Account, RotationPolicy, RotationStatus, UsageResult } from '../shared/types';
+import type { Account, AgentProvider, RotationPolicy, RotationStatus, UsageResult } from '../shared/types';
 import { bindingPercent } from '../shared/usage';
 
 export { bindingPercent };
@@ -67,6 +67,9 @@ export const DEFAULT_POLICY: RotationPolicy = {
   // hit: by then the alternative to acting is a chat that sits dead until
   // someone wakes up.
   resumeOnLimit: true,
+  // Off by default: switching provider hands every unfinished conversation to
+  // a different agent, which is a bigger step than moving to another account.
+  crossProvider: false,
 };
 
 export interface CandidateUsage {
@@ -160,6 +163,12 @@ export interface RotationDeps {
   getActiveUsage: (force: boolean) => Promise<UsageResult>;
   switchTo: (accountId: string) => Promise<Account>;
   onStatus: (status: RotationStatus) => void;
+  // ---- Cross-provider rotation (all optional: a Claude-only host omits them) ----
+  getActiveProvider?: () => AgentProvider;
+  /** Usage of a provider's current login — Codex has one login, not a pool. */
+  getProviderUsage?: (provider: AgentProvider, force: boolean) => Promise<UsageResult>;
+  /** Make `provider` the active one and hand unfinished conversations over. */
+  switchProvider?: (provider: AgentProvider, reason: string) => Promise<void>;
 }
 
 let timer: NodeJS.Timeout | null = null;
@@ -195,7 +204,7 @@ export function recordEvent(deps: Pick<RotationDeps, 'onStatus'>, message: strin
 /** What a pass actually did, for callers that need to act on the outcome. */
 export type RunOutcome =
   | { switched: false; reason: string }
-  | { switched: true; account: Account; reason: string };
+  | { switched: true; account?: Account; provider?: AgentProvider; reason: string };
 
 /**
  * One evaluation pass. Exported so the loop's guards — cooldown, the
@@ -222,13 +231,19 @@ export async function runOnce(
   if (status.disabledReason) return { switched: false, reason: status.disabledReason };
 
   const accounts = deps.getAccounts();
-  if (accounts.length < 2) return { switched: false, reason: 'only one account in the pool' };
+  const crossProvider = Boolean(policy.crossProvider && deps.getProviderUsage && deps.switchProvider);
+  const provider: AgentProvider = deps.getActiveProvider?.() ?? 'claude';
+  if (provider === 'claude' && accounts.length < 2 && !crossProvider) {
+    return { switched: false, reason: 'only one account in the pool' };
+  }
   if (!urgent && now() - lastSwitchAt < COOLDOWN_MS) {
     return { switched: false, reason: 'switched too recently' };
   }
 
   running = true;
   try {
+    if (provider === 'codex') return await runOnceOnCodex(deps, policy, urgent, opts.cause, crossProvider);
+
     const activeId = deps.getActiveId();
     const active = accounts.find((a) => a.id === activeId) ?? null;
 
@@ -281,6 +296,12 @@ export async function runOnce(
     if (decision.action === 'none') return { switched: false, reason: decision.reason };
 
     if (decision.action === 'exhausted') {
+      // Nothing left on the Claude side. With provider rotation on, Codex is
+      // the next place to go — if its own meter reads and has headroom.
+      if (crossProvider) {
+        const moved = await tryProviderSwitch(deps, 'codex', policy.threshold, urgent, decision.reason);
+        if (moved) return moved;
+      }
       // Say it once, not every minute.
       if (status.lastEvent !== decision.reason) {
         console.warn('[agentsflow][rotation] no headroom anywhere', { reason: decision.reason });
@@ -318,6 +339,150 @@ export async function runOnce(
     }
   } finally {
     running = false;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Provider rotation
+// ---------------------------------------------------------------------------
+// Codex is one login rather than a pool, so "rotate" on that side means one
+// question: is its meter past the threshold (or did a chat just prove it), and
+// is there somewhere on the Claude side to go? Symmetric with the Claude side
+// falling through to Codex when its pool is exhausted.
+
+async function tryProviderSwitch(
+  deps: RotationDeps,
+  target: AgentProvider,
+  threshold: number,
+  urgent: boolean,
+  because: string,
+): Promise<RunOutcome | null> {
+  if (!deps.getProviderUsage || !deps.switchProvider) return null;
+  let percent: number | null = null;
+  try {
+    percent = bindingPercent(await deps.getProviderUsage(target, urgent));
+  } catch {
+    percent = null;
+  }
+  const name = target === 'codex' ? 'Codex' : 'Claude';
+  if (percent === null) {
+    console.warn('[agentsflow][rotation] other provider unreadable, staying put', { target, because });
+    return null;
+  }
+  if (percent >= threshold) {
+    console.warn('[agentsflow][rotation] other provider has no headroom either', { target, percent, because });
+    return null;
+  }
+  const reason = `${because} → switching to ${name} (at ${percent}%)`;
+  console.log('[agentsflow][rotation] switching provider', { to: target, reason, urgent });
+  try {
+    await deps.switchProvider(target, reason);
+    lastSwitchAt = now();
+    consecutiveFailures = 0;
+    unreadableSince = 0;
+    unreadableReason = '';
+    setStatus(deps, { lastEvent: `Switched to ${name} — ${reason}`, disabledReason: null });
+    return { switched: true, provider: target, reason };
+  } catch (err) {
+    consecutiveFailures += 1;
+    const error = (err as Error)?.message ?? String(err);
+    console.error('[agentsflow][rotation] provider switch failed', { to: target, error, consecutiveFailures });
+    setStatus(deps, consecutiveFailures >= MAX_CONSECUTIVE_FAILURES
+      ? { lastEvent: `Switching to ${name} failed ${consecutiveFailures}× (${error})`, disabledReason: 'Switching kept failing, so rotation stopped. Fix the sign-in, then re-enable.' }
+      : { lastEvent: `Switching to ${name} failed (${error}) — will retry` });
+    return { switched: false, reason: `provider switch failed: ${error}` };
+  }
+}
+
+/** The pass while Codex is the active provider. */
+async function runOnceOnCodex(
+  deps: RotationDeps,
+  policy: RotationPolicy,
+  urgent: boolean,
+  cause: string | undefined,
+  crossProvider: boolean,
+): Promise<RunOutcome> {
+  if (!deps.getProviderUsage) return { switched: false, reason: 'Codex usage is not readable here' };
+  let percent: number | null = null;
+  let usage: UsageResult | null = null;
+  try {
+    usage = await deps.getProviderUsage('codex', urgent);
+    percent = bindingPercent(usage);
+  } catch {
+    percent = null;
+  }
+  if (percent === null) noteUnreadable(usage);
+  else clearUnreadable();
+  const blindFor = percent === null && unreadableSince ? now() - unreadableSince : 0;
+  const force = urgent ? (cause ?? 'a chat hit the wall') : blindFor >= BLIND_SWITCH_AFTER_MS ? `Codex login unreadable for ${Math.round(blindFor / 60_000)} min` : null;
+  if (!force) {
+    if (percent === null) return { switched: false, reason: 'Codex usage unreadable' };
+    if (percent < policy.threshold) return { switched: false, reason: `Codex at ${percent}% (below ${policy.threshold}%)` };
+  }
+  const because = force ? `${force} (${percent === null ? 'meter unreadable' : `meter at ${percent}%`})` : `Codex at ${percent}%`;
+  if (!crossProvider) {
+    const reason = `${because}, and provider rotation is off`;
+    if (status.lastEvent !== reason) setStatus(deps, { lastEvent: reason });
+    return { switched: false, reason };
+  }
+  // The Claude side: the best pooled account with headroom, else the login in
+  // the main slot when there is no pool.
+  const accounts = deps.getAccounts();
+  let best: { accountId: string; percent: number } | null = null;
+  if (accounts.length > 0) {
+    const candidates = await Promise.all(accounts.map(async (a) => {
+      if (now() - (provenFullAt.get(a.id) ?? 0) < PROVEN_FULL_MS) return { accountId: a.id, percent: 100 };
+      try { return { accountId: a.id, percent: bindingPercent(await deps.getAccountUsage(a, urgent)) }; }
+      catch { return { accountId: a.id, percent: null }; }
+    }));
+    const withHeadroom = candidates
+      .filter((c): c is { accountId: string; percent: number } => c.percent !== null && c.percent < policy.threshold)
+      .sort((a, b) => a.percent - b.percent);
+    best = withHeadroom[0] ?? null;
+    if (!best) {
+      const reason = `${because}, but no Claude account is below ${policy.threshold}%`;
+      if (status.lastEvent !== reason) { console.warn('[agentsflow][rotation] no headroom anywhere', { reason }); setStatus(deps, { lastEvent: reason }); }
+      return { switched: false, reason };
+    }
+  }
+  // With a pool, the account with headroom is what makes Claude usable — its
+  // own meter is the one to consult rather than whatever sits in the main slot.
+  const moved = best
+    ? await switchProviderDirect(deps, 'claude', `${because} → switching to Claude`)
+    : await tryProviderSwitch(deps, 'claude', policy.threshold, urgent, because);
+  if (!moved || !moved.switched) {
+    const reason = moved?.reason ?? `${because}, but Claude has no headroom or could not be read`;
+    if (status.lastEvent !== reason) setStatus(deps, { lastEvent: reason });
+    return { switched: false, reason };
+  }
+  if (best && best.accountId !== deps.getActiveId()) {
+    try {
+      const account = await deps.switchTo(best.accountId);
+      setStatus(deps, { lastEvent: `Switched to Claude, ${account.label || account.orgName || account.email} (at ${best.percent}%) — ${because}` });
+      return { switched: true, provider: 'claude', account, reason: moved.reason };
+    } catch (err) {
+      console.error('[agentsflow][rotation] account switch after provider switch failed', { error: (err as Error)?.message ?? err });
+    }
+  }
+  return moved;
+}
+
+/** Switch provider without consulting its meter (a pooled account already vouched). */
+async function switchProviderDirect(deps: RotationDeps, target: AgentProvider, reason: string): Promise<RunOutcome> {
+  if (!deps.switchProvider) return { switched: false, reason: 'provider switching unavailable' };
+  const name = target === 'codex' ? 'Codex' : 'Claude';
+  try {
+    await deps.switchProvider(target, reason);
+    lastSwitchAt = now();
+    consecutiveFailures = 0;
+    unreadableSince = 0;
+    unreadableReason = '';
+    setStatus(deps, { lastEvent: `Switched to ${name} — ${reason}`, disabledReason: null });
+    return { switched: true, provider: target, reason };
+  } catch (err) {
+    consecutiveFailures += 1;
+    const error = (err as Error)?.message ?? String(err);
+    return { switched: false, reason: `provider switch failed: ${error}` };
   }
 }
 

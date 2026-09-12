@@ -3,7 +3,7 @@ import * as os from 'os';
 import * as path from 'path';
 import { performance } from 'node:perf_hooks';
 import { app } from 'electron';
-import { Account, Conversation, PinnedDivider, PinnedItemRef, PinnedTodo, RotationPolicy, TrackedDirectory } from '../shared/types';
+import { Account, AgentProvider, CodexAccount, Conversation, PinnedDivider, PinnedItemRef, PinnedTodo, RotationPolicy, TrackedDirectory } from '../shared/types';
 import { DEFAULT_POLICY } from './rotation';
 import { placePinnedRefAfter, placePinnedRefAtEndOfFirstSection } from './pinned-order';
 import { makeIndexer } from './conv-index';
@@ -20,6 +20,9 @@ interface StoreShape {
   accounts: Account[];
   activeAccountId: string | null;
   rotationPolicy: RotationPolicy;
+  // Which provider new conversations use; the Codex pool beside the Claude one.
+  activeProvider: AgentProvider;
+  codexAccounts: CodexAccount[];
 }
 
 let cache: StoreShape | null = null;
@@ -101,6 +104,7 @@ function migrateConversation(c: any): Conversation {
     attachments: Array.isArray(c.attachments) ? c.attachments : [],
     forkFromSessionId: typeof c.forkFromSessionId === 'string' ? c.forkFromSessionId : undefined,
     worktreePath: typeof c.worktreePath === 'string' ? c.worktreePath : undefined,
+    handover: c.handover && typeof c.handover === 'object' && (c.handover.from === 'claude' || c.handover.from === 'codex') ? c.handover : undefined,
     sessionId: c.sessionId ?? '',
     daemonShort: c.daemonShort ?? '',
     sessionName: c.sessionName ?? '',
@@ -209,6 +213,7 @@ function sanitizeRotationPolicy(raw: unknown): RotationPolicy {
     // Absent in stores written before this existed — those users get the
     // default (on) rather than silently opting out of the safety net.
     resumeOnLimit: p?.resumeOnLimit === undefined ? DEFAULT_POLICY.resumeOnLimit : Boolean(p.resumeOnLimit),
+    crossProvider: p?.crossProvider === undefined ? DEFAULT_POLICY.crossProvider : Boolean(p.crossProvider),
   };
 }
 
@@ -249,6 +254,8 @@ function load(): StoreShape {
     accounts: Array.isArray(parsed.accounts) ? parsed.accounts : [],
     activeAccountId: typeof parsed.activeAccountId === 'string' ? parsed.activeAccountId : null,
     rotationPolicy: sanitizeRotationPolicy(parsed.rotationPolicy),
+    activeProvider: parsed.activeProvider === 'codex' ? 'codex' : 'claude',
+    codexAccounts: Array.isArray(parsed.codexAccounts) ? parsed.codexAccounts : [],
   };
   // Seed from what's already archived so the first flush doesn't needlessly
   // rewrite history.json.
@@ -310,6 +317,8 @@ function serializeSplit(s: StoreShape, now: number): { hotJson: string; coldJson
     accounts: s.accounts,
     activeAccountId: s.activeAccountId,
     rotationPolicy: s.rotationPolicy,
+    activeProvider: s.activeProvider,
+    codexAccounts: s.codexAccounts,
     conversations: hot,
   });
   perf.record('store:save', performance.now() - t0);
@@ -498,6 +507,28 @@ export const store = {
   setActiveAccountId(id: string | null): void {
     const s = load();
     s.activeAccountId = id;
+    save();
+  },
+  getActiveProvider(): AgentProvider {
+    return load().activeProvider;
+  },
+  setActiveProvider(provider: AgentProvider): void {
+    const s = load();
+    s.activeProvider = provider === 'codex' ? 'codex' : 'claude';
+    save();
+  },
+  getCodexAccounts(): CodexAccount[] {
+    return load().codexAccounts;
+  },
+  addCodexAccount(account: CodexAccount): CodexAccount {
+    const s = load();
+    s.codexAccounts = [...s.codexAccounts.filter((a) => a.id !== account.id), account];
+    save();
+    return account;
+  },
+  removeCodexAccount(id: string): void {
+    const s = load();
+    s.codexAccounts = s.codexAccounts.filter((a) => a.id !== id);
     save();
   },
   getRotationPolicy(): RotationPolicy {
