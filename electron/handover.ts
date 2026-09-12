@@ -123,6 +123,17 @@ export function codexHistoryText(entries: Array<{ role: 'user' | 'assistant' | '
 
 const NAME: Record<AgentProvider, string> = { claude: 'Claude Code', codex: 'Codex' };
 
+/**
+ * Context only — for the Codex side, where it travels as developer instructions
+ * at thread start and the user's own message stays untouched.
+ */
+export function buildHandoverContext(opts: { from: AgentProvider; history: string; reason?: string }): string {
+  const why = opts.reason ? ` (${opts.reason})` : '';
+  const head = `This conversation was handed over to you from ${NAME[opts.from]}${why}. Continue the same work in the same directory: do not start over, and do not repeat steps that are already done.`;
+  if (!opts.history.trim()) return `${head}\n\nThe previous transcript could not be read. Ask for a short recap if you need one.`;
+  return `${head}\n\n=== Previous conversation with ${NAME[opts.from]} (most recent last) ===\n${opts.history}\n=== End of previous conversation ===`;
+}
+
 /** The message the new agent receives first: context, then the user's own words. */
 export function buildHandoverPrompt(opts: { from: AgentProvider; history: string; userMessage: string; reason?: string }): string {
   const why = opts.reason ? ` (${opts.reason})` : '';

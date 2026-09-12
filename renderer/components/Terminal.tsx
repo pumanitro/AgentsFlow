@@ -102,7 +102,7 @@ export default function Terminal({ conversationId, shellId, shellCwd, baseDir, o
           foreground: '#e6e8ee',
           cursor: '#ff7847',
           black: '#0f1115',
-          brightBlack: '#758198',
+          brightBlack: '#5b6478',
           red: '#ef4444',
           green: '#4ade80',
           yellow: '#fbbf24',

@@ -103,10 +103,9 @@ const codexDeps = {
   // hours later still gets the newest state of the session it came from.
   handoverContext: (conv: Conversation): string | undefined =>
     conv.handover?.from === 'claude'
-      ? handover.buildHandoverPrompt({
+      ? handover.buildHandoverContext({
           from: 'claude',
           history: handover.claudeHistoryFor(conv.handover),
-          userMessage: '',
           reason: conv.handover.reason,
         })
       : undefined,
@@ -904,7 +903,9 @@ ipcMain.handle('codexAccounts:switch', async (_e, id: string): Promise<SwitchCod
     return { ok: false, error: 'A Codex chat is still working. Stop it first, then switch accounts.' };
   }
   try {
-    codexAccounts.switchTo(account, store.getCodexAccounts());
+    const outcome = codexAccounts.switchTo(account, store.getCodexAccounts());
+    // An unpooled outgoing login is rescued into a vault rather than overwritten.
+    if (outcome?.savedOutgoing) store.addCodexAccount(outcome.savedOutgoing);
     await codexExt.restart?.();
     codexExt.invalidateAccount?.();
     broadcastAccounts();
