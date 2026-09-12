@@ -973,24 +973,6 @@ export default function AccountsPanel() {
                 busy={busy}
                 error={providerError.codex ?? null}
               >
-                <div data-testid="codex-account" className="px-3 py-1.5 border-l-2 border-transparent">
-                  <div className="flex items-baseline gap-1.5">
-                    <span className={`text-[12px] truncate ${codex?.signedIn ? 'text-text' : 'text-muted'}`}>
-                      {!codex
-                        ? 'Checking sign-in…'
-                        : codex.signedIn
-                          ? maskEmails(codex.email || codex.authType || 'Connected', masked)
-                          : maskEmails(codex.error || 'Not signed in', masked)}
-                    </span>
-                    {codex?.signedIn && (
-                      <span className="text-[9px] uppercase tracking-wider text-info shrink-0">current</span>
-                    )}
-                  </div>
-                  <div className="mt-0.5 text-[10px] text-muted truncate">
-                    The Codex CLI’s current login{codex?.plan ? ` · ${codex.plan}` : ''}
-                  </div>
-                </div>
-
                 {snapshot.codexAccounts.map((account) => (
                   <CodexRow
                     key={account.id}
