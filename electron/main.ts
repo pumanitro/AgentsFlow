@@ -78,6 +78,12 @@ let peersBridge: PeersBridge | null = null;
 // added before the Codex runtime declares them — the alternative is an
 // excess-property error on a literal passed straight to the constructor.
 const codexDeps = {
+  // Where the app-server's control socket lives, and how to enumerate the
+  // conversations whose threads have to be rejoined after a restart. Both are
+  // plain properties so this object type-checks before the Codex runtime
+  // declares them.
+  userData: app.getPath('userData'),
+  list: () => store.getConversations(),
   get: (id: string) => store.getConversation(id),
   update: (id: string, patch: Partial<Conversation>) => { store.updateConversation(id, patch); broadcastConversations(); },
   options: (conv: Conversation) => {
@@ -1934,6 +1940,18 @@ function resumePeerAwareness(conv: Conversation): { mcpConfigPath?: string; appe
   }
 }
 
+/**
+ * The Codex app-server's control socket.
+ *
+ * WIRING NOTE: this is the same formula Lane S exports as
+ * `codexSocketPath(userData)` from `./codex-server`. Swap this local copy for
+ * that import when the transport lands — it exists only so the terminal attach
+ * compiles and runs before that merge.
+ */
+function codexSocketPath(): string {
+  return path.join(app.getPath('userData'), 'codex', 'app-server.sock');
+}
+
 ipcMain.handle('term:attach', async (_e, conversationId: string, cols: number, rows: number) => {
   console.log('[agentsflow] term:attach received', { conversationId, cols, rows });
   const conv = store.getConversations().find((c) => c.id === conversationId);
@@ -1941,14 +1959,33 @@ ipcMain.handle('term:attach', async (_e, conversationId: string, cols: number, r
     console.error('[agentsflow] term:attach: conversation not found', { conversationId, all: store.getConversations().map((c) => c.id) });
     throw new Error(`conversation ${conversationId} not found`);
   }
-  if (conv.provider === 'codex') throw new Error('Codex uses the native chat view');
   if (!conv.sessionId) {
+    // Codex reaches this too: a row handed over from Claude has no thread until
+    // someone continues it, and there is nothing to attach a TUI to until then.
+    // The renderer turns this into a "Start on Codex" button.
     console.error('[agentsflow] term:attach: no sessionId yet', conv);
     throw new Error('session not ready (sessionId is empty)');
   }
   const win = mainWindow ?? BrowserWindow.fromWebContents(_e.sender);
   if (!win) throw new Error('no window');
   const channelId = uuid();
+
+  // Codex: the chat pane IS the Codex CLI's own TUI. `codex resume <thread>
+  // --remote unix://<sock>` attaches it to the thread already living in the
+  // app-server we own, so it renders the full history, joins an in-flight turn,
+  // and receives any pending approval. It is a viewer, not the execution: the
+  // thread outlives the PTY, the app, and the machine going to sleep. See the
+  // 'codex' mode note in pty-manager for why it rides the resume machinery.
+  if (conv.provider === 'codex') {
+    const cwd = conv.worktreePath || conv.directoryPath;
+    console.log('[agentsflow] spawning pty for codex resume', { threadId: conv.sessionId, cwd, channelId });
+    const replay = await pty.attach({
+      channelId, sessionId: conv.sessionId, cols, rows, win,
+      mode: 'codex', cwd, codexSocket: codexSocketPath(),
+    });
+    return { channelId, replay };
+  }
+
   const attachId = conv.daemonShort || conv.sessionId.slice(0, 8);
 
   // An in-app `claude --resume` PTY already runs this session → re-subscribe
