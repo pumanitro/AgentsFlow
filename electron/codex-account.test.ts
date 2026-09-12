@@ -64,3 +64,21 @@ test('every Codex limit is labelled by its own name and window, and keyed so two
   assert.ok(fallback.ok);
   assert.deepEqual(fallback.snapshot.meters.map(m => m.label), ['Codex · Session', 'Codex · Longer window']);
 });
+
+test('a Codex that was unreachable is retried on the next read, not remembered as down', async () => {
+  let reachable = false; let reads = 0;
+  const reader = new CodexAccountReader({ start: async () => {}, request: async method => {
+    if (!reachable) throw new Error('Codex is disconnected.');
+    if (method === 'account/read') { reads++; return { account: { type: 'chatgpt', email: 'back@company.com' } }; }
+    return { rateLimits: { primary: { usedPercent: 7 } } };
+  } });
+  const down = await reader.read();
+  assert.equal(down.signedIn, false);
+  assert.match(down.error!, /Could not connect/);
+  // The socket came back on its own: the very next read must ask again.
+  reachable = true;
+  const up = await reader.read();
+  assert.equal(up.signedIn, true);
+  assert.equal(up.email, 'back@company.com');
+  assert.equal(reads, 1);
+});

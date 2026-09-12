@@ -1,8 +1,8 @@
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
 import { EventEmitter } from 'node:events';
-import { CodexAgents, approvalResult, codexEntry } from './codex-agent';
-import type { Dependencies } from './codex-agent';
+import { CodexAgents, approvalResult, codexEntry, mapThreadStatus, queueCli, RESUME_RETRY } from './codex-agent';
+import type { CodexThreadState, Dependencies } from './codex-agent';
 import type { CodexRpc } from './codex-protocol';
 import type { Conversation } from '../shared/types';
 
@@ -13,6 +13,17 @@ class FakeRpc extends EventEmitter {
   fail?: string;
   holdTurn = false;
   private held: ((e: Error) => void)[] = [];
+  /**
+   * Per-method canned answers, consumed in order. An Error is thrown, a
+   * function is called with the params (so a test can emit while the call is
+   * in flight), anything else is returned; `undefined` falls through.
+   */
+  queued = new Map<string, any[]>();
+  /** Thread id → the `status` its resume/list answer should carry. */
+  statuses = new Map<string, any>();
+  /** Thread id → what `thread/turns/list` should report for its newest turn. */
+  turns = new Map<string, any>();
+  listed: any[] = [];
   models: any[] = [
     { id: 'gpt-5.6-sol', displayName: 'GPT-5.6-Sol', description: 'Workhorse' },
     { id: 'secret', displayName: 'Hidden', hidden: true },
@@ -23,8 +34,17 @@ class FakeRpc extends EventEmitter {
   async request(method: string, params: any) {
     this.calls.push({ method, params });
     if (this.fail === method) throw new Error(`${method} is unavailable`);
+    const pending = this.queued.get(method);
+    if (pending?.length) {
+      const answer = pending.shift();
+      if (answer instanceof Error) throw answer;
+      if (typeof answer === 'function') return answer(params);
+      if (answer !== undefined) return answer;
+    }
     if (method === 'thread/start' || method === 'thread/fork') return { thread: { id: `thread-${++this.next}` } };
-    if (method === 'thread/resume') return { thread: { id: params.threadId } };
+    if (method === 'thread/resume') return { thread: { id: params.threadId, status: this.statuses.get(params.threadId) } };
+    if (method === 'thread/list') return { data: this.listed, nextCursor: null };
+    if (method === 'thread/turns/list') return { data: this.turns.has(params.threadId) ? [this.turns.get(params.threadId)] : [] };
     if (method === 'model/list') return { data: this.models };
     if (method === 'thread/items/list') return { data: [{ item: { id: 'old', type: 'agentMessage', text: 'old response' } }], nextCursor: null };
     if (method === 'turn/start') {
@@ -36,6 +56,7 @@ class FakeRpc extends EventEmitter {
   }
   reply(id: string | number, result: any) { this.replies.push({ id, result }); }
   rejectRequest(id: string | number, error: string) { this.replies.push({ id, error }); }
+  socketPath() { return '/tmp/peers-flow/codex.sock'; }
   close() {
     for (const reject of this.held.splice(0)) reject(new Error('Codex app-server was stopped.'));
     this.emit('disconnected', new Error('closed'));
@@ -46,17 +67,38 @@ function fixture(extra: Partial<Dependencies> = {}) {
   const conversations = new Map(['one', 'two'].map((id) => [id, { id, provider: 'codex', sessionId: '', directoryPath: `/work/${id}` } as Conversation]));
   const snapshots: any[] = [];
   const limits: { id: string; message: string }[] = [];
+  const statuses: { id: string; state: CodexThreadState; detail?: string }[] = [];
   const manager = new CodexAgents({
     get: (id) => conversations.get(id) || null,
     update: (id, p) => Object.assign(conversations.get(id)!, p),
     options: () => ({ sandbox: 'workspace-write', approvalPolicy: 'on-request', developerInstructions: 'house rules' }),
     changed: (s) => snapshots.push(s),
+    list: () => [...conversations.values()],
+    userData: '/tmp/peers-flow',
     onLimit: (id, message) => limits.push({ id, message }),
+    onThreadStatus: (id, state, detail) => statuses.push({ id, state, detail }),
     ...extra,
   }, rpc as unknown as CodexRpc);
   const event = (method: string, threadId: string, extra: any) => rpc.emit('notification', { method, params: { threadId, ...extra } });
-  return { manager, rpc, conversations, snapshots, limits, event };
+  return { manager, rpc, conversations, snapshots, limits, statuses, event };
 }
+/** A pinned row whose thread already exists on the server. */
+function pinned(conv: Conversation, threadId: string, state = 'working'): Conversation {
+  return Object.assign(conv, { pinned: true, sessionId: threadId, state, status: state });
+}
+/**
+ * Let the 'connected' handler's re-sync run. It is several round trips deep and
+ * the rollout retry sleeps on a real timer, so both phases have to be drained.
+ */
+const settle = async () => { for (let i = 0; i < 12; i++) { await new Promise((r) => setImmediate(r)); await new Promise((r) => setTimeout(r, 1)); } };
+/** Wait for something the re-sync is expected to reach, rather than guessing at turns. */
+const until = async (check: () => boolean, label: string) => {
+  for (let i = 0; i < 400; i++) {
+    if (check()) return;
+    await new Promise((r) => setTimeout(r, 2));
+  }
+  assert.fail(`timed out waiting for ${label}`);
+};
 const handedOver = (): Conversation['handover'] => ({ from: 'claude', sessionId: 'claude-session', directoryPath: '/work/one', at: new Date().toISOString() });
 
 test('parallel sends are deduplicated and each conversation gets its own cwd and thread', async () => {
@@ -303,5 +345,236 @@ test('a restart mid-turn fails the send without making the parked row look broke
     const conv = f.conversations.get('one')!;
     assert.equal(conv.state, 'idle');
     assert.equal(conv.description, 'Codex account switched — reopen to continue');
+  } finally { f.manager.close(); }
+});
+
+// ---- Rejoining threads that kept running without the app -------------------
+
+test('a thread status becomes a row state, and says nothing when the server is not sure', () => {
+  assert.deepEqual(mapThreadStatus({ type: 'active', activeFlags: [] }), { state: 'working' });
+  assert.deepEqual(mapThreadStatus({ type: 'active', activeFlags: ['waitingOnApproval'] }), { state: 'blocked', detail: 'Codex needs your input' });
+  assert.deepEqual(mapThreadStatus({ type: 'active', activeFlags: ['waitingOnUserInput'] }), { state: 'blocked', detail: 'Codex needs your input' });
+  assert.equal(mapThreadStatus({ type: 'active', activeFlags: ['usageLimited'] })!.state, 'blocked');
+  assert.deepEqual(mapThreadStatus({ type: 'systemError', message: 'the model is gone' }), { state: 'error', detail: 'the model is gone' });
+  assert.equal(mapThreadStatus({ type: 'notLoaded' }), null); // Keeps whatever is stored.
+  assert.equal(mapThreadStatus(undefined), null);
+
+  // Idle is only "no turn is running": which ending it was is the last turn's.
+  assert.deepEqual(mapThreadStatus({ type: 'idle' }, { lastTurnStatus: 'completed' }), { state: 'done' });
+  assert.deepEqual(mapThreadStatus({ type: 'idle' }, { lastTurnStatus: 'failed', lastTurnError: 'boom' }), { state: 'error', detail: 'boom' });
+  assert.deepEqual(mapThreadStatus({ type: 'idle' }, { lastTurnStatus: 'interrupted' }), { state: 'stopped' });
+  assert.equal(mapThreadStatus({ type: 'idle' }, { lastTurnStatus: 'inProgress', stored: 'working' }), null);
+  assert.deepEqual(mapThreadStatus({ type: 'idle' }, { stored: 'working' }), { state: 'done' }); // Finished while we were away.
+  assert.equal(mapThreadStatus({ type: 'idle' }, { stored: 'done' }), null);
+  assert.deepEqual(mapThreadStatus({ type: 'idle' }, { stored: 'idle' }), { state: 'idle' });
+});
+
+test('reconnecting resumes every pinned Codex thread, applies its status and backfills what was missed', async () => {
+  const f = fixture();
+  try {
+    pinned(f.conversations.get('one')!, 'thread-live', 'working');
+    pinned(f.conversations.get('two')!, 'thread-over', 'working');
+    f.conversations.get('two')!.pinned = false; // Unpinned: not our business any more.
+    f.rpc.statuses.set('thread-live', { type: 'active', activeFlags: [] });
+    f.rpc.emit('connected');
+    await until(() => f.statuses.length > 0, 'the re-sync to repaint the row');
+
+    const resumed = f.rpc.calls.filter((c) => c.method === 'thread/resume');
+    assert.deepEqual(resumed.map((c) => c.params.threadId), ['thread-live']);
+    assert.equal(resumed[0].params.cwd, '/work/one'); // Resume carries the row's own options.
+    // Item deltas are live-forward only, so a rejoin always backfills.
+    assert.equal(f.rpc.calls.filter((c) => c.method === 'thread/items/list').length, 1);
+    assert.equal(f.conversations.get('one')!.state, 'working');
+    assert.deepEqual(f.statuses, [{ id: 'one', state: 'working', detail: undefined }]);
+    assert.equal((await f.manager.snapshot('one')).entries[0].text, 'old response');
+  } finally { f.manager.close(); }
+});
+
+test('a row whose thread finished while the app was shut down comes back done, not working', async () => {
+  const f = fixture();
+  try {
+    pinned(f.conversations.get('one')!, 'thread-live', 'working');
+    f.conversations.get('two')!.pinned = false;
+    f.rpc.statuses.set('thread-live', { type: 'idle' });
+    f.rpc.turns.set('thread-live', { id: 't1', status: 'completed' });
+    f.rpc.emit('connected');
+    await until(() => f.conversations.get('one')!.state === 'done', 'the finished thread to settle');
+    assert.equal(f.conversations.get('one')!.state, 'done');
+    assert.equal(f.conversations.get('one')!.description, 'Codex finished');
+  } finally { f.manager.close(); }
+});
+
+test('thread/list repaints rows in one call and a settled row is never resumed', async () => {
+  const f = fixture();
+  try {
+    pinned(f.conversations.get('one')!, 'thread-done', 'done');
+    pinned(f.conversations.get('two')!, 'thread-busy', 'idle');
+    f.rpc.listed = [
+      { id: 'thread-done', status: { type: 'idle' } },
+      { id: 'thread-busy', status: { type: 'active', activeFlags: ['waitingOnApproval'] } },
+    ];
+    f.rpc.statuses.set('thread-busy', { type: 'active', activeFlags: ['waitingOnApproval'] });
+    f.rpc.emit('connected');
+    await until(() => f.conversations.get('two')!.state === 'blocked', 'the busy thread to be rejoined');
+    assert.deepEqual(f.rpc.calls.filter((c) => c.method === 'thread/resume').map((c) => c.params.threadId), ['thread-busy']);
+    assert.equal(f.conversations.get('one')!.state, 'done'); // Listed idle, already settled: untouched.
+    assert.equal(f.conversations.get('two')!.state, 'blocked');
+    assert.equal(f.conversations.get('two')!.description, 'Codex needs your input');
+  } finally { f.manager.close(); }
+});
+
+test('a thread whose first turn has not written a rollout yet is retried, not failed', async () => {
+  const f = fixture();
+  const delay = RESUME_RETRY.delayMs;
+  RESUME_RETRY.delayMs = 1;
+  try {
+    pinned(f.conversations.get('one')!, 'thread-new', 'starting');
+    f.conversations.get('two')!.pinned = false;
+    f.rpc.queued.set('thread/resume', [
+      new Error('no rollout found for thread id thread-new'),
+      new Error('no rollout found for thread id thread-new'),
+    ]);
+    f.rpc.statuses.set('thread-new', { type: 'active', activeFlags: [] });
+    f.rpc.emit('connected');
+    await until(() => f.conversations.get('one')!.state === 'working', 'the retried resume to succeed');
+    assert.equal(f.rpc.calls.filter((c) => c.method === 'thread/resume').length, 3);
+    assert.equal(f.conversations.get('one')!.state, 'working');
+  } finally { RESUME_RETRY.delayMs = delay; f.manager.close(); }
+});
+
+test('a resume that never succeeds leaves the row exactly as it was stored', async () => {
+  const f = fixture();
+  try {
+    pinned(f.conversations.get('one')!, 'thread-gone', 'working');
+    f.conversations.get('two')!.pinned = false;
+    f.rpc.fail = 'thread/resume';
+    f.rpc.emit('connected');
+    await settle();
+    const conv = f.conversations.get('one')!;
+    assert.equal(conv.state, 'working');
+    assert.notEqual(conv.status, 'error');
+  } finally { f.manager.close(); }
+});
+
+test('an approval left pending while nobody was connected lands in the snapshot on resume', async () => {
+  const f = fixture();
+  try {
+    pinned(f.conversations.get('one')!, 'thread-held', 'working');
+    f.conversations.get('two')!.pinned = false;
+    f.rpc.statuses.set('thread-held', { type: 'active', activeFlags: ['waitingOnApproval'] });
+    // The server re-delivers it in the same millisecond as the resume response.
+    f.rpc.queued.set('thread/resume', [() => {
+      f.rpc.emit('request', { id: 7, method: 'item/commandExecution/requestApproval', params: { threadId: 'thread-held', command: 'curl example.com' } });
+      return { thread: { id: 'thread-held', status: { type: 'active', activeFlags: ['waitingOnApproval'] } } };
+    }]);
+    f.rpc.emit('connected');
+    await until(() => f.conversations.get('one')!.state === 'blocked', 'the re-delivered approval to land');
+    assert.deepEqual(f.rpc.replies, []); // Never rejected as an unknown thread.
+    const snapshot = await f.manager.snapshot('one');
+    assert.deepEqual(snapshot.requests.map((r) => r.id), [7]);
+    await f.manager.reply('one', 7, { accept: false });
+    assert.deepEqual(f.rpc.replies, [{ id: 7, result: { decision: 'decline' } }]);
+  } finally { f.manager.close(); }
+});
+
+test('a broadcast status change reaches a row the app never resumed', async () => {
+  const f = fixture();
+  try {
+    pinned(f.conversations.get('one')!, 'thread-x', 'working');
+    f.event('thread/status/changed', 'thread-x', { status: { type: 'active', activeFlags: ['waitingOnApproval'] } });
+    await until(() => f.statuses.length > 0, 'the broadcast to reach the row');
+    assert.equal(f.conversations.get('one')!.state, 'blocked');
+    assert.deepEqual(f.statuses.at(-1), { id: 'one', state: 'blocked', detail: 'Codex needs your input' });
+
+    // A thread started by somebody else matches no row and changes nothing.
+    f.event('thread/started', 'thread-somebody-else', { thread: { id: 'thread-somebody-else', status: { type: 'active' } } });
+    await settle();
+    assert.equal(f.statuses.length, 1);
+  } finally { f.manager.close(); }
+});
+
+test('opening a row mid-turn no longer relabels a working thread as idle', async () => {
+  const f = fixture();
+  try {
+    f.conversations.get('one')!.sessionId = 'thread-running';
+    f.rpc.statuses.set('thread-running', { type: 'active', activeFlags: [] });
+    assert.equal((await f.manager.snapshot('one')).state, 'working');
+  } finally { f.manager.close(); }
+});
+
+// ---- Queueing onto a busy thread -------------------------------------------
+
+test('queue uses the app-server when it has thread/queue/add', async () => {
+  const f = fixture();
+  const ran: string[][] = [];
+  const real = queueCli.run;
+  queueCli.run = async (args) => { ran.push(args); };
+  try {
+    await f.manager.send('one', 'a');
+    await f.manager.queue('one', 'also check the tests');
+    const add = f.rpc.calls.find((c) => c.method === 'thread/queue/add')!;
+    assert.equal(add.params.threadId, 'thread-1');
+    assert.deepEqual(add.params.input, [{ type: 'text', text: 'also check the tests', text_elements: [] }]);
+    assert.match(String(add.params.clientUserMessageId), /^[0-9a-f-]{36}$/);
+    assert.deepEqual(ran, []);
+  } finally { queueCli.run = real; f.manager.close(); }
+});
+
+test('queue falls back to the codex CLI when the app-server has no queue method', async () => {
+  const f = fixture();
+  const ran: string[][] = [];
+  const real = queueCli.run;
+  queueCli.run = async (args) => { ran.push(args); };
+  try {
+    await f.manager.send('one', 'a');
+    f.rpc.queued.set('thread/queue/add', [new Error('Invalid request: unknown variant `thread/queue/add`')]);
+    await f.manager.queue('one', 'nudge');
+    assert.deepEqual(ran, [['queue', '--thread', 'thread-1', '--message', 'nudge', '--remote', 'unix:///tmp/peers-flow/codex.sock']]);
+
+    // The absence is remembered: no second pointless round trip.
+    await f.manager.queue('one', 'again');
+    assert.equal(f.rpc.calls.filter((c) => c.method === 'thread/queue/add').length, 1);
+    assert.equal(ran.length, 2);
+  } finally { queueCli.run = real; f.manager.close(); }
+});
+
+test('queue reports a real failure instead of quietly shelling out', async () => {
+  const f = fixture();
+  const real = queueCli.run;
+  queueCli.run = async () => { throw new Error('the CLI should not have been reached'); };
+  try {
+    await f.manager.send('one', 'a');
+    f.rpc.queued.set('thread/queue/add', [new Error('thread is archived')]);
+    await assert.rejects(f.manager.queue('one', 'nudge'), /archived/);
+    await assert.rejects(f.manager.queue('two', 'no thread yet'), /no Codex thread/);
+  } finally { queueCli.run = real; f.manager.close(); }
+});
+
+test('forgetting a conversation unsubscribes but leaves the thread on the server', async () => {
+  const f = fixture();
+  try {
+    await f.manager.send('one', 'a');
+    await f.manager.forget('one');
+    assert.deepEqual(f.rpc.calls.at(-1), { method: 'thread/unsubscribe', params: { threadId: 'thread-1' } });
+    assert.equal(f.rpc.calls.filter((c) => c.method === 'thread/delete' || c.method === 'thread/archive').length, 0);
+  } finally { f.manager.close(); }
+});
+
+test('closing the app gives up the connection, not the work in flight', async () => {
+  const f = fixture();
+  await f.manager.send('one', 'a');
+  f.manager.close();
+  const conv = f.conversations.get('one')!;
+  assert.equal(conv.state, 'working'); // The app-server kept running it.
+  assert.notEqual(conv.description, 'App closed. Reopen to continue.');
+});
+
+test('spawn defaults keep an unattended thread from parking on an approval prompt', async () => {
+  const f = fixture({ options: () => ({ developerInstructions: 'house rules' }) });
+  try {
+    await f.manager.send('one', 'a');
+    const start = f.rpc.calls.find((c) => c.method === 'thread/start')!;
+    assert.equal(start.params.approvalPolicy, 'never');
+    assert.equal(start.params.sandbox, 'workspace-write');
   } finally { f.manager.close(); }
 });

@@ -24,6 +24,12 @@ export function codexUsage(response: WireObject, plan?: string): UsageResult {
   return { ok: true, snapshot: { meters, plan, fetchedAt: new Date().toISOString() } };
 }
 
+// What the panel shows when the app-server could not be reached at all. Never
+// cached: the client reconnects on its own, so the next read should try again
+// rather than insist for a minute that Codex is down.
+const UNREACHABLE: CodexAccountStatus = { signedIn: false, error: 'Could not connect to Codex. Check that the CLI is installed and signed in.',
+  usage: { ok: false, reason: 'unknown', error: 'Codex is unavailable. Check the CLI installation and sign-in.' } };
+
 // Shares the agent connection and deduplicates the Accounts/Usage panel reads.
 export class CodexAccountReader {
   private cached?: { at: number; value: CodexAccountStatus };
@@ -33,24 +39,23 @@ export class CodexAccountReader {
   read(force = false): Promise<CodexAccountStatus> {
     if (this.inflight) return this.inflight;
     if (!force && this.cached && Date.now() - this.cached.at < 55_000) return Promise.resolve(this.cached.value);
-    this.inflight = this.fetch().then(value => { this.cached = { at: Date.now(), value }; return value; }).finally(() => { this.inflight = undefined; });
+    this.inflight = this.fetch()
+      .then(value => { this.cached = { at: Date.now(), value }; return value; })
+      .catch(() => UNREACHABLE)
+      .finally(() => { this.inflight = undefined; });
     return this.inflight;
   }
+  /** Throws when the server is unreachable, so `read` knows not to remember it. */
   private async fetch(): Promise<CodexAccountStatus> {
-    try {
-      await this.rpc.start();
-      const { account } = await this.rpc.request('account/read', { refreshToken: false });
-      if (!account) return { signedIn: false, usage: { ok: false, reason: 'no-auth', error: 'Sign in with codex login to connect Codex.' } };
-      const result: CodexAccountStatus = { signedIn: true, email: account.email || undefined, plan: account.planType || undefined,
-        authType: account.type, usage: { ok: false, reason: 'unknown', error: 'Plan usage is available for ChatGPT subscriptions.' } };
-      if (account.type === 'chatgpt') {
-        try { result.usage = codexUsage(await this.rpc.request('account/rateLimits/read', {}), result.plan); }
-        catch { result.usage = { ok: false, reason: 'network', error: 'Could not read Codex usage. Refresh to try again.' }; }
-      }
-      return result;
-    } catch {
-      return { signedIn: false, error: 'Could not connect to Codex. Check that the CLI is installed and signed in.',
-        usage: { ok: false, reason: 'unknown', error: 'Codex is unavailable. Check the CLI installation and sign-in.' } };
+    await this.rpc.start();
+    const { account } = await this.rpc.request('account/read', { refreshToken: false });
+    if (!account) return { signedIn: false, usage: { ok: false, reason: 'no-auth', error: 'Sign in with codex login to connect Codex.' } };
+    const result: CodexAccountStatus = { signedIn: true, email: account.email || undefined, plan: account.planType || undefined,
+      authType: account.type, usage: { ok: false, reason: 'unknown', error: 'Plan usage is available for ChatGPT subscriptions.' } };
+    if (account.type === 'chatgpt') {
+      try { result.usage = codexUsage(await this.rpc.request('account/rateLimits/read', {}), result.plan); }
+      catch { result.usage = { ok: false, reason: 'network', error: 'Could not read Codex usage. Refresh to try again.' }; }
     }
+    return result;
   }
 }
