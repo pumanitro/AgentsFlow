@@ -46,6 +46,33 @@ const MIN_WT_HEIGHT = 64;
 const DEFAULT_WT_HEIGHT = 224;
 const MAX_WT_HEIGHT_RATIO = 0.5;
 
+// Sidebar height budget. The docked cluster at the bottom (Accounts, Usage,
+// Notes) used to be unbounded: each pane caps its own body in viewport units
+// (45vh + 30vh + 25vh), so on a normal window the three of them asked for more
+// than the whole column and the last one — Notes — was simply clipped off by the
+// pane's `overflow-hidden`, with no way to scroll to it. The cluster is now
+// budgeted instead: it never takes more than DOCK_MAX_RATIO of the column nor
+// leaves the file tree less than TREE_MIN_HEIGHT, and inside it every pane is
+// allowed to shrink and scroll, so all three headers — Notes included — are
+// always on screen. DOCK_MIN_HEIGHT is the three collapsed headers plus the
+// cluster's own gaps and padding, the floor the budget can never go under.
+const TREE_MIN_HEIGHT = 100;
+const DOCK_HEADER_HEIGHT = 34;
+const DOCK_MIN_HEIGHT = DOCK_HEADER_HEIGHT * 3 + 16 + 16;
+const DOCK_MAX_RATIO = 0.6;
+// Everything between the tree and the top/bottom of the pane that is neither the
+// tree nor the cluster: mode bar, filter bar, summary line, worktree heading.
+const SIDEBAR_CHROME = 130;
+
+// Ceiling for the worktree list: the user's dragged height, never more than half
+// the pane, and never so much that the tree floor and the docked cluster cannot
+// both be paid for.
+function worktreeCeiling(paneHeight: number, wtHeight: number): number {
+  if (paneHeight <= 0) return wtHeight;
+  const room = paneHeight - TREE_MIN_HEIGHT - DOCK_MIN_HEIGHT - SIDEBAR_CHROME;
+  return Math.max(MIN_WT_HEIGHT, Math.min(wtHeight, Math.round(paneHeight * MAX_WT_HEIGHT_RATIO), room));
+}
+
 interface Props {
   dirPath: string;
   conversationId: string;
@@ -648,12 +675,22 @@ export default function FileTreeSidebar({ dirPath, conversationId, worktreePath,
   const effectiveSelected = selectedWorktree ?? currentWtPath;
   const showWorktrees = mode === 'changes' && worktrees.length > 1;
 
-  // Ceiling for the list: whatever the user dragged to, never more than half
-  // the pane. Before the first measurement we honour the stored value as-is so
-  // a tall list doesn't visibly snap down and back on mount.
-  const wtListMax = paneHeight > 0
-    ? Math.max(MIN_WT_HEIGHT, Math.min(wtHeight, Math.round(paneHeight * MAX_WT_HEIGHT_RATIO)))
-    : wtHeight;
+  // Ceiling for the list. Before the first measurement we honour the stored
+  // value as-is so a tall list doesn't visibly snap down and back on mount.
+  const wtListMax = worktreeCeiling(paneHeight, wtHeight);
+
+  // How tall the docked cluster (Accounts / Usage / Notes) may get. Capped so
+  // the file tree always keeps TREE_MIN_HEIGHT, and floored at the three
+  // collapsed headers so Notes is on screen even in a short window.
+  const dockMax = paneHeight > 0
+    ? Math.max(DOCK_MIN_HEIGHT, Math.min(Math.round(paneHeight * DOCK_MAX_RATIO), paneHeight - TREE_MIN_HEIGHT))
+    : undefined;
+  // The floor is paid before the tree's: in a column too short for both, the
+  // tree is the one that gives way, which is the whole point of the change.
+  const dockMin = paneHeight > 0 ? Math.min(DOCK_MIN_HEIGHT, paneHeight) : undefined;
+  const treeMin = paneHeight > 0
+    ? Math.max(0, Math.min(TREE_MIN_HEIGHT, paneHeight - SIDEBAR_CHROME - DOCK_MIN_HEIGHT))
+    : TREE_MIN_HEIGHT;
 
   const startWtResize = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
@@ -663,7 +700,9 @@ export default function FileTreeSidebar({ dirPath, conversationId, worktreePath,
     // pick up where the divider visibly is.
     const startH = wtListRef.current?.getBoundingClientRect().height ?? DEFAULT_WT_HEIGHT;
     const pane = rootRef.current?.getBoundingClientRect().height ?? 0;
-    const maxH = pane > 0 ? Math.max(MIN_WT_HEIGHT, Math.round(pane * MAX_WT_HEIGHT_RATIO)) : startH;
+    // Same ceiling the list renders against, so the divider stops where the
+    // list actually stops instead of sliding past a bound it cannot use.
+    const maxH = pane > 0 ? worktreeCeiling(pane, Number.MAX_SAFE_INTEGER) : startH;
     const onMove = (ev: MouseEvent) => {
       // The handle sits on whichever side faces the file tree, so the gesture
       // inverts when the list is parked at the bottom: there, dragging up grows it.
@@ -780,7 +819,10 @@ export default function FileTreeSidebar({ dirPath, conversationId, worktreePath,
   );
 
   const worktreeSection = !showWorktrees ? null : (
-    <div className="shrink-0 flex flex-col min-h-0">
+    // `shrink` rather than `shrink-0`: when the column is tight the worktree
+    // list is the first thing to give way (its inner list scrolls), ahead of
+    // the tree floor and well ahead of the docked cluster.
+    <div className="shrink flex flex-col min-h-0">
       {wtAtBottom && wtResizer}
       <div className="px-3 pt-2 pb-1 text-[10px] uppercase tracking-wider text-muted flex items-center gap-1.5">
         <span>Worktrees</span>
@@ -977,7 +1019,11 @@ export default function FileTreeSidebar({ dirPath, conversationId, worktreePath,
           )}
         </div>
       </div>
-      <div className="flex-1 overflow-y-auto py-1 text-text/90">
+      {/* The tree is the flexible region: it grows into whatever the docked
+          cluster below does not need and, when the column is short, shrinks to
+          treeMin (normally 100px, less only in a window too small for both
+          floors) and scrolls inside itself. */}
+      <div className="flex-1 overflow-y-auto py-1 text-text/90" style={{ minHeight: treeMin }}>
         {typeof api().gitStatus !== 'function' && (
           <div className="px-3 py-4 text-xs text-muted italic">
             Restart the app to load the sidebar (preload needs to refresh after pulling new code).
@@ -1004,8 +1050,19 @@ export default function FileTreeSidebar({ dirPath, conversationId, worktreePath,
           Notes, both inset on the darker background behind a strong divider, so
           the two views share one design language. Usage matters most while a
           chat is burning through the limits, so it follows you in here rather
-          than living only on the home screen. */}
-      <div className="shrink-0 min-h-0 flex flex-col gap-2 px-2 py-2 border-t-2 border-border bg-bg shadow-[0_-10px_18px_-10px_rgba(0,0,0,0.7)]">
+          than living only on the home screen.
+
+          Unlike the home sidebar this one is budgeted (see dockMax): the three
+          panes each cap themselves in viewport units, which together overflow
+          the column and used to push Notes off the bottom of a pane that clips
+          rather than scrolls. The two child overrides do the work — every pane
+          may shrink (they set `shrink-0` on themselves, which is right on the
+          home page and wrong here) and none may shrink past its own header, so
+          the cluster compresses from the top down and Notes stays visible. */}
+      <div
+        className="shrink min-h-0 flex flex-col gap-2 px-2 py-2 border-t-2 border-border bg-bg overflow-hidden shadow-[0_-10px_18px_-10px_rgba(0,0,0,0.7)] [&>*]:!shrink [&>*]:!min-h-[34px]"
+        style={{ maxHeight: dockMax, minHeight: dockMin }}
+      >
         <AccountsPanel />
         <UsagePanel />
         <NotesPanel dirPath={dirPath} onFileOpen={onFileOpen} openedFilePath={openedFilePath} />
