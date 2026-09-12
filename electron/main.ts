@@ -1209,6 +1209,9 @@ async function handoverConversations(to: AgentProvider, reason: string): Promise
         sessionId: '', daemonShort: '', forkFromSessionId: undefined,
         state: 'idle', status: 'idle',
         description: 'Handed over to Codex — open it to continue',
+        // A model belongs to the provider that resolved it (a Codex thread records
+        // e.g. gpt-6-astra); the other side must start on its own default.
+        model: undefined,
       });
     } else {
       let summary = '';
@@ -1225,6 +1228,7 @@ async function handoverConversations(to: AgentProvider, reason: string): Promise
         sessionId: '', daemonShort: '', forkFromSessionId: undefined,
         state: 'idle', status: 'idle',
         description: 'Handed over to Claude — open it to continue',
+        model: undefined,
       });
     }
     moved.add(conv.id);
