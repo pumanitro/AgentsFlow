@@ -80,6 +80,10 @@ let peersBridge: PeersBridge | null = null;
 const codexDeps = {
   get: (id: string) => store.getConversation(id),
   update: (id: string, patch: Partial<Conversation>) => { store.updateConversation(id, patch); broadcastConversations(); },
+  // Every row, so a reconnect can find the pinned Codex threads to rejoin, and
+  // the directory the app-server's own socket lives under.
+  list: () => store.getConversations(),
+  userData: app.getPath('userData'),
   options: (conv: Conversation) => {
     const configPath = !conv.delegatedByConversationId ? writeMcpConfigForConversation(conv.id, conv.directoryPath) : undefined;
     const server = configPath ? JSON.parse(fs.readFileSync(configPath, 'utf8')).mcpServers.peersflow : undefined;
