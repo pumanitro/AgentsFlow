@@ -2,29 +2,17 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { imageMarker, insertImageMarkers, removeImageMarker } from '../../shared/image-markers';
 import { SlashCommand, TrackedDirectory } from '../../shared/types';
 import { api } from '../lib/ipc';
+import { loadModelPick, modelLabel, saveModelPick, useProviderModels } from '../lib/models';
+import { useAccountsSnapshot } from '../lib/use-accounts';
 import { attachmentPromptLines, imageFilesFromPaste, savePastedImages, type PastedImage } from '../lib/paste-image';
 import ImagePreviewModal from './ImagePreviewModal';
+import ProviderIcon from './ProviderIcon';
 
 interface Props {
   targetDir: TrackedDirectory | null;
+  // Still `provider:model` on the wire (index.tsx splits it) — the provider is
+  // now the one selected in Accounts rather than something picked here.
   onSend: (prompt: string, attachments: string[], model: string) => Promise<void>;
-}
-
-// Provider-prefixed selections keep Claude aliases out of Codex launches.
-const MODELS = ['claude:', 'codex:', 'claude:fable', 'claude:opus', 'claude:sonnet', 'claude:haiku'] as const;
-const modelLabel = (m: string) => `${m.startsWith('codex:') ? 'Codex' : 'Claude'} · ${m.split(':')[1] || 'default'}`;
-type ModelAlias = (typeof MODELS)[number];
-const MODEL_STORAGE_KEY = 'agentsflow.spawnModel';
-
-function loadModel(): ModelAlias {
-  try {
-    const saved = window.localStorage.getItem(MODEL_STORAGE_KEY);
-    if (saved && (MODELS as readonly string[]).includes(saved)) return saved as ModelAlias;
-    if (saved && (MODELS as readonly string[]).includes(`claude:${saved}`)) return `claude:${saved}` as ModelAlias;
-  } catch {
-    /* localStorage unavailable — fall through to default */
-  }
-  return 'claude:';
 }
 
 // Survives navigation to /session and back. Cleared only after a successful send.
@@ -35,27 +23,30 @@ export default function SpawnBar({ targetDir, onSend }: Props) {
   const [busy, setBusy] = useState(false);
   const [images, setImages] = useState<PastedImage[]>(draft.images);
   const [previewing, setPreviewing] = useState<PastedImage | null>(null);
+  // The provider is not a composer setting any more: it is whichever licence
+  // Accounts says you are on, so the button can only show the model.
+  const { snapshot } = useAccountsSnapshot();
+  const provider = snapshot.activeProvider;
+  const { models, loading: modelsLoading, unavailable: modelsUnavailable } = useProviderModels(provider);
   // Start from the deterministic default so the first client render matches the
   // SSR/exported HTML; the persisted pick is loaded after mount (below).
-  const [model, setModel] = useState<ModelAlias>('claude:');
-  const [codexModel, setCodexModel] = useState('');
+  const [model, setModel] = useState('');
   const [modelMenuOpen, setModelMenuOpen] = useState(false);
   const modelMenuRef = useRef<HTMLDivElement | null>(null);
-  const skipFirstModelPersist = useRef(true);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
 
-  // Load the saved model after mount. Reading localStorage during render (the
-  // previous useState initializer) mismatched the server-rendered HTML — which
-  // always emits the initial default — and threw a React hydration error.
-  useEffect(() => { setModel(loadModel()); try { setCodexModel(localStorage.getItem('agentsflow.codexModel') || ''); } catch {} }, []);
+  // Load the saved model after mount, and again whenever the provider changes —
+  // each provider remembers its own pick, so switching back restores it rather
+  // than sending a Claude alias to Codex. Reading localStorage during render
+  // (the previous useState initializer) mismatched the server-rendered HTML and
+  // threw a React hydration error.
+  useEffect(() => { setModel(loadModelPick(provider)); }, [provider]);
 
-  // Remember the picked model across sends and app restarts. Skip the first run
-  // so the mount-time default doesn't clobber a stored value before the hydrate
-  // effect above has swapped it in.
-  useEffect(() => {
-    if (skipFirstModelPersist.current) { skipFirstModelPersist.current = false; return; }
-    try { window.localStorage.setItem(MODEL_STORAGE_KEY, model); } catch { /* ignore */ }
-  }, [model]);
+  const pickModel = (id: string) => {
+    setModel(id);
+    saveModelPick(provider, id);
+    setModelMenuOpen(false);
+  };
 
   // Close the model menu on outside-click / Escape.
   useEffect(() => {
@@ -85,14 +76,14 @@ export default function SpawnBar({ targetDir, onSend }: Props) {
   // (Re)load the available commands whenever the spawn target changes. Project
   // (.claude in the target dir) shadows user-level (~/.claude) entries.
   useEffect(() => {
-    if (model.startsWith('codex:')) { setSlashCommands([]); return; }
+    if (provider === 'codex') { setSlashCommands([]); return; }
     let alive = true;
     api()
       .listSlashCommands(targetDir?.path ?? null)
       .then((cmds) => { if (alive) setSlashCommands(cmds); })
       .catch(() => { if (alive) setSlashCommands([]); });
     return () => { alive = false; };
-  }, [targetDir?.path, model]);
+  }, [targetDir?.path, provider]);
 
   // Find a "/token" at the caret: the word being typed just before the cursor
   // that starts with "/". This works ANYWHERE in the prompt, so a command/skill
@@ -226,7 +217,7 @@ export default function SpawnBar({ targetDir, onSend }: Props) {
     const attachments = validImages.map((i) => i.savedPath);
     setBusy(true);
     try {
-      await onSend(finalPrompt, attachments, model.startsWith('codex:') ? `codex:${codexModel.trim()}` : model);
+      await onSend(finalPrompt, attachments, `${provider}:${model}`);
       setPrompt('');
       setCaret(0);
       setImages([]);
@@ -350,40 +341,45 @@ export default function SpawnBar({ targetDir, onSend }: Props) {
             <button
               type="button"
               onClick={() => setModelMenuOpen((v) => !v)}
-              title="Agent and model. Default uses your CLI configuration."
+              title={`Model for the selected provider. Change provider in Accounts. Default uses your ${provider === 'codex' ? 'Codex' : 'Claude'} CLI configuration.`}
               aria-haspopup="menu"
               aria-expanded={modelMenuOpen}
-              className="inline-flex items-center gap-1.5 pl-2.5 pr-2 py-1.5 rounded-md bg-panel2 border border-border text-xs font-medium text-text capitalize outline-none cursor-pointer hover:border-accent/60 focus:border-accent"
+              className="inline-flex items-center gap-1.5 pl-2.5 pr-2 py-1.5 rounded-md bg-panel2 border border-border text-xs font-medium text-text outline-none cursor-pointer hover:border-accent/60 focus:border-accent"
             >
-              <span>{modelLabel(model)}</span>
+              <ProviderIcon provider={provider} size={13} className="text-accent" />
+              <span>{modelLabel(provider, model, models)}</span>
               <span className="text-muted text-[10px]">▾</span>
             </button>
             {modelMenuOpen && (
               <div
                 role="menu"
-                className="absolute bottom-full left-0 mb-1 z-30 min-w-full rounded-md border border-border bg-panel2 shadow-lg shadow-black/40 py-1"
+                className="absolute bottom-full left-0 mb-1 z-30 min-w-full max-h-64 overflow-y-auto rounded-md border border-border bg-panel2 shadow-lg shadow-black/40 py-1"
               >
-                {MODELS.map((m) => {
-                  const active = m === model;
+                {modelsUnavailable ? (
+                  <div className="px-3 py-1.5 text-xs text-muted italic whitespace-nowrap">Codex CLI not found</div>
+                ) : modelsLoading ? (
+                  <div className="px-3 py-1.5 text-xs text-muted italic whitespace-nowrap">Loading models…</div>
+                ) : models.map((m) => {
+                  const active = m.id === model;
                   return (
                     <button
-                      key={m}
+                      key={m.id}
                       type="button"
                       role="menuitem"
-                      onClick={() => { setModel(m); setModelMenuOpen(false); }}
-                      className={`w-full text-left pl-2 pr-4 py-1.5 text-xs capitalize flex items-center gap-1.5 ${
+                      onClick={() => pickModel(m.id)}
+                      className={`w-full text-left pl-2 pr-4 py-1.5 text-xs flex items-center gap-1.5 whitespace-nowrap ${
                         active ? 'bg-accent text-bg' : 'text-text hover:bg-panel'
                       }`}
                     >
                       <span className="w-3 shrink-0 text-center">{active ? '✓' : ''}</span>
-                      <span>{modelLabel(m)}</span>
+                      <span>{m.label}</span>
+                      {m.isDefault && <span className={`text-[10px] ${active ? 'text-bg/70' : 'text-muted'}`}>default</span>}
                     </button>
                   );
                 })}
               </div>
             )}
           </div>
-          {model.startsWith('codex:') && <input aria-label="Codex model" title="Optional Codex model override" value={codexModel} onChange={(e) => { setCodexModel(e.target.value); try { localStorage.setItem('agentsflow.codexModel', e.target.value); } catch {} }} placeholder="Configured model" className="w-36 bg-panel border border-border rounded-md px-2 py-2 text-xs outline-none focus:border-accent" />}
           <textarea
             ref={textareaRef}
             value={prompt}

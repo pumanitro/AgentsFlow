@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { api } from '../lib/ipc';
 import { worstMeter } from '../../shared/usage';
+import { useAccountsSnapshot } from '../lib/use-accounts';
+import ProviderIcon, { providerName } from './ProviderIcon';
 import type { UsageMeter, UsageResult } from '../../shared/types';
 
 // A persisted boolean keyed in localStorage. Starts at `fallback` to avoid an
@@ -89,56 +91,93 @@ function MeterRow({ meter }: { meter: UsageMeter }) {
   );
 }
 
+/**
+ * The usage of the licence you are actually spending.
+ *
+ * It used to stack Claude and Codex one above the other, which asked the reader
+ * to work out which half applied to the work they were about to start. The
+ * panel now follows the selected provider: one set of meters, named and marked,
+ * and switching provider switches what this shows.
+ */
 export default function UsagePanel() {
   const [open, setOpen] = usePersistedBool('agentsflow:usage:open', true);
-  const [results, setResults] = useState<Record<string, UsageResult | null>>({ Claude: null, Codex: null });
+  const { snapshot } = useAccountsSnapshot();
+  const provider = snapshot.activeProvider;
+  const name = providerName(provider);
+  const [result, setResult] = useState<UsageResult | null>(null);
   const [loading, setLoading] = useState(false);
   const mounted = useRef(true);
+
   const load = useCallback(async (force: boolean) => {
     setLoading(true);
-    await Promise.all(['Claude', 'Codex'].map(async provider => {
-      let result: UsageResult;
-      try { result = provider === 'Claude' ? await api().getUsage(force) : (await api().getCodexAccount(force)).usage; }
-      catch { result = { ok: false, reason: 'unknown', error: `Could not read ${provider} usage.` }; }
-      if (mounted.current) setResults(previous => ({ ...previous, [provider]: result }));
-    }));
-    if (mounted.current) setLoading(false);
-  }, []);
+    let next: UsageResult;
+    try {
+      next = provider === 'codex' ? (await api().getCodexAccount(force)).usage : await api().getUsage(force);
+    } catch {
+      next = { ok: false, reason: 'unknown', error: `Could not read ${providerName(provider)} usage.` };
+    }
+    if (!mounted.current) return;
+    setResult(next);
+    setLoading(false);
+  }, [provider]);
+
   useEffect(() => {
     mounted.current = true;
+    return () => { mounted.current = false; };
+  }, []);
+
+  // Keyed on the provider: switching clears the old numbers rather than leaving
+  // the other licence's meters on screen under the new name.
+  useEffect(() => {
+    setResult(null);
     void load(false);
     const timer = setInterval(() => load(false), REFRESH_MS);
-    const off = api().onAccountsUpdated?.(() => { void load(true); });
-    return () => { mounted.current = false; clearInterval(timer); off?.(); };
+    return () => clearInterval(timer);
   }, [load]);
+
+  // An account switch changes the numbers immediately, so don't wait out the
+  // minute timer.
+  useEffect(() => {
+    const off = api().onAccountsUpdated?.(() => { void load(true); });
+    return () => off?.();
+  }, [load]);
+
+  const badge = worstMeter(result);
 
   return (
     <div className="shrink-0 rounded-lg border border-border bg-panel overflow-hidden flex flex-col min-h-0">
       <div className="shrink-0 flex items-center gap-2 px-2 py-2 bg-panel2/60 hover:bg-panel2">
         <span className="w-1 h-4 rounded-full bg-info shrink-0" aria-hidden="true" />
-        <button onClick={() => setOpen(!open)} className="flex items-center gap-1.5 flex-1 min-w-0 text-left" title={open ? 'Hide usage' : 'Show plan usage limits'}>
+        <button onClick={() => setOpen(!open)} className="flex items-center gap-1.5 flex-1 min-w-0 text-left" title={open ? 'Hide usage' : `Show ${name} plan usage limits`}>
           <span className="text-muted text-[10px] w-3 shrink-0">{open ? '▼' : '▶'}</span>
           <span className="text-[11px] uppercase tracking-wider text-text font-semibold">Usage</span>
-          <span className="ml-auto flex gap-2">
-            {Object.entries(results).map(([provider, result]) => {
-              const meter = worstMeter(result);
-              return meter && <span key={provider} className="text-[10px] shrink-0" style={{ color: SEVERITY_COLOR[meter.severity] }}>{provider} {meter.percent}%</span>;
-            })}
+          <span className="flex items-center gap-1 min-w-0 text-muted">
+            <ProviderIcon provider={provider} size={12} />
+            <span className="text-[11px] text-text truncate">{name}</span>
           </span>
+          {badge && (
+            <span className="ml-auto text-[10px] font-mono shrink-0" style={{ color: SEVERITY_COLOR[badge.severity] }}>
+              {badge.percent}%
+            </span>
+          )}
         </button>
-        <button onClick={() => void load(true)} disabled={loading} className={`shrink-0 text-muted hover:text-text px-1.5 py-0.5 rounded disabled:opacity-40 ${loading ? 'animate-spin' : ''}`} title="Refresh usage now" aria-label="Refresh usage">↻</button>
+        <button onClick={() => void load(true)} disabled={loading} className={`shrink-0 text-muted hover:text-text px-1.5 py-0.5 rounded disabled:opacity-40 ${loading ? 'animate-spin' : ''}`} title={`Refresh ${name} usage now`} aria-label="Refresh usage">↻</button>
       </div>
       {open && <div className="flex-1 min-h-0 overflow-y-auto border-t border-border/60 py-1" style={{ maxHeight: 'min(300px, 30vh)' }}>
-        {Object.entries(results).map(([provider, result]) => <div key={provider} data-testid={`usage-${provider.toLowerCase()}`} className="pb-1">
-          <div className="px-3 pt-2 pb-1 flex gap-2 text-[11px]"><strong>{provider}</strong><span className="text-muted">{result?.ok ? result.snapshot.plan : ''}</span></div>
+        <div data-testid={`usage-${provider}`} className="pb-1">
+          <div className="px-3 pt-2 pb-1 flex items-center gap-2 text-[11px]">
+            <ProviderIcon provider={provider} size={12} className="text-muted" />
+            <strong className="text-text">{name}</strong>
+            <span className="text-muted truncate">{result?.ok ? result.snapshot.plan : ''}</span>
+          </div>
           {!result ? <div className="px-3 py-2 text-[11px] text-muted">Loading usage…</div>
-            : !result.ok ? <div className="px-3 py-2 text-[11px] text-muted">{result.error || `Sign in to ${provider} to see usage.`}</div>
+            : !result.ok ? <div className="px-3 py-2 text-[11px] text-muted">{result.error || `Sign in to ${name} to see usage.`}</div>
             : <>
               {result.snapshot.meters.length ? result.snapshot.meters.map(meter => <MeterRow key={meter.key} meter={meter} />)
                 : <div className="px-3 py-2 text-[11px] text-muted">No usage limits reported.</div>}
               <div className="px-3 py-1 text-[10px] text-subtle">Updated {fetchedAgo(result.snapshot.fetchedAt)}</div>
             </>}
-        </div>)}
+        </div>
       </div>}
     </div>
   );

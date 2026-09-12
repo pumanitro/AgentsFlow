@@ -220,6 +220,30 @@ export default function SessionPage() {
     return () => { off(); offPatch(); };
   }, [id]);
 
+  // A conversation that moved provider gets a different pane entirely (Codex
+  // chat vs terminal), so a "chat ended" notice from the side it left would
+  // otherwise sit on top of the side it arrived at.
+  useEffect(() => { setChatExited(false); }, [conv?.provider]);
+
+  // Continue a conversation that was handed over to Claude: the main process
+  // starts a fresh session seeded with the other agent's transcript, and the
+  // conversations broadcast then fills in the sessionId the Terminal needs.
+  const [resuming, setResuming] = useState(false);
+  const [resumeError, setResumeError] = useState<string | null>(null);
+  const resumeHandover = useCallback(async () => {
+    if (!id || resuming) return;
+    setResuming(true);
+    setResumeError(null);
+    try {
+      const r = await api().resumeHandover(String(id));
+      if (!r.ok) setResumeError(r.error || 'Could not continue this conversation.');
+    } catch (err) {
+      setResumeError((err as Error)?.message ?? 'Could not continue this conversation.');
+    } finally {
+      setResuming(false);
+    }
+  }, [id, resuming]);
+
   const goBack = useCallback(() => {
     if (conv?.directoryId) saveUIState({ selectedDirId: conv.directoryId });
     router.push({ pathname: '/', query: id ? { focus: String(id) } : undefined });
@@ -401,6 +425,34 @@ export default function SessionPage() {
                   {conv?.provider === 'codex' ? <CodexChat conversationId={String(id)} directoryPath={conv.directoryPath} /> : <Terminal key={chatGen} conversationId={String(id)} baseDir={conv?.directoryPath} onExit={() => setChatExited(true)} autoFocus={rightPane === 'chat'} />}
                 </PaneErrorBoundary>
               )
+            ) : conv?.handover ? (
+              // Reached only when this is a Claude-side conversation with no
+              // session: the branch above already took every Codex one.
+              // Handed over from the other agent and not yet continued here.
+              // There is nothing to attach to until someone says go, so the
+              // pane is the button that says go.
+              <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 px-6 text-center">
+                <div className="text-sm text-text font-medium">
+                  Handed over from {conv.handover.from === 'codex' ? 'Codex' : 'Claude'}
+                </div>
+                <div className="text-xs text-muted max-w-sm leading-relaxed">
+                  {conv.handover.reason ? `${conv.handover.reason} ` : ''}
+                  Continuing starts a Claude session seeded with what the other agent did
+                  {conv.handover.at ? ` (moved ${new Date(conv.handover.at).toLocaleString()})` : ''}.
+                </div>
+                {resumeError && <div className="text-xs text-danger max-w-sm">{resumeError}</div>}
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => void resumeHandover()}
+                    disabled={resuming}
+                    className="px-3 py-1 text-[11px] uppercase tracking-wider rounded-md bg-accent text-bg font-semibold hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed"
+                  >{resuming ? 'Starting…' : 'Continue with Claude'}</button>
+                  <button
+                    onClick={goBack}
+                    className="px-3 py-1 text-[11px] uppercase tracking-wider rounded-md border border-border bg-panel text-muted hover:text-text hover:bg-panel2"
+                  >← Back</button>
+                </div>
+              </div>
             ) : (
               <div className="absolute inset-0 flex items-center justify-center text-muted text-sm">
                 {conv ? 'Session not ready yet…' : 'Loading…'}
