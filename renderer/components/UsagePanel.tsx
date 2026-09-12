@@ -107,8 +107,13 @@ export default function UsagePanel() {
   const [result, setResult] = useState<UsageResult | null>(null);
   const [loading, setLoading] = useState(false);
   const mounted = useRef(true);
+  // Every read is numbered; a reply that lands after a newer read began (the
+  // provider switched, or ↻ was pressed) is dropped, so the other provider's
+  // meters can never arrive late and sit under this provider's header.
+  const seq = useRef(0);
 
   const load = useCallback(async (force: boolean) => {
+    const mine = ++seq.current;
     setLoading(true);
     let next: UsageResult;
     try {
@@ -116,7 +121,7 @@ export default function UsagePanel() {
     } catch {
       next = { ok: false, reason: 'unknown', error: `Could not read ${providerName(provider)} usage.` };
     }
-    if (!mounted.current) return;
+    if (!mounted.current || mine !== seq.current) return;
     setResult(next);
     setLoading(false);
   }, [provider]);

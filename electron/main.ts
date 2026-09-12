@@ -1184,7 +1184,10 @@ async function handoverConversations(to: AgentProvider, reason: string): Promise
   const moved = new Set<string>();
 
   for (const conv of all) {
-    if (!conv.pinned || isSettled(conv)) continue;
+    // Every pinned row follows the switch, finished ones included: a Done row
+    // is still on the board and its next message must go to the provider that
+    // is selected now. Only unpinned rows (history) stay where they were.
+    if (!conv.pinned) continue;
     // A delegated peer is not the user's conversation — it belongs to the chat
     // that spawned it, and follows that chat's fate below.
     if (conv.delegatedByConversationId) continue;

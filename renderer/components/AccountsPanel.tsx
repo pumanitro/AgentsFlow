@@ -938,9 +938,9 @@ export default function AccountsPanel() {
                   </div>
                 )}
 
-                {/* Auto-rotation. Needs two accounts to mean anything, so it only
-                    appears once there is somewhere to rotate to. */}
-                {snapshot.accounts.length >= 2 && (
+                {/* Auto-rotation. Needs somewhere to rotate to: a second Claude
+                    account, or a signed-in Codex for provider rotation. */}
+                {(snapshot.accounts.length >= 2 || codex?.signedIn) && (
                   <div className="mx-3 my-1 pt-1.5 border-t border-border/50">
                     <label className="flex items-center gap-2 cursor-pointer">
                       <input
