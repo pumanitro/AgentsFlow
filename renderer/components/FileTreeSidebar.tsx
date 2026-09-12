@@ -60,6 +60,7 @@ const TREE_MIN_HEIGHT = 100;
 const DOCK_HEADER_HEIGHT = 34;
 const DOCK_MIN_HEIGHT = DOCK_HEADER_HEIGHT * 3 + 16 + 16;
 const DOCK_MAX_RATIO = 0.6;
+const DOCK_SLACK = 8;
 // Everything between the tree and the top/bottom of the pane that is neither the
 // tree nor the cluster: mode bar, filter bar, summary line, worktree heading.
 const SIDEBAR_CHROME = 130;
@@ -682,8 +683,11 @@ export default function FileTreeSidebar({ dirPath, conversationId, worktreePath,
   // How tall the docked cluster (Accounts / Usage / Notes) may get. Capped so
   // the file tree always keeps TREE_MIN_HEIGHT, and floored at the three
   // collapsed headers so Notes is on screen even in a short window.
+  // DOCK_SLACK keeps the cluster's bottom edge inside the column: the chrome
+  // rows above the tree have fractional heights, and without it the Notes
+  // header measured 0.8 px below the window edge (12 Sep 2026).
   const dockMax = paneHeight > 0
-    ? Math.max(DOCK_MIN_HEIGHT, Math.min(Math.round(paneHeight * DOCK_MAX_RATIO), paneHeight - TREE_MIN_HEIGHT))
+    ? Math.max(DOCK_MIN_HEIGHT, Math.min(Math.round(paneHeight * DOCK_MAX_RATIO), paneHeight - TREE_MIN_HEIGHT) - DOCK_SLACK)
     : undefined;
   // The floor is paid before the tree's: in a column too short for both, the
   // tree is the one that gives way, which is the whole point of the change.
