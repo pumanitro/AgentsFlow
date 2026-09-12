@@ -1064,12 +1064,16 @@ export default function FileTreeSidebar({ dirPath, conversationId, worktreePath,
           home page and wrong here) and none may shrink past its own header, so
           the cluster compresses from the top down and Notes stays visible. */}
       <div
-        className="shrink min-h-0 flex flex-col gap-2 px-2 py-2 border-t-2 border-border bg-bg overflow-hidden shadow-[0_-10px_18px_-10px_rgba(0,0,0,0.7)] [&>*]:!shrink [&>*]:!min-h-[34px]"
+        className="shrink min-h-0 flex flex-col gap-2 px-2 py-2 border-t-2 border-border bg-bg overflow-hidden shadow-[0_-10px_18px_-10px_rgba(0,0,0,0.7)] [&>*:not(:first-child)]:!shrink [&>*:not(:first-child)]:!min-h-[34px]"
         style={{ maxHeight: dockMax, minHeight: dockMin }}
       >
+        {/* Notes first, and exempt from the shrink rule below: when the cluster
+            is still too tall after the other two have given up what they can
+            (a one-line Usage error cannot shrink), the overflow is clipped at
+            the BOTTOM — which must never be the Notes pane. */}
+        <NotesPanel dirPath={dirPath} onFileOpen={onFileOpen} openedFilePath={openedFilePath} />
         <AccountsPanel />
         <UsagePanel />
-        <NotesPanel dirPath={dirPath} onFileOpen={onFileOpen} openedFilePath={openedFilePath} />
       </div>
       {menu && (
         <div
