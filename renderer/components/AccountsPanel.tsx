@@ -215,15 +215,18 @@ function AccountRow({
         title={
           account.needsLogin
             ? (masked ? 'This account was signed out by the server — remove it and add it again' : account.needsLogin)
-            : active ? 'This account is signed in' : masked ? 'Switch to this account' : `Switch to ${account.label || account.orgName || account.email}`
+            : active ? 'This account is signed in' : masked ? 'Switch to this account' : `Switch to ${account.email || account.label || 'this account'}`
         }
       >
         <div className="flex items-baseline gap-1.5">
           <span
             className={`text-[12px] truncate ${active ? 'text-text font-semibold' : 'text-text'} ${masked ? 'select-none' : ''}`}
             style={masked ? MASK : undefined}
+            // A user-given label replaces the address on the row, so the address
+            // stays one hover away — masked rows keep it hidden.
+            title={!masked && account.label && account.email ? account.email : undefined}
           >
-            {account.email}
+            {account.label || account.email}
           </span>
           {active && (
             <span className="text-[9px] uppercase tracking-wider text-info shrink-0">active</span>
@@ -249,11 +252,9 @@ function AccountRow({
             </span>
           ) : null}
         </div>
-        <div className={`mt-0.5 text-[10px] text-muted truncate ${masked ? 'select-none' : ''}`} style={masked ? MASK : undefined}>
-          Claude · {account.label || account.orgName || (account.orgId ? `Organization ${account.orgId.slice(0, 8)}` : 'Saved account')}
-          {account.label && account.orgName && account.label.toLowerCase() !== account.orgName.toLowerCase() ? ` · ${account.orgName}` : ''}
-          {account.subscriptionType ? ` · ${account.subscriptionType}` : ''}
-        </div>
+        {/* No provider/organisation/plan line: the section header above already
+            says Claude, and the org id and subscription word said nothing the
+            user acts on. */}
         <div className="mt-1 h-1 rounded-full overflow-hidden" style={{ backgroundColor: 'rgba(255,255,255,0.08)' }}>
           <div
             className="h-full rounded-full"
@@ -487,14 +488,16 @@ function CodexRow({
           <span
             className={`text-[12px] truncate ${active ? 'text-text font-semibold' : 'text-text'} ${masked ? 'select-none' : ''}`}
             style={masked ? MASK : undefined}
+            // Same as the Claude rows: a label takes the line, the address it
+            // signs in with stays one hover away unless emails are masked.
+            title={!masked && account.label && account.email ? account.email : undefined}
           >
-            {account.email || name}
+            {name}
           </span>
           {active && <span className="text-[9px] uppercase tracking-wider text-info shrink-0">active</span>}
         </div>
-        <div className={`mt-0.5 text-[10px] text-muted truncate ${masked ? 'select-none' : ''}`} style={masked ? MASK : undefined}>
-          Codex{account.label ? ` · ${account.label}` : ''}{account.plan ? ` · ${account.plan}` : ''}
-        </div>
+        {/* No provider/plan line here either — the Codex section header is what
+            tells these rows apart from the Claude ones. */}
       </button>
       <button
         onClick={onRemove}
