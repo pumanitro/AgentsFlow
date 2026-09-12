@@ -365,6 +365,14 @@ export class CodexAgents {
       const response = await this.resumeSubscribe(conv, threadId);
       await this.history(s);
       await this.applyThreadStatus(id, response?.thread?.status, stored, threadId);
+      // A turn that completed while nobody was connected never delivered its
+      // turn/completed, so the row's final result (what delegation and the
+      // handover summary read) is backfilled from the thread's history.
+      const live = this.deps.get(id);
+      if (live && !live.lastResult && live.state === 'done') {
+        const last = [...s.snapshot.entries].reverse().find((e) => e.role === 'assistant')?.text?.trim();
+        if (last) this.deps.update(id, { lastResult: last });
+      }
       this.deps.changed(s.snapshot);
       return s;
     } catch (error) {
