@@ -4,6 +4,11 @@ Select **Codex · default** in the bottom composer, choose a tracked directory,
 and send a prompt. Leave the model field empty to use your configured Codex model,
 or enter a model ID your account can access. Claude selections keep using Claude.
 
+The composer's choice belongs to that one conversation and does not change later:
+there is no app-wide provider setting, and no chat is ever moved between agents.
+To take the same work to the other agent, use **Fork to Codex** / **Fork to Claude**
+below.
+
 Codex uses your existing CLI sign-in. Run `codex login` once if needed; no API key
 or credential copy is required by Peers Flow. Project `.codex/config.toml`, user
 configuration, trusted plugins, and `AGENTS.md` are loaded by Codex. If a repository
@@ -45,7 +50,15 @@ their own color preferences; no global shell configuration is changed.
 
 The **Accounts** and **Usage** panels show Claude and Codex separately within the
 same sidebar sections. Codex displays the current CLI login, subscription, and
-live quota windows. Codex account switching/rotation is not part of the Claude pool.
+live quota windows.
+
+Automatic rotation ("Switch automatically at N%" and "Resume chats that hit the
+limit") is a Claude-pool feature: it moves the machine's Claude login between saved
+Claude memberships and nudges a walled Claude chat to continue. Codex is one CLI
+sign-in rather than a pool, so there is nothing to rotate it to. A Codex chat that
+hits its quota is left where it is and the status line records the refusal once,
+naming the chat and the message Codex returned. Rotation never changes a
+conversation's provider.
 
 Use **Add Claude account**, enter the email and an optional label such as Personal
 or Work, and complete the browser sign-in. Select the intended personal subscription
@@ -64,6 +77,16 @@ changes the machine's Claude CLI login, including Claude sessions outside Peers 
   does not stop the agent. The desktop app must remain running for active Codex turns.
 - **Stop** interrupts the active turn. **Fork** makes a new Codex thread with the saved
   conversation history. Reopening after an app restart resumes the original thread.
+- **Fork to Claude** (on a Codex chat) and **Fork to Codex** (on a Claude chat) start a
+  NEW conversation on the other agent, in the same directory — the source's worktree
+  when it has one — seeded with a condensed transcript of the source and kicked off at
+  once, so it is live rather than waiting for a click. The source keeps running and
+  keeps its session. The fork's first reply is a three-line summary of where the work
+  stands; it is told not to start work until asked, because the source is still in the
+  same files. A fork to Claude carries the transcript in its first prompt (the Codex
+  app-server forgets a thread on restart). A fork to Codex records which Claude session
+  to read and reads it as developer instructions when the thread starts, so it picks up
+  the newest state of a source that is still running.
 - Questions and tool approvals appear in the chat. Each approval applies once. Codex
   sessions use workspace-write sandboxing and on-request approval, reviewed by the user;
   this does not change global Codex settings. Claude retains the upstream permission

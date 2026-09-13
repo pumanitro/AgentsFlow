@@ -35,10 +35,13 @@ export const DOCK_BODY_MAX_VAR = '--dock-body-max';
 export const DOCK_NOTES_MAX_VAR = '--dock-notes-max';
 export const DOCK_TOP_MIN_VAR = '--dock-top-min';
 
-// A pane counts as open when it is measurably taller than its own header. The
-// epsilon keeps sub-pixel rounding from flipping the count; the budget is
-// stable at the bottom end because a pane squeezed to bodyMax = 0 renders
-// header-only, reads as closed, and the budget it then gets is still 0.
+// A pane says whether it is open with `data-open` on its root. Measuring it
+// instead ("taller than its header") had a trap that showed up as "Accounts /
+// Usage sometimes will not open": with both panes closed the budget was 0, the
+// pane the user then opened rendered its body at 0px, measured as closed, and
+// was budgeted 0 again — a lock nothing but a window resize could break. The
+// height check is kept only for a pane that does not declare itself; the
+// epsilon keeps sub-pixel rounding from flipping that count.
 const OPEN_EPSILON = 3;
 // Only used before the first measurement, or if a pane ever renders without a
 // header element: the three panes' headers are all one `px-2 py-2` row.
@@ -123,12 +126,14 @@ export interface DockMeasurements {
 //   topMin       = clamp(topRegionMin + inset, 0, columnInner − chrome − clusterFloor)
 //   available    = max(0, columnInner − chrome − topMin)
 //   slack        = available − clusterFloor
-//   bodyMax      = openPanes > 0 ? max(0, floor(slack / openPanes)) : 0
+//   bodyMax      = max(0, floor(slack / max(1, openPanes)))
 //   notesMax     = slack < 0 ? max(notesHeader, available − headers − clusterExtra) : none
 //
-// The column then sums exactly: chrome + topMin + clusterFloor + openPanes ×
-// bodyMax === columnInner whenever slack ≥ 0, and chrome + 0 + available ===
-// columnInner when it is not.
+// With no pane open, bodyMax is what ONE pane would get rather than 0, so the
+// next pane to open has a real budget in the very frame it opens (see the
+// `data-open` note above). The column then sums exactly: chrome + topMin +
+// clusterFloor + openPanes × bodyMax === columnInner whenever slack ≥ 0, and
+// chrome + 0 + available === columnInner when it is not.
 // Measured heights carry fractions (38.5px headers, 2px cluster border, a
 // scrollbar that appears once a body scrolls), and a budget that sums to the
 // column exactly overflowed it by 4–7 px in practice (12 Sep 2026). This margin
@@ -144,7 +149,7 @@ export function computeDockBudget(m: DockMeasurements): Budget {
   const available = Math.max(0, usable - m.chrome - topMin);
   const slack = available - clusterFloor;
   return {
-    bodyMax: m.openPanes > 0 ? Math.max(0, Math.floor(slack / m.openPanes)) : 0,
+    bodyMax: Math.max(0, Math.floor(slack / Math.max(1, m.openPanes))),
     // Only when even the floor does not fit: cap the Notes LIST so it scrolls
     // inside itself instead of being clipped off the bottom of the column.
     notesMax: slack < 0
@@ -207,8 +212,12 @@ export default function DockedPanes({
     const usageHeader = headerOf(usageEl);
     const notesHeader = headerOf(notesEl);
     const notesHeight = heightOf(notesEl);
-    const openPanes = (heightOf(accountsEl) > accountsHeader + OPEN_EPSILON ? 1 : 0)
-      + (heightOf(usageEl) > usageHeader + OPEN_EPSILON ? 1 : 0);
+    const isOpen = (el: HTMLElement, header: number) => {
+      const declared = el.dataset.open;
+      if (declared !== undefined) return declared === '1';
+      return heightOf(el) > header + OPEN_EPSILON;
+    };
+    const openPanes = (isOpen(accountsEl, accountsHeader) ? 1 : 0) + (isOpen(usageEl, usageHeader) ? 1 : 0);
 
     // The cluster's own padding, border and the two gaps between its three
     // children — constant, but read from the stylesheet rather than guessed.
@@ -255,7 +264,10 @@ export default function DockedPanes({
     attach();
     const mo = typeof MutationObserver !== 'undefined' ? new MutationObserver(attach) : null;
     mo?.observe(column, { childList: true });
-    mo?.observe(cluster, { childList: true });
+    // `data-open` flips are watched too: a pane opening from the all-closed
+    // state must be re-budgeted at once, not whenever its 0px body happens to
+    // move a pixel.
+    mo?.observe(cluster, { childList: true, subtree: true, attributes: true, attributeFilter: ['data-open'] });
     window.addEventListener('resize', measure);
     return () => {
       ro.disconnect();

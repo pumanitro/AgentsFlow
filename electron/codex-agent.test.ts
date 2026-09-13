@@ -99,7 +99,7 @@ const until = async (check: () => boolean, label: string) => {
   }
   assert.fail(`timed out waiting for ${label}`);
 };
-const handedOver = (): Conversation['handover'] => ({ from: 'claude', sessionId: 'claude-session', directoryPath: '/work/one', at: new Date().toISOString() });
+const forkedFromClaude = (): Conversation['handover'] => ({ from: 'claude', sessionId: 'claude-session', directoryPath: '/work/one', at: new Date().toISOString() });
 
 test('parallel sends are deduplicated and each conversation gets its own cwd and thread', async () => {
   const f = fixture();
@@ -254,35 +254,35 @@ test('restarting a Codex that was never connected is harmless', async () => {
   } finally { f.manager.close(); }
 });
 
-test('a handed-over row starts a fresh thread, never forks the other provider, and carries its context out of band', async () => {
+test('a row forked from Claude starts a fresh thread, never forks the other provider, and carries its seed out of band', async () => {
   const f = fixture({ handoverContext: (conv) => `PRIOR WORK for ${conv.id}` });
   try {
     const conv = f.conversations.get('one')!;
-    conv.handover = handedOver();
+    conv.handover = forkedFromClaude();
     conv.forkFromSessionId = 'claude-session'; // A Claude id: Codex must not fork it.
     const snapshot = await f.manager.snapshot('one');
     const start = f.rpc.calls.find((c) => c.method === 'thread/start')!;
-    assert.ok(start, 'a handover starts a new Codex thread');
+    assert.ok(start, 'a fork from Claude starts a new Codex thread');
     assert.equal(f.rpc.calls.filter((c) => c.method === 'thread/fork').length, 0);
     assert.equal(start.params.developerInstructions, 'house rules\n\nPRIOR WORK for one');
     assert.deepEqual(snapshot.entries.map((e) => e.id), ['handover']);
-    assert.match(snapshot.entries[0].text, /Handed over from Claude Code/);
+    assert.match(snapshot.entries[0].text, /Forked from Claude Code/);
     assert.equal(snapshot.entries[0].role, 'tool');
 
     // The prompt itself stays exactly what the user typed.
     await f.manager.send('one', 'carry on');
     const turn = f.rpc.calls.find((c) => c.method === 'turn/start')!;
     assert.equal(turn.params.input[0].text, 'carry on');
-    assert.ok(conv.handover, 'the handover is still pending until Codex answers');
+    assert.ok(conv.handover, 'the seed is still pending until Codex answers');
     f.event('turn/completed', 'thread-1', { turn: { status: 'completed', items: [] } });
     assert.equal(conv.handover, undefined);
   } finally { f.manager.close(); }
 });
 
-test('a handover with no readable context sends the thread options through untouched', async () => {
+test('a fork with no readable context sends the thread options through untouched', async () => {
   const f = fixture({ handoverContext: () => '   ' });
   try {
-    f.conversations.get('one')!.handover = handedOver();
+    f.conversations.get('one')!.handover = forkedFromClaude();
     await f.manager.snapshot('one');
     assert.equal(f.rpc.calls[0].params.developerInstructions, 'house rules');
   } finally { f.manager.close(); }
@@ -314,16 +314,16 @@ test('an ordinary failure is not mistaken for a rate limit', async () => {
   } finally { f.manager.close(); }
 });
 
-test('a Codex thread can be condensed for a handover back to Claude', async () => {
+test('a Codex thread can be condensed to seed a fork back to Claude', async () => {
   const f = fixture();
   try {
-    f.conversations.get('one')!.handover = handedOver();
+    f.conversations.get('one')!.handover = forkedFromClaude();
     await f.manager.snapshot('one');
     f.event('item/completed', 'thread-1', { item: { id: 'u', type: 'userMessage', content: [{ text: 'fix the build' }] } });
     f.event('item/completed', 'thread-1', { item: { id: 'a', type: 'agentMessage', text: 'build is green' } });
     f.event('item/completed', 'thread-1', { item: { id: 'c', type: 'commandExecution', command: 'npm test', aggregatedOutput: 'ok' } });
     const text = await f.manager.historyText('one');
-    assert.equal(text, 'USER: fix the build\n\nASSISTANT: build is green'); // Tools and the handover note are left out.
+    assert.equal(text, 'USER: fix the build\n\nASSISTANT: build is green'); // Tools and the fork note are left out.
 
     // A conversation that is not open falls back to the thread on the server.
     f.conversations.get('two')!.sessionId = 'saved-thread';

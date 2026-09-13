@@ -1,6 +1,7 @@
 import { strict as assert } from 'node:assert';
 import { test } from 'node:test';
-import { HANDOVER_MAX_CHARS, buildHandoverPrompt, codexHistoryText, condense, extractClaudeTurns } from './handover';
+import { HANDOVER_MAX_CHARS, buildHandoverPrompt, codexHistoryText, condense, extractClaudeTurns, forkKickoff, planFork } from './handover';
+import type { Conversation } from '../shared/types';
 
 // A small stand-in for a Claude Code transcript: the entry shapes a handover
 // actually meets — a user turn, an assistant turn that edited a file and ran a
@@ -113,4 +114,87 @@ test('buildHandoverPrompt: no history says so instead of pretending there was no
   assert.equal(/=== Previous conversation/.test(prompt), false);
   // An empty user message still has to ask for something.
   assert.match(prompt, /The user's message:\ncontinue$/);
+});
+
+// ---------------------------------------------------------------------------
+// Planning a fork to the other provider
+// ---------------------------------------------------------------------------
+
+const AT = '2026-09-13T10:00:00.000Z';
+
+function source(over: Partial<Conversation> = {}): Conversation {
+  return {
+    id: 'c1',
+    provider: 'claude',
+    sessionId: 'claude-session',
+    daemonShort: 'abcd1234',
+    sessionName: '',
+    directoryId: 'dir-1',
+    directoryPath: '/repo',
+    displayName: 'repo',
+    title: 'Fix the parser',
+    description: 'working',
+    pinned: true,
+    attachments: [],
+    state: 'working',
+    status: 'working',
+    intent: 'fix the parser',
+    createdAt: '2026-09-12T09:00:00.000Z',
+    lastPrompt: 'fix the parser',
+    ...over,
+  };
+}
+
+test('planFork: a fork to Codex names the session to read rather than copying it', () => {
+  // The Claude transcript is a file that keeps growing while the source runs,
+  // so the plan records where to find it and the Codex thread reads it when it
+  // starts — copying it here would freeze it at the moment of the click.
+  const plan = planFork({ source: source(), target: 'codex', at: AT });
+  assert.deepEqual(plan.row.handover, {
+    from: 'claude',
+    sessionId: 'claude-session',
+    directoryPath: '/repo',
+    at: AT,
+    reason: 'forked from Claude',
+  });
+  assert.equal(plan.prompt, forkKickoff('claude'));
+  assert.equal(plan.title, 'V2 · Fix the parser');
+  assert.equal(plan.row.description, 'forked to Codex — starting…');
+});
+
+test('planFork: a fork to Claude carries the transcript inside its first message', () => {
+  // A Codex thread lives in the app-server, which forgets it on a restart, so
+  // this direction has no "read it later" option.
+  const plan = planFork({
+    source: source({ provider: 'codex', sessionId: 'thread-9', title: 'Fix the parser' }),
+    target: 'claude',
+    at: AT,
+    history: 'USER: fix the build\n\nASSISTANT: build is green',
+  });
+  assert.equal(plan.row.handover, undefined, 'nothing is left pending — the seed has already been sent');
+  assert.match(plan.prompt, /handed over to you from Codex \(forked from Codex\)/);
+  assert.match(plan.prompt, /ASSISTANT: build is green/);
+  assert.ok(plan.prompt.endsWith(forkKickoff('codex')));
+});
+
+test('planFork: the row records the kickoff line, not the seed that is sent', () => {
+  // `lastPrompt` shows in the list and is written to the store on every save; a
+  // whole transcript in it is unreadable in one place and wasteful in the other.
+  const plan = planFork({ source: source({ provider: 'codex' }), target: 'claude', at: AT, history: 'x'.repeat(5000) });
+  assert.equal(plan.row.lastPrompt, forkKickoff('codex'));
+  assert.equal(plan.row.intent, forkKickoff('codex'));
+  assert.ok(plan.prompt.length > 4000, 'the message actually sent still carries it');
+});
+
+test('planFork: a source that entered a worktree is continued in that worktree', () => {
+  const plan = planFork({ source: source({ worktreePath: '/repo/.worktrees/parser' }), target: 'codex', at: AT });
+  assert.equal(plan.cwd, '/repo/.worktrees/parser');
+  assert.equal(plan.row.handover?.directoryPath, '/repo/.worktrees/parser');
+});
+
+test('forkKickoff: the fork is asked to report, not to start working', () => {
+  // The source is still running in the same directory; two agents editing the
+  // same files off the same transcript is the thing to design out.
+  assert.match(forkKickoff('claude'), /^This conversation was forked to you from Claude Code\./);
+  assert.match(forkKickoff('codex'), /Do not start any work until asked\.$/);
 });

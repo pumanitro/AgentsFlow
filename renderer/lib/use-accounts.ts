@@ -5,9 +5,9 @@ import type { AccountsSnapshot } from '../../shared/types';
 /**
  * The accounts snapshot, live.
  *
- * Everything provider-shaped in the UI (which provider is selected, which
- * account inside it, the Codex pool) reads from one place so the composer, the
- * Usage pane and the Accounts panel can never disagree about what is active.
+ * Everything account-shaped in the UI (the Claude pool and which of it is
+ * active, the Codex pool and which of it is the CLI's login) reads from one
+ * place so the Usage pane and the Accounts panel can never disagree.
  *
  * Tolerates an older preload in two ways: a missing `listAccounts` leaves the
  * defaults in place instead of throwing, and a snapshot that predates the
@@ -17,7 +17,6 @@ import type { AccountsSnapshot } from '../../shared/types';
 export const EMPTY_ACCOUNTS: AccountsSnapshot = {
   accounts: [],
   activeId: null,
-  activeProvider: 'claude',
   codexAccounts: [],
   activeCodexId: null,
 };
@@ -27,7 +26,6 @@ export function normaliseAccounts(s: Partial<AccountsSnapshot> | null | undefine
     accounts: s?.accounts ?? [],
     activeId: s?.activeId ?? null,
     authIssue: s?.authIssue ?? null,
-    activeProvider: s?.activeProvider ?? 'claude',
     codexAccounts: s?.codexAccounts ?? [],
     activeCodexId: s?.activeCodexId ?? null,
   };

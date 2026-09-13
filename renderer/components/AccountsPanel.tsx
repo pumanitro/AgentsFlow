@@ -28,6 +28,35 @@ function usePersistedBool(key: string, fallback: boolean): [boolean, (v: boolean
   return [value, set];
 }
 
+/**
+ * A fold state that follows a computed default until the user decides for
+ * themselves. `computed` is what the section should do when nobody has said
+ * otherwise — here, "open only if this provider has saved accounts" — and it
+ * keeps following that as the pool changes. The first toggle writes to
+ * localStorage and from then on the stored choice wins.
+ *
+ * "Not stored" is deliberately distinct from "stored as closed", which is why
+ * this cannot be `usePersistedBool(key, computed)`: that would freeze the
+ * default at whatever the pool looked like on the first render. Nothing is read
+ * during render, so SSR and first paint behave exactly as usePersistedBool does.
+ * (Mirrors UsagePanel.)
+ */
+function usePersistedFold(key: string, computed: boolean): [boolean, (v: boolean) => void] {
+  const [stored, setStored] = useState<boolean | null>(null);
+  useEffect(() => {
+    if (typeof localStorage === 'undefined') return;
+    try {
+      const raw = localStorage.getItem(key);
+      if (raw !== null) setStored(raw === '1');
+    } catch { /* ignore */ }
+  }, [key]);
+  const set = useCallback((v: boolean) => {
+    setStored(v);
+    try { localStorage.setItem(key, v ? '1' : '0'); } catch { /* ignore */ }
+  }, [key]);
+  return [stored ?? computed, set];
+}
+
 const USAGE_REFRESH_MS = 60_000;
 // How often we ask whether the browser login has landed while the modal is open.
 const PROBE_MS = 2500;
@@ -513,33 +542,36 @@ function CodexRow({
 }
 
 /**
- * The header of a provider section — and the answer to "which licence am I
- * using?". Exactly one section carries the USING pill; the other offers the
- * button that moves it.
+ * One provider's pool, under a header that is the whole section when folded.
+ *
+ * Neither section is "the one in use" any more: a conversation picks its
+ * provider in the composer and keeps it for life, so the pools are two
+ * independent lists of sign-ins rather than one selected and one waiting.
+ *
+ * Folded, the header is all that is left — name and how many sign-ins are saved
+ * under it, and nothing about the accounts themselves, which is the point of
+ * folding it away.
  */
 function ProviderSection({
   provider,
   open,
   onToggle,
-  active,
-  onUse,
-  busy,
-  error,
+  count,
   children,
 }: {
   provider: AgentProvider;
   open: boolean;
   onToggle: () => void;
-  active: boolean;
-  onUse: () => void;
-  busy: boolean;
-  error: string | null;
+  count: number;
   children: ReactNode;
 }) {
   const name = providerName(provider);
   return (
-    <div className={`border-t border-border/60 first:border-t-0 ${active ? 'bg-accent/[0.04]' : ''}`}>
-      <div className="flex items-center gap-2 px-2 py-1.5">
+    <div className="border-t border-border first:border-t-0">
+      {/* A banded header over a full-strength divider: the two pools have to
+          read as two zones at a glance rather than as one long list. Same band,
+          same paddings as the provider sections in the Usage pane. */}
+      <div className="flex items-center gap-2 px-2 py-1.5 bg-panel2/35 hover:bg-panel2/70">
         <button
           onClick={onToggle}
           className="flex items-center gap-1.5 flex-1 min-w-0 text-left"
@@ -547,33 +579,20 @@ function ProviderSection({
           aria-expanded={open}
         >
           <span className="text-muted text-[10px] w-3 shrink-0">{open ? '▼' : '▶'}</span>
-          <ProviderIcon provider={provider} size={13} className={active ? 'text-accent' : 'text-muted'} />
-          <span className={`text-[11px] font-semibold truncate ${active ? 'text-text' : 'text-muted'}`}>{name}</span>
-        </button>
-        {active ? (
+          <ProviderIcon provider={provider} size={13} className="text-muted" />
+          <span className="text-[11px] font-semibold text-text truncate">{name}</span>
+          {/* Dimmed, because it is a count and not a warning — and shown open or
+              folded, so folding the section moves nothing that was already on
+              the header line. */}
           <span
-            className="shrink-0 text-[9px] uppercase tracking-wider font-semibold px-1.5 py-0.5 rounded-full bg-accent text-bg"
-            title={`New chats and the Usage panel use ${name}`}
+            className="ml-auto shrink-0 text-[10px] font-mono text-subtle"
+            title={`${count} saved ${name} ${count === 1 ? 'account' : 'accounts'}`}
           >
-            using
+            {count}
           </span>
-        ) : (
-          <button
-            onClick={onUse}
-            disabled={busy}
-            className="shrink-0 text-[10px] px-2 py-0.5 rounded border border-border text-muted hover:text-text hover:border-accent/60 disabled:opacity-40"
-            title={`Use ${name} for new chats — unfinished conversations move across`}
-          >
-            Use
-          </button>
-        )}
+        </button>
       </div>
-      {error && (
-        <div className="mx-3 mb-1.5 px-2 py-1.5 rounded border border-danger/40 bg-danger/10 text-[11px] text-danger leading-relaxed">
-          {error}
-        </div>
-      )}
-      {open && children}
+      {open && <div className="border-t border-border/60">{children}</div>}
     </div>
   );
 }
@@ -584,11 +603,14 @@ export default function AccountsPanel() {
   // addresses sitting permanently in the sidebar. Persisted, so it stays hidden
   // across restarts once you have decided you want it hidden.
   const [masked, setMasked] = usePersistedBool('agentsflow:accounts:maskEmails', false);
-  // One live snapshot for the whole app — the composer and the Usage panel read
-  // the same hook, so "which licence am I using" has exactly one answer.
+  // One live snapshot for the whole app — the Usage pane reads the same hook, so
+  // the two panes can never disagree about what is in the pool.
   const { snapshot, reload: loadAccounts } = useAccountsSnapshot();
-  const [claudeOpen, setClaudeOpen] = usePersistedBool('agentsflow:accounts:claudeOpen', true);
-  const [codexOpen, setCodexOpen] = usePersistedBool('agentsflow:accounts:codexOpen', true);
+  // A pool you have nothing in is a section worth folding away by default; a
+  // pool with sign-ins in it is the thing this panel exists to show. Either way
+  // the first toggle settles it for good.
+  const [claudeOpen, setClaudeOpen] = usePersistedFold('agentsflow:accounts:claudeOpen', snapshot.accounts.length > 0);
+  const [codexOpen, setCodexOpen] = usePersistedFold('agentsflow:accounts:codexOpen', snapshot.codexAccounts.length > 0);
   const [usageById, setUsageById] = useState<Record<string, UsageResult>>({});
   const [adding, setAdding] = useState(false);
   const [email, setEmail] = useState('');
@@ -597,14 +619,11 @@ export default function AccountsPanel() {
   const [codexAdding, setCodexAdding] = useState(false);
   const [codexLabel, setCodexLabel] = useState('');
   const [codexError, setCodexError] = useState<string | null>(null);
-  // Refused provider switches (e.g. "Codex is not signed in") belong next to the
-  // section whose button was pressed, not in the Claude error slot.
-  const [providerError, setProviderError] = useState<Partial<Record<AgentProvider, string>>>({});
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [repairing, setRepairing] = useState(false);
   const [pending, setPending] = useState<{ pendingId: string; shellId: string; email: string; cwd: string; provider: AgentProvider } | null>(null);
-  const [policy, setPolicy] = useState<RotationPolicy>({ enabled: false, threshold: 95, resumeOnLimit: true, crossProvider: false });
+  const [policy, setPolicy] = useState<RotationPolicy>({ enabled: false, threshold: 95, resumeOnLimit: true });
   const [rotationStatus, setRotationStatus] = useState<RotationStatus | null>(null);
   const mounted = useRef(true);
 
@@ -736,24 +755,7 @@ export default function AccountsPanel() {
     }
   }, [loadAccounts]);
 
-  // ---- Provider selection + the Codex pool --------------------------------
-
-  const useProvider = useCallback(async (provider: AgentProvider) => {
-    setProviderError((prev) => ({ ...prev, [provider]: undefined }));
-    setBusy(true);
-    try {
-      await api().setActiveProvider(provider);
-      await loadAccounts();
-      void loadCodex();
-    } catch (err) {
-      // The main process refuses with a sentence worth showing — "Codex is not
-      // signed in" is the whole reason the button did nothing.
-      const message = (err as Error)?.message ?? `Could not switch to ${providerName(provider)}.`;
-      if (mounted.current) setProviderError((prev) => ({ ...prev, [provider]: message.replace(/^Error:\s*/, '') }));
-    } finally {
-      if (mounted.current) setBusy(false);
-    }
-  }, [loadAccounts, loadCodex]);
+  // ---- The Codex pool ------------------------------------------------------
 
   const startCodexAdd = useCallback(async () => {
     setCodexError(null);
@@ -802,43 +804,26 @@ export default function AccountsPanel() {
     }
   }, [loadAccounts]);
 
-  const activeCodex = snapshot.codexAccounts.find((a) => a.id === snapshot.activeCodexId) ?? null;
-  // The CLI's current login is "saved" when the pool points at it, or when a
-  // saved sign-in carries the same address (the pool was filled before this
-  // account was switched to).
-  // Rotation needs somewhere to rotate to: a second Claude account, or a
-  // signed-in Codex for provider rotation.
-  const canRotate = snapshot.accounts.length >= 2 || Boolean(codex?.signedIn);
+  // Rotation needs somewhere to rotate to, and since it never leaves the Claude
+  // pool that means a second Claude account — a signed-in Codex is no longer an
+  // answer, because a conversation stays with the provider it was started on.
+  const canRotate = snapshot.accounts.length >= 2;
 
   return (
-    <div className="shrink-0 rounded-lg border border-border bg-panel overflow-hidden flex flex-col min-h-0">
+    <div data-open={open ? '1' : '0'} className="shrink-0 rounded-lg border border-border bg-panel overflow-hidden flex flex-col min-h-0">
       <div className="shrink-0 flex items-center gap-2 px-2 py-2 bg-panel2/60 hover:bg-panel2">
         {/* Section identity: a violet accent tick marks this as the Accounts zone. */}
         <span className="w-1 h-4 rounded-full shrink-0" style={{ backgroundColor: '#a78bfa' }} aria-hidden="true" />
+        {/* No "Using ⟨provider⟩" chip any more: there is no app-wide provider to
+            name. Each conversation carries its own, chosen in the composer, so
+            this pane is just the two pools. */}
         <button
           onClick={() => setOpen(!open)}
-          // Wraps rather than truncates: in a narrow sidebar the chip drops to a
-          // second line, where it is still readable, instead of being shaved to
-          // a couple of characters on the first.
-          className="flex flex-wrap items-center gap-x-2 gap-y-1 flex-1 min-w-0 text-left"
+          className="flex items-center gap-1.5 flex-1 min-w-0 text-left"
           title={open ? 'Hide accounts' : 'Show the account pool'}
         >
-          <span className="flex items-center gap-1.5 shrink-0">
-            <span className="text-muted text-[10px] w-3 shrink-0">{open ? '▼' : '▶'}</span>
-            <span className="text-[11px] uppercase tracking-wider text-text font-semibold">Accounts</span>
-          </span>
-          {/* Which licence is being spent — the provider, and only the provider.
-              Which account inside it is already marked ACTIVE (Claude) or
-              CURRENT (Codex) in the section below, and naming it here bought a
-              second ellipsis at the cost of the first being legible. */}
-          <span
-            className="shrink-0 flex items-center gap-1 rounded-full border border-border bg-panel2 px-1.5 py-0.5 text-[10px] text-muted"
-            title={`New chats and the Usage panel use ${providerName(snapshot.activeProvider)}`}
-          >
-            <span>Using</span>
-            <ProviderIcon provider={snapshot.activeProvider} size={11} className="text-accent" />
-            <span className="text-[11px] text-text font-medium">{providerName(snapshot.activeProvider)}</span>
-          </span>
+          <span className="text-muted text-[10px] w-3 shrink-0">{open ? '▼' : '▶'}</span>
+          <span className="text-[11px] uppercase tracking-wider text-text font-semibold">Accounts</span>
         </button>
         {(snapshot.accounts.length > 0 || snapshot.codexAccounts.length > 0 || codex?.signedIn) && (
           <button
@@ -881,10 +866,7 @@ export default function AccountsPanel() {
                 provider="claude"
                 open={claudeOpen}
                 onToggle={() => setClaudeOpen(!claudeOpen)}
-                active={snapshot.activeProvider === 'claude'}
-                onUse={() => void useProvider('claude')}
-                busy={busy}
-                error={providerError.claude ?? null}
+                count={snapshot.accounts.length}
               >
                 {snapshot.accounts.length === 0 && (
                   <div className="px-3 py-2 text-[11px] text-muted leading-relaxed">
@@ -962,16 +944,99 @@ export default function AccountsPanel() {
                     </button>
                   )}
                 </div>
+
+                {/* Rotation lives inside this section because it is a property
+                    of this pool and nothing else: it moves work from one Claude
+                    account to the next one with headroom. Codex sign-ins are
+                    never rotated automatically — a conversation stays with the
+                    provider it was started on — so there is nothing of this kind
+                    under the Codex section. */}
+                {canRotate && (
+                  <div className="border-t border-border/60 px-3 py-2">
+                    <div className="mb-1 text-[10px] uppercase tracking-wider text-subtle font-semibold">
+                      Auto-rotate Claude accounts
+                    </div>
+                    <label className="flex items-center gap-2 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={policy.enabled}
+                        onChange={(e) => void savePolicy({ ...policy, enabled: e.target.checked })}
+                        className="accent-info"
+                      />
+                      {/* The label is the only part allowed to give up room: a
+                          narrow sidebar should clip the sentence, not shove the
+                          threshold or the ⓘ off the edge. */}
+                      <span className="text-[11px] text-text min-w-0 truncate">Switch automatically at</span>
+                      <input
+                        type="number"
+                        min={50}
+                        max={99}
+                        value={policy.threshold}
+                        onChange={(e) => {
+                          const n = Number(e.target.value);
+                          if (Number.isFinite(n)) void savePolicy({ ...policy, threshold: n });
+                        }}
+                        className="shrink-0 w-11 bg-panel2 border border-border rounded px-1 py-0.5 text-[11px] text-text text-right focus:outline-none focus:border-info"
+                      />
+                      <span className="shrink-0 text-[11px] text-muted">%</span>
+                      {/* The explainer is one-time knowledge, so it lives behind
+                          the ⓘ rather than costing three lines of sidebar forever. */}
+                      <span className="ml-auto flex items-center" onClick={(e) => e.preventDefault()}>
+                        <InfoHint label="About automatic switching">
+                          Runs in the background even with the window closed, so an overnight run
+                          rolls onto the next Claude account in this pool instead of hitting the
+                          wall. It never crosses to Codex: a chat keeps the provider it started on.
+                        </InfoHint>
+                      </span>
+                    </label>
+                    {/* The backstop, indented under the threshold it backs up:
+                        thresholds are a forecast, and a chat that hits the wall
+                        anyway would otherwise sit dead until someone looks. */}
+                    <label className="mt-1 flex items-center gap-2 cursor-pointer pl-5">
+                      <input
+                        type="checkbox"
+                        checked={policy.resumeOnLimit}
+                        disabled={!policy.enabled}
+                        onChange={(e) => void savePolicy({ ...policy, resumeOnLimit: e.target.checked })}
+                        className="accent-info disabled:opacity-40"
+                      />
+                      <span className={`text-[11px] min-w-0 truncate ${policy.enabled ? 'text-text' : 'text-subtle'}`}>
+                        Resume chats that hit the limit
+                      </span>
+                      <span className="ml-auto flex items-center" onClick={(e) => e.preventDefault()}>
+                        <InfoHint label="About resuming after a limit">
+                          If a chat is refused with “You’ve hit your session limit”, switch to
+                          another Claude account straight away and send it “continue”, so it picks
+                          up where it stopped instead of waiting for the window to reset.
+                        </InfoHint>
+                      </span>
+                    </label>
+                    {rotationStatus?.disabledReason && (
+                      <p className="mt-1 text-[10px] text-danger leading-relaxed">
+                        {maskEmails(rotationStatus.disabledReason, masked)}
+                      </p>
+                    )}
+                    {/* The whole line goes behind the eye, not just the address
+                        in it: "switched to X at 96%" is a readout of the account
+                        and its headroom, which is the thing you are hiding. */}
+                    {!rotationStatus?.disabledReason && rotationStatus?.lastEvent && (
+                      <p
+                        className={`mt-1 text-[10px] text-muted leading-relaxed ${masked ? 'select-none' : ''}`}
+                        style={masked ? MASK : undefined}
+                        title={masked ? 'Hidden — use the eye icon to show' : undefined}
+                      >
+                        {rotationStatus.lastEvent}
+                      </p>
+                    )}
+                  </div>
+                )}
               </ProviderSection>
 
               <ProviderSection
                 provider="codex"
                 open={codexOpen}
                 onToggle={() => setCodexOpen(!codexOpen)}
-                active={snapshot.activeProvider === 'codex'}
-                onUse={() => void useProvider('codex')}
-                busy={busy}
-                error={providerError.codex ?? null}
+                count={snapshot.codexAccounts.length}
               >
                 {snapshot.codexAccounts.map((account) => (
                   <CodexRow
@@ -1025,108 +1090,6 @@ export default function AccountsPanel() {
                   )}
                 </div>
               </ProviderSection>
-
-              {/* Auto-rotation is a property of the pool, not of Claude: it
-                  moves work between Claude accounts and, when allowed, hands it
-                  across to Codex. So it sits under both sections rather than
-                  inside one of them. */}
-              {canRotate && (
-                <div className="border-t border-border/60 px-3 py-2">
-                  <label className="flex items-center gap-2 cursor-pointer">
-                    <input
-                      type="checkbox"
-                      checked={policy.enabled}
-                      onChange={(e) => void savePolicy({ ...policy, enabled: e.target.checked })}
-                      className="accent-info"
-                    />
-                    {/* The label is the only part allowed to give up room: a
-                        narrow sidebar should clip the sentence, not shove the
-                        threshold or the ⓘ off the edge. */}
-                    <span className="text-[11px] text-text min-w-0 truncate">Switch automatically at</span>
-                    <input
-                      type="number"
-                      min={50}
-                      max={99}
-                      value={policy.threshold}
-                      onChange={(e) => {
-                        const n = Number(e.target.value);
-                        if (Number.isFinite(n)) void savePolicy({ ...policy, threshold: n });
-                      }}
-                      className="shrink-0 w-11 bg-panel2 border border-border rounded px-1 py-0.5 text-[11px] text-text text-right focus:outline-none focus:border-info"
-                    />
-                    <span className="shrink-0 text-[11px] text-muted">%</span>
-                    {/* The explainer is one-time knowledge, so it lives behind
-                        the ⓘ rather than costing three lines of sidebar forever. */}
-                    <span className="ml-auto flex items-center" onClick={(e) => e.preventDefault()}>
-                      <InfoHint label="About automatic switching">
-                        Runs in the background even with the window closed, so an overnight run rolls
-                        onto a fresh account instead of hitting the wall.
-                      </InfoHint>
-                    </span>
-                  </label>
-                  {/* The backstop, indented under the threshold it backs up:
-                      thresholds are a forecast, and a chat that hits the wall
-                      anyway would otherwise sit dead until someone looks. */}
-                  <label className="mt-1 flex items-center gap-2 cursor-pointer pl-5">
-                    <input
-                      type="checkbox"
-                      checked={policy.resumeOnLimit}
-                      disabled={!policy.enabled}
-                      onChange={(e) => void savePolicy({ ...policy, resumeOnLimit: e.target.checked })}
-                      className="accent-info disabled:opacity-40"
-                    />
-                    <span className={`text-[11px] min-w-0 truncate ${policy.enabled ? 'text-text' : 'text-subtle'}`}>
-                      Resume chats that hit the limit
-                    </span>
-                    <span className="ml-auto flex items-center" onClick={(e) => e.preventDefault()}>
-                      <InfoHint label="About resuming after a limit">
-                        If a chat is refused with “You’ve hit your session limit”, switch account
-                        straight away and send it “continue”, so it picks up where it stopped instead
-                        of waiting for the window to reset.
-                      </InfoHint>
-                    </span>
-                  </label>
-                  {/* The last resort, one level further in: when the whole
-                      provider is out of headroom, the only move left is the
-                      other provider — and that means carrying the work over. */}
-                  <label className="mt-1 flex items-center gap-2 cursor-pointer pl-5">
-                    <input
-                      type="checkbox"
-                      checked={policy.crossProvider}
-                      disabled={!policy.enabled}
-                      onChange={(e) => void savePolicy({ ...policy, crossProvider: e.target.checked })}
-                      className="accent-info disabled:opacity-40"
-                    />
-                    <span className={`text-[11px] min-w-0 truncate ${policy.enabled ? 'text-text' : 'text-subtle'}`}>
-                      Rotate across providers (Claude ⇄ Codex)
-                    </span>
-                    <span className="ml-auto flex items-center" onClick={(e) => e.preventDefault()}>
-                      <InfoHint label="About rotating across providers">
-                        When the selected provider has no headroom left, switch to the other one and
-                        hand every unfinished conversation over to it. Off means rotation stays
-                        inside the selected provider.
-                      </InfoHint>
-                    </span>
-                  </label>
-                  {rotationStatus?.disabledReason && (
-                    <p className="mt-1 text-[10px] text-danger leading-relaxed">
-                      {maskEmails(rotationStatus.disabledReason, masked)}
-                    </p>
-                  )}
-                  {/* The whole line goes behind the eye, not just the address in
-                      it: "switched to X at 96%" is a readout of the account and
-                      its headroom, which is the thing you are hiding. */}
-                  {!rotationStatus?.disabledReason && rotationStatus?.lastEvent && (
-                    <p
-                      className={`mt-1 text-[10px] text-muted leading-relaxed ${masked ? 'select-none' : ''}`}
-                      style={masked ? MASK : undefined}
-                      title={masked ? 'Hidden — use the eye icon to show' : undefined}
-                    >
-                      {rotationStatus.lastEvent}
-                    </p>
-                  )}
-                </div>
-              )}
             </div>
           )}
         </div>

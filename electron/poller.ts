@@ -338,43 +338,6 @@ export function syncWatchers(): void {
 }
 
 /** Live watcher count, for the health heartbeat. */
-// ---------- Per-tick hooks ----------
-// Work that needs the live `claude agents --json` rows but has no business
-// owning a timer of its own — currently the handover's deferred daemon stops
-// (main.ts), which wait for a daemon to finish its turn before stopping it.
-// Callbacks run after the rows are indexed, never block the tick, and a throw
-// in one is contained so it cannot take reconciliation down with it.
-type TickCallback = (rows: ClaudeAgentJsonRow[]) => void;
-// `wanted` keeps the hook honest about the tick's own skip rule: a history with
-// no Claude conversations left in it (which is what a full handover to Codex
-// produces) skips the whole `claude agents --json` pass, and a pending deferred
-// stop is precisely the case that still needs those rows.
-const tickCallbacks: Array<{ run: TickCallback; wanted: () => boolean }> = [];
-
-export function onTick(cb: TickCallback, wanted: () => boolean = () => false): void {
-  tickCallbacks.push({ run: cb, wanted });
-}
-
-function anyTickWorkPending(): boolean {
-  return tickCallbacks.some((c) => {
-    try {
-      return c.wanted();
-    } catch {
-      return false;
-    }
-  });
-}
-
-function runTickCallbacks(rows: ClaudeAgentJsonRow[]): void {
-  for (const cb of tickCallbacks) {
-    try {
-      cb.run(rows);
-    } catch (err) {
-      console.error('[agentsflow][poller] tick callback threw', (err as Error)?.message ?? err);
-    }
-  }
-}
-
 export function watcherStats(): Record<string, number> {
   return { convWatchers: watchers.size };
 }
@@ -449,7 +412,8 @@ async function fallbackTick(): Promise<void> {
 
 async function fallbackTickImpl(): Promise<void> {
   syncWatchers();
-  if (!anyTickWorkPending() && !store.getConversations().some((c) => c.provider !== 'codex')) return;
+  // Nothing on the Claude side means nothing for `claude agents --json` to say.
+  if (!store.getConversations().some((c) => c.provider !== 'codex')) return;
 
   const listStart = Date.now();
   const result = await perf.timed('poll:listAgents', () => listAgentsResult());
@@ -463,7 +427,6 @@ async function fallbackTickImpl(): Promise<void> {
   const rows: ClaudeAgentJsonRow[] = result.rows;
   lastAgentRows = rows;
   const rowIndex = buildRowIndex(rows);
-  runTickCallbacks(rows);
   // Spawns and Codex events may mutate the store while the CLI list is in flight.
   // Reconcile the current array so a stale poll cannot erase a new conversation.
   const convs = store.getConversations();

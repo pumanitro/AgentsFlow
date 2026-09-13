@@ -1,5 +1,10 @@
 export type AgentProvider = 'claude' | 'codex';
 
+// Where a conversation forked to the other provider came from. A conversation
+// belongs to one provider for its whole life; the only way across is "Fork to
+// Codex" / "Fork to Claude", which starts a NEW conversation on the other side
+// seeded with a condensed transcript of this one. This record names that
+// source so the seed can be built when the new side first speaks.
 export interface ConversationHandover {
   from: AgentProvider;
   // The Claude session (from === 'claude') or Codex thread (from === 'codex')
@@ -43,9 +48,8 @@ export interface Conversation {
   provider?: AgentProvider; // Missing on legacy records means Claude.
   model?: string;
   lastResult?: string;
-  // Set while a conversation has been moved to the other provider but not yet
-  // continued there. The next message it receives is sent together with a
-  // condensed transcript of what the previous agent did; then this clears.
+  // Set on a conversation forked from the other provider until its first turn
+  // has been sent with the condensed transcript of the source; then this clears.
   handover?: ConversationHandover;
   id: string;
   sessionId: string;
@@ -550,8 +554,6 @@ export interface AccountsSnapshot {
   // silently on a timer; this is reserved for "there is nothing left to restore",
   // which is the one case that really does need the user.
   authIssue?: string | null;
-  // The provider new conversations use and whose usage the sidebar shows.
-  activeProvider: AgentProvider;
   // Saved Codex sign-ins, and which of them is the CLI's current login (null
   // when the current login is not saved in the pool, or Codex is signed out).
   codexAccounts: CodexAccount[];
@@ -598,10 +600,6 @@ export interface RotationPolicy {
   // and predictions miss — switch on the spot and tell that chat to carry on,
   // instead of leaving it parked until someone reads the screen.
   resumeOnLimit: boolean;
-  // Off (the default): rotation stays inside the selected provider. On: when
-  // that provider has no headroom left, switch to the other one and hand every
-  // unfinished conversation over to it.
-  crossProvider: boolean;
 }
 
 export interface RotationStatus {
@@ -670,11 +668,7 @@ export interface AgentsFlowApi {
   getAccountUsage: (id: string, force?: boolean) => Promise<UsageResult>;
   onAccountsUpdated: (cb: (snapshot: AccountsSnapshot) => void) => () => void;
 
-  // ---- Provider selection + the Codex pool ----
-  // Choosing a provider moves every unfinished conversation to it (see
-  // ConversationHandover) and is what the composer, the Usage pane and
-  // rotation follow.
-  setActiveProvider: (provider: AgentProvider) => Promise<AccountsSnapshot>;
+  // ---- The Codex pool ----
   // Adding runs `codex login` in a terminal with an isolated CODEX_HOME.
   addCodexAccount: (label?: string) => Promise<AddAccountResult>;
   probeCodexAccount: (pendingId: string) => Promise<ProbeCodexResult>;
@@ -685,9 +679,6 @@ export interface AgentsFlowApi {
   saveCurrentCodexLogin: (label?: string) => Promise<SwitchCodexResult>;
   // The models the Codex CLI offers right now (empty when it cannot be asked).
   listCodexModels: () => Promise<CodexModel[]>;
-  // Starts a conversation that was handed over to Claude (a Codex → Claude
-  // move) on a fresh Claude session seeded with the Codex transcript.
-  resumeHandover: (conversationId: string) => Promise<{ ok: boolean; error?: string }>;
 
   // Automatic rotation at a usage threshold — what makes an unattended
   // overnight run possible without anyone clicking a switch.
@@ -705,6 +696,11 @@ export interface AgentsFlowApi {
   // full history, new session id, independent from the original — the escape
   // hatch when the original is stuck (e.g. held by a crash-looping bg daemon).
   forkConversation: (conversationId: string) => Promise<{ conversationId: string }>;
+  // Starts a NEW conversation on the other provider, seeded with a condensed
+  // transcript of this one, and kicks it off so it is live at once. The source
+  // keeps running where it is. `model` is the target provider's model alias;
+  // omitted ⇒ that provider's default.
+  forkConversationTo: (conversationId: string, provider: AgentProvider, model?: string) => Promise<{ conversationId: string }>;
   updateConversationTitle: (id: string, title: string) => Promise<void>;
   setConversationPinned: (id: string, pinned: boolean) => Promise<void>;
   stopAgent: (id: string) => Promise<void>;

@@ -16,7 +16,7 @@ const MODEL_CACHE_MS = 10 * 60_000;
 // replaced: the thread survives (its id is on the row), the connection did not.
 export const CODEX_SWITCHED = 'Codex account switched — reopen to continue';
 
-const HANDOVER_NOTE = 'Handed over from Claude Code — the previous conversation was passed to Codex as context.';
+const HANDOVER_NOTE = 'Forked from Claude Code — that conversation was passed to Codex as context.';
 
 /**
  * Spawn defaults for a thread this app starts. Codex parks a turn forever at
@@ -154,8 +154,8 @@ interface Session {
   rawRequests: Map<string | number, WireObject>;
   busy: boolean;
   turnEntries: Set<string>;
-  // Set while this thread was opened for a conversation carrying a pending
-  // handover; cleared (on the row too) once Codex has actually answered once.
+  // Set while this thread was opened for a conversation forked from Claude and
+  // still carrying its seed; cleared (on the row too) once Codex has answered.
   pendingHandover?: boolean;
   // Turn ids already reported to `onLimit`, so one refusal is one signal.
   limitedTurns: Set<string>;
@@ -170,9 +170,9 @@ export interface Dependencies {
   /** Where this app keeps its own state; the app-server's socket lives under it. */
   userData: string;
   /**
-   * The condensed transcript of the conversation the row was handed over from.
-   * Merged into the thread's developer instructions rather than the prompt, so
-   * the user's own first message stays exactly what they typed.
+   * The condensed transcript of the Claude conversation this row was forked
+   * from. Merged into the thread's developer instructions rather than the
+   * prompt, so the user's own first message stays exactly what they typed.
    */
   handoverContext?: (conv: Conversation) => string | undefined;
   /** Codex refused a turn because the account is out of quota. */
@@ -366,8 +366,8 @@ export class CodexAgents {
       await this.history(s);
       await this.applyThreadStatus(id, response?.thread?.status, stored, threadId);
       // A turn that completed while nobody was connected never delivered its
-      // turn/completed, so the row's final result (what delegation and the
-      // handover summary read) is backfilled from the thread's history.
+      // turn/completed, so the row's final result (what delegation and a fork
+      // back to Claude read) is backfilled from the thread's history.
       const live = this.deps.get(id);
       if (live && !live.lastResult && live.state === 'done') {
         const last = [...s.snapshot.entries].reverse().find((e) => e.role === 'assistant')?.text?.trim();
@@ -487,7 +487,7 @@ export class CodexAgents {
       const status = p.turn.status === 'failed' ? 'error' : p.turn.status === 'interrupted' ? 'stopped' : 'done';
       const final = [...s.snapshot.entries].reverse().find((e) => e.role === 'assistant' && s.turnEntries.has(e.id))?.text || '';
       this.deps.update(id, { lastResult: final });
-      // The handover has been delivered once Codex has answered on this thread.
+      // The fork's seed has been delivered once Codex has answered on this thread.
       if (s.pendingHandover) { s.pendingHandover = false; this.deps.update(id, { handover: undefined }); }
       if (p.turn.status === 'failed') this.limit(id, s, completedTurn, p.turn.error?.message);
       this.state(id, status, p.turn.error?.message);
@@ -553,7 +553,7 @@ export class CodexAgents {
     } finally { this.loading.delete(id); }
   }
 
-  /** Thread options, with a pending handover's context folded into the developer instructions. */
+  /** Thread options, with a pending fork's seed folded into the developer instructions. */
   private threadOptions(conv: Conversation, handover: boolean): WireObject {
     const options: WireObject = {
       approvalPolicy: CODEX_DEFAULT_APPROVAL_POLICY, sandbox: CODEX_DEFAULT_SANDBOX,
@@ -571,7 +571,7 @@ export class CodexAgents {
     const conv = this.deps.get(id);
     if (!conv || conv.provider !== 'codex') throw new Error('Codex conversation not found');
     await this.rpc.start();
-    // A handed-over row can still carry the *other* provider's id in
+    // A row forked from Claude can still carry the *other* provider's id in
     // forkFromSessionId — Codex cannot fork a Claude session, so ignore it and
     // start a fresh thread unless this row already has a Codex one.
     const handover = Boolean(conv.handover);
@@ -598,7 +598,7 @@ export class CodexAgents {
 
   /**
    * This conversation's Codex thread, condensed the same way a Claude
-   * transcript is, for a handover in the other direction. '' when unreadable.
+   * transcript is, to seed a fork back to Claude. '' when unreadable.
    */
   async historyText(id: string): Promise<string> {
     try {

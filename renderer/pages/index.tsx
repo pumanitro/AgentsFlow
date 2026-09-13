@@ -12,6 +12,7 @@ import HistoryModal from '../components/HistoryModal';
 import HistoryTimeline from '../components/HistoryTimeline';
 import HelpModal from '../components/HelpModal';
 import McpModal from '../components/McpModal';
+import SettingsModal from '../components/SettingsModal';
 import StatsView from '../components/StatsView';
 import DockedPanes, { TOP_REGION_MIN } from '../components/DockedPanes';
 import { api } from '../lib/ipc';
@@ -21,11 +22,11 @@ import { blockStepDropIndex, marqueeHits, moveRefsTo, refKey } from '../../share
 
 /**
  * Whether a row has something to open. A Claude chat needs its session; a Codex
- * chat has a thread instead; a handed-over chat has neither yet and opening it
- * is how you continue it on the other side. Same rule as PinnedRow's `ready`.
+ * chat has a thread instead, which its own view creates on the first turn — so
+ * it opens even before there is one. Same rule as PinnedRow's `ready`.
  */
 const canOpen = (c: Conversation | undefined | null): boolean =>
-  Boolean(c && (c.sessionId || c.provider === 'codex' || c.handover));
+  Boolean(c && (c.sessionId || c.provider === 'codex'));
 
 // Both touch the Electron-only `api()` at render time, so they must be
 // client-only — this page is server-rendered by Next, where `api()` throws.
@@ -58,6 +59,7 @@ export default function Home() {
   const [historyDirId, setHistoryDirId] = useState<string | null>(null);
   const [helpOpen, setHelpOpen] = useState(false);
   const [mcpOpen, setMcpOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   // Live delegation-bridge liveness, polled for the header health dot. When this
   // goes down, delegations silently degrade to unwatchable headless runs, so we
   // surface it at a glance rather than leaving it invisible.
@@ -658,9 +660,9 @@ export default function Home() {
   const attach = (c: Conversation) => {
     // eslint-disable-next-line no-console
     console.log('[agentsflow] attach()', { id: c.id, sessionId: c.sessionId });
-    // A Codex chat has a thread instead of a session, and a handed-over one has
-    // neither until it is continued — both open, and the session view offers
-    // the right thing once it is there.
+    // A Codex chat has a thread instead of a session, and opens even before the
+    // first turn has created one — the session view stands the native composer
+    // in until it exists.
     if (!canOpen(c)) {
       // eslint-disable-next-line no-console
       console.warn('[agentsflow] attach aborted: no sessionId yet');
@@ -897,6 +899,15 @@ export default function Home() {
                   >
                     <span className="text-accent">⚡</span>
                     MCP server
+                  </button>
+                  <button
+                    role="menuitem"
+                    onClick={() => { setSettingsOpen(true); setMenuOpen(false); }}
+                    className="w-full text-left px-3 py-1.5 text-sm flex items-center gap-2 text-text hover:bg-panel2"
+                    title="What the UI shows"
+                  >
+                    <span className="text-accent">⚙</span>
+                    Settings
                   </button>
                 </div>
               </>
@@ -1236,6 +1247,8 @@ export default function Home() {
       {helpOpen && <HelpModal onClose={() => setHelpOpen(false)} />}
 
       {mcpOpen && <McpModal onClose={() => setMcpOpen(false)} />}
+
+      {settingsOpen && <SettingsModal onClose={() => setSettingsOpen(false)} />}
 
       {historyDir && (
         <HistoryModal

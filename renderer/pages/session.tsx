@@ -2,11 +2,13 @@ import dynamic from 'next/dynamic';
 import { useRouter } from 'next/router';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { api } from '../lib/ipc';
-import { Conversation } from '../../shared/types';
+import { AgentProvider, Conversation } from '../../shared/types';
+import { loadModelPick } from '../lib/models';
 import { statusDotClass } from '../lib/status';
 import { saveUIState, useDirectoryNumber, useUIState } from '../lib/ui-state';
 import { useBackNavKeys, BackNavHint } from '../lib/back-nav';
 
+import ProviderIcon, { providerName } from '../components/ProviderIcon';
 import ShellArea, { appendShell, ShellNode } from '../components/ShellArea';
 import PaneErrorBoundary from '../components/PaneErrorBoundary';
 import paneLoading from '../components/PaneLoading';
@@ -39,6 +41,7 @@ export default function SessionPage() {
   // working" banner so you can watch them without leaving the root session.
   const [children, setChildren] = useState<Conversation[]>([]);
   const [rightPane, setRightPane] = useUIState('rightPane');
+  const [showProviderIcon] = useUIState('showProviderIcon');
   const [openFile, setOpenFile] = useState<string | null>(null);
   // The chat terminal exited. This fires both for a real session end AND for a
   // fast-fail attach — e.g. `claude attach` to a finished/lingering daemon that
@@ -51,13 +54,6 @@ export default function SessionPage() {
   const [chatExited, setChatExited] = useState(false);
   // Bumped by Reopen to force a fresh Terminal mount (and a new attach).
   const [chatGen, setChatGen] = useState(0);
-  // Which pane a Codex row shows. The terminal is the default — it is the Codex
-  // CLI's own TUI attached to the live thread, so it is the same thing the user
-  // would see in a shell, approvals included. `CodexChat` stays one click away
-  // because its rendering of approval cards and the handover context line is
-  // easier to read than the TUI's, and because it is the only surface that can
-  // start a thread that does not exist yet.
-  const [codexView, setCodexView] = useState<'terminal' | 'native'>('terminal');
   // 1-based line to jump to when a file is opened from search. The nonce makes
   // re-opening the *same* file at the same line still trigger the jump.
   const [gotoLine, setGotoLine] = useState<{ line: number; nonce: number } | null>(null);
@@ -227,68 +223,6 @@ export default function SessionPage() {
     return () => { off(); offPatch(); };
   }, [id]);
 
-  // A conversation that moved provider gets a fresh terminal, so a "chat ended"
-  // notice from the side it left would otherwise sit on top of the side it
-  // arrived at.
-  useEffect(() => { setChatExited(false); }, [conv?.provider]);
-
-  // Terminal-vs-native is remembered per conversation: one Codex chat being
-  // read through the native view is not a reason for the next one to open that
-  // way. Hydrated on mount so SSR renders the default.
-  useEffect(() => {
-    if (!id || typeof localStorage === 'undefined') return;
-    let stored: string | null = null;
-    try { stored = localStorage.getItem(`agentsflow:conv:${id}:codexView`); } catch { /* ignore */ }
-    setCodexView(stored === 'native' ? 'native' : 'terminal');
-  }, [id]);
-
-  const chooseCodexView = useCallback((next: 'terminal' | 'native') => {
-    setCodexView(next);
-    // Switching back to the terminal re-attaches: the thread is still alive in
-    // the app-server, so a previous exit notice is stale the moment we return.
-    setChatExited(false);
-    if (!id || typeof localStorage === 'undefined') return;
-    try { localStorage.setItem(`agentsflow:conv:${id}:codexView`, next); } catch { /* ignore */ }
-  }, [id]);
-
-  // Start the Codex thread for a row handed over from Claude. `continue` is the
-  // ordinary first turn — the main process seeds it with the handover context
-  // built from the Claude transcript — and the conversations broadcast then
-  // fills in the sessionId (the thread id) the terminal attaches to.
-  const [startingCodex, setStartingCodex] = useState(false);
-  const [startCodexError, setStartCodexError] = useState<string | null>(null);
-  const startOnCodex = useCallback(async () => {
-    if (!id || startingCodex) return;
-    setStartingCodex(true);
-    setStartCodexError(null);
-    try {
-      await api().codexSend(String(id), 'continue');
-    } catch (err) {
-      setStartCodexError((err as Error)?.message ?? 'Could not start this conversation on Codex.');
-    } finally {
-      setStartingCodex(false);
-    }
-  }, [id, startingCodex]);
-
-  // Continue a conversation that was handed over to Claude: the main process
-  // starts a fresh session seeded with the other agent's transcript, and the
-  // conversations broadcast then fills in the sessionId the Terminal needs.
-  const [resuming, setResuming] = useState(false);
-  const [resumeError, setResumeError] = useState<string | null>(null);
-  const resumeHandover = useCallback(async () => {
-    if (!id || resuming) return;
-    setResuming(true);
-    setResumeError(null);
-    try {
-      const r = await api().resumeHandover(String(id));
-      if (!r.ok) setResumeError(r.error || 'Could not continue this conversation.');
-    } catch (err) {
-      setResumeError((err as Error)?.message ?? 'Could not continue this conversation.');
-    } finally {
-      setResuming(false);
-    }
-  }, [id, resuming]);
-
   const goBack = useCallback(() => {
     if (conv?.directoryId) saveUIState({ selectedDirId: conv.directoryId });
     router.push({ pathname: '/', query: id ? { focus: String(id) } : undefined });
@@ -298,25 +232,68 @@ export default function SessionPage() {
   // open it. The escape hatch when the original session can't be reopened —
   // e.g. it's held by a stuck background daemon that refuses attach/resume.
   const [forking, setForking] = useState(false);
+  const [forkError, setForkError] = useState<string | null>(null);
+  const [forkMenuOpen, setForkMenuOpen] = useState(false);
+  const forkRef = useRef<HTMLDivElement | null>(null);
   const forkChat = useCallback(async () => {
     if (!conv?.sessionId || forking) return;
     setForking(true);
+    setForkError(null);
+    setForkMenuOpen(false);
     try {
       const { conversationId } = await api().forkConversation(conv.id);
       router.push({ pathname: '/session', query: { id: conversationId } });
     } catch (err) {
       console.error('[agentsflow] fork failed', err);
+      setForkError((err as Error)?.message ?? 'Could not fork this chat.');
     } finally {
       setForking(false);
     }
   }, [conv, forking, router]);
 
-  const backHint = useBackNavKeys(goBack);
+  // The one way across providers. A chat is bound to the provider it started on
+  // for its whole life, so moving work to the other one means a NEW chat there,
+  // seeded with a condensed transcript of this one and kicked off at once; this
+  // one keeps running where it is.
+  const otherProvider: AgentProvider = conv?.provider === 'codex' ? 'claude' : 'codex';
+  const forkToOther = useCallback(async () => {
+    if (!conv?.sessionId || forking) return;
+    setForking(true);
+    setForkError(null);
+    setForkMenuOpen(false);
+    try {
+      const { conversationId } = await api().forkConversationTo(
+        conv.id,
+        otherProvider,
+        // The model last picked for that provider in the composer; empty means
+        // "whatever its CLI defaults to", which the contract spells as omitted.
+        loadModelPick(otherProvider) || undefined,
+      );
+      router.push({ pathname: '/session', query: { id: conversationId } });
+    } catch (err) {
+      console.error('[agentsflow] fork to provider failed', err);
+      setForkError((err as Error)?.message ?? `Could not fork this chat to ${providerName(otherProvider)}.`);
+    } finally {
+      setForking(false);
+    }
+  }, [conv, forking, otherProvider, router]);
 
-  // Claude rows are always the terminal; Codex rows are the terminal unless the
-  // reader asked for the native view. Drives which pane mounts AND whether a
-  // stale "terminal closed" notice is allowed to cover it.
-  const showingTerminal = conv?.provider !== 'codex' || codexView === 'terminal';
+  // Close the fork menu on outside-click / Escape, the same as the composer's.
+  useEffect(() => {
+    if (!forkMenuOpen) return;
+    const onDocClick = (e: MouseEvent) => {
+      if (forkRef.current && !forkRef.current.contains(e.target as Node)) setForkMenuOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setForkMenuOpen(false); };
+    document.addEventListener('mousedown', onDocClick);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('mousedown', onDocClick);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [forkMenuOpen]);
+
+  const backHint = useBackNavKeys(goBack);
 
   if (!id) return null;
 
@@ -337,10 +314,20 @@ export default function SessionPage() {
         </button>
         <div className="min-w-0 flex items-center gap-2 flex-1">
           {conv && (
-            <span
-              className={`shrink-0 inline-block w-2 h-2 rounded-full ${statusDotClass(conv)}`}
-              title={conv.state || conv.status || 'idle'}
-            />
+            <>
+              <span
+                className={`shrink-0 inline-block w-2 h-2 rounded-full ${statusDotClass(conv)}`}
+                title={conv.state || conv.status || 'idle'}
+              />
+              {showProviderIcon && (
+                <ProviderIcon
+                  provider={conv.provider ?? 'claude'}
+                  size={12}
+                  className="text-muted"
+                  title={providerName(conv.provider ?? 'claude')}
+                />
+              )}
+            </>
           )}
           <span className="text-sm font-medium text-text shrink-0">{conv?.displayName ?? '…'}</span>
           {(conv?.title || conv?.description) && (
@@ -366,23 +353,63 @@ export default function SessionPage() {
             title={openFile ? 'Show file editor' : 'Click a file in the sidebar to open it'}
           >File</button>
         </div>
-        {conv?.provider === 'codex' && (
-          <button
-            onClick={() => chooseCodexView(codexView === 'native' ? 'terminal' : 'native')}
-            style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
-            className={`shrink-0 px-3 py-1 text-[11px] uppercase tracking-wider rounded-md border ${codexView === 'native' ? 'bg-accent text-bg font-semibold border-accent' : 'bg-panel text-muted border-border hover:text-text hover:bg-panel2'}`}
-            title={codexView === 'native'
-              ? 'Back to the Codex terminal (the CLI’s own TUI, attached to the live thread)'
-              : 'Show the built-in Codex view instead — approval cards and the handover note, rendered by Peers Flow'}
-          >Native view</button>
-        )}
-        <button
-          onClick={forkChat}
-          disabled={!conv?.sessionId || forking}
+        {/* Fork, with the cross-provider move on its ▾. Both need something to
+            copy from, so both are dead until this chat has a session (a Codex
+            row has no thread until its first turn). */}
+        <div
+          ref={forkRef}
           style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
-          className="shrink-0 px-3 py-1 text-[11px] uppercase tracking-wider rounded-md border bg-panel text-muted border-border hover:text-text hover:bg-panel2 flex items-center gap-1 disabled:opacity-40 disabled:cursor-not-allowed"
-          title="Branch an independent copy of this chat (full history, new session) — use it when the original is stuck"
-        >{forking ? 'Forking…' : '⑂ Fork'}</button>
+          className="shrink-0 relative flex"
+        >
+          <button
+            onClick={forkChat}
+            disabled={!conv?.sessionId || forking}
+            className="px-3 py-1 text-[11px] uppercase tracking-wider rounded-l-md border bg-panel text-muted border-border hover:text-text hover:bg-panel2 flex items-center gap-1 disabled:opacity-40 disabled:cursor-not-allowed"
+            title="Branch an independent copy of this chat (full history, new session) — use it when the original is stuck"
+          >{forking ? 'Forking…' : '⑂ Fork'}</button>
+          <button
+            onClick={() => setForkMenuOpen((v) => !v)}
+            disabled={!conv?.sessionId || forking}
+            aria-haspopup="menu"
+            aria-expanded={forkMenuOpen}
+            aria-label="Fork options"
+            className="px-1.5 py-1 text-[10px] rounded-r-md border border-l-0 bg-panel text-muted border-border hover:text-text hover:bg-panel2 disabled:opacity-40 disabled:cursor-not-allowed"
+            title={`More ways to fork — including moving this work to ${providerName(otherProvider)}`}
+          >▾</button>
+          {forkMenuOpen && (
+            <div
+              role="menu"
+              className="absolute top-full right-0 mt-1 z-30 min-w-[16rem] rounded-md border border-border bg-panel2 shadow-lg shadow-black/40 py-1"
+            >
+              <button
+                type="button"
+                role="menuitem"
+                onClick={forkChat}
+                className="w-full text-left px-3 py-1.5 text-xs flex items-center gap-2 whitespace-nowrap text-text hover:bg-panel"
+              >
+                <ProviderIcon provider={conv?.provider ?? 'claude'} size={13} className="text-muted" />
+                <span>⑂ Fork</span>
+                <span className="text-[10px] text-muted">same chat, new session</span>
+              </button>
+              <button
+                type="button"
+                role="menuitem"
+                onClick={forkToOther}
+                className="w-full text-left px-3 py-1.5 text-xs flex items-center gap-2 whitespace-nowrap text-text hover:bg-panel"
+              >
+                <ProviderIcon provider={otherProvider} size={13} className="text-muted" />
+                <span>⑂ Fork to {providerName(otherProvider)}</span>
+                <span className="text-[10px] text-muted">carries the transcript over</span>
+              </button>
+            </div>
+          )}
+          {forkError && (
+            <div className="absolute top-full right-0 mt-1 z-30 w-72 rounded-md border border-err/60 bg-bg px-2.5 py-1.5 flex items-start gap-2 text-[11px] text-err shadow-lg shadow-black/40">
+              <span className="flex-1 normal-case tracking-normal">{forkError}</span>
+              <button onClick={() => setForkError(null)} className="text-err hover:text-text px-1" title="Dismiss">✕</button>
+            </div>
+          )}
+        </div>
         <button
           onClick={addShell}
           style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
@@ -403,6 +430,14 @@ export default function SessionPage() {
                 <span
                   className={`inline-block w-2 h-2 rounded-full shrink-0 ${statusDotClass(child, true)}`}
                 />
+                {showProviderIcon && (
+                  <ProviderIcon
+                    provider={child.provider ?? 'claude'}
+                    size={12}
+                    className="text-muted"
+                    title={providerName(child.provider ?? 'claude')}
+                  />
+                )}
                 <span className="shrink-0 font-medium text-text/90">{child.displayName}</span>
                 <span className="text-muted shrink-0">
                   {running ? 'is working' : failed ? 'failed' : 'finished'}
@@ -456,7 +491,7 @@ export default function SessionPage() {
           {/* Both panes stay mounted; toggling uses visibility so xterm size doesn't reset */}
           <div className={`absolute inset-0 ${rightPane === 'chat' ? 'visible' : 'invisible'}`}>
             {conv?.sessionId ? (
-              chatExited && showingTerminal ? (
+              chatExited ? (
                 <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 px-6 text-center">
                   <div className="text-sm text-text">The chat terminal closed.</div>
                   <div className="text-xs text-muted max-w-sm">
@@ -481,80 +516,23 @@ export default function SessionPage() {
                   </div>
                 </div>
               ) : (
-                <PaneErrorBoundary key={chatGen} label={showingTerminal ? 'Terminal' : 'Codex'}>
-                  {showingTerminal
-                    ? <Terminal key={chatGen} conversationId={String(id)} baseDir={conv.provider === 'codex' ? (conv.worktreePath || conv.directoryPath) : conv.directoryPath} onExit={() => setChatExited(true)} autoFocus={rightPane === 'chat'} />
-                    : <CodexChat conversationId={String(id)} directoryPath={conv.directoryPath} />}
+                // Every chat with a session is the terminal — for a Codex row
+                // that is the CLI's own TUI attached to the live thread, the
+                // same thing the user would see in a shell, approvals included.
+                <PaneErrorBoundary key={chatGen} label="Terminal">
+                  <Terminal key={chatGen} conversationId={String(id)} baseDir={conv.provider === 'codex' ? (conv.worktreePath || conv.directoryPath) : conv.directoryPath} onExit={() => setChatExited(true)} autoFocus={rightPane === 'chat'} />
                 </PaneErrorBoundary>
               )
             ) : conv && conv.provider === 'codex' ? (
-              // A Codex row with no thread. Two ways to get here, and only one
-              // of them is a dead end for the terminal:
-              //
-              //  • handed over from Claude and never continued — there is no
-              //    thread to attach a TUI to until the first turn creates one,
-              //    so the pane is the button that starts it. The conversations
-              //    broadcast then carries the thread id back and the terminal
-              //    mounts on the next render.
-              //  • brand new, first turn still in flight — the native composer
-              //    is the surface that starts a thread, so it stands in until
-              //    the id arrives, whatever the remembered preference says.
-              conv.handover && codexView !== 'native' ? (
-                <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 px-6 text-center">
-                  <div className="text-sm text-text font-medium">
-                    Handed over from {conv.handover.from === 'codex' ? 'Codex' : 'Claude'}
-                  </div>
-                  <div className="text-xs text-muted max-w-sm leading-relaxed">
-                    {conv.handover.reason ? `${conv.handover.reason} ` : ''}
-                    Starting opens a Codex thread seeded with what the other agent did
-                    {conv.handover.at ? ` (moved ${new Date(conv.handover.at).toLocaleString()})` : ''}.
-                    The terminal attaches to it as soon as it exists.
-                  </div>
-                  {startCodexError && <div className="text-xs text-danger max-w-sm">{startCodexError}</div>}
-                  <div className="flex items-center gap-2">
-                    <button
-                      onClick={() => void startOnCodex()}
-                      disabled={startingCodex}
-                      className="px-3 py-1 text-[11px] uppercase tracking-wider rounded-md bg-accent text-bg font-semibold hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed"
-                    >{startingCodex ? 'Starting…' : 'Start on Codex'}</button>
-                    <button
-                      onClick={goBack}
-                      className="px-3 py-1 text-[11px] uppercase tracking-wider rounded-md border border-border bg-panel text-muted hover:text-text hover:bg-panel2"
-                    >← Back</button>
-                  </div>
-                </div>
-              ) : (
-                <PaneErrorBoundary label="Codex">
-                  <CodexChat conversationId={String(id)} directoryPath={conv.directoryPath} />
-                </PaneErrorBoundary>
-              )
-            ) : conv?.handover ? (
-              // A Claude-side conversation with no session: handed over from the
-              // other agent and not yet continued here. There is nothing to
-              // attach to until someone says go, so the pane is the button that
-              // says go.
-              <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 px-6 text-center">
-                <div className="text-sm text-text font-medium">
-                  Handed over from {conv.handover.from === 'codex' ? 'Codex' : 'Claude'}
-                </div>
-                <div className="text-xs text-muted max-w-sm leading-relaxed">
-                  {conv.handover.reason ? `${conv.handover.reason} ` : ''}
-                  Continuing starts a Claude session seeded with what the other agent did
-                  {conv.handover.at ? ` (moved ${new Date(conv.handover.at).toLocaleString()})` : ''}.
-                </div>
-                {resumeError && <div className="text-xs text-danger max-w-sm">{resumeError}</div>}
-                <div className="flex items-center gap-2">
-                  <button
-                    onClick={() => void resumeHandover()}
-                    disabled={resuming}
-                    className="px-3 py-1 text-[11px] uppercase tracking-wider rounded-md bg-accent text-bg font-semibold hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed"
-                  >{resuming ? 'Starting…' : 'Continue with Claude'}</button>
-                  <button
-                    onClick={goBack}
-                    className="px-3 py-1 text-[11px] uppercase tracking-wider rounded-md border border-border bg-panel text-muted hover:text-text hover:bg-panel2"
-                  >← Back</button>
-                </div>
-              </div>
+              // A Codex row with no thread yet — brand new, forked in from
+              // Claude with its first turn still in flight, or one whose first
+              // send failed. The built-in composer is the only surface that can
+              // start a thread, so it stands in until the id arrives; the
+              // conversations broadcast then carries the thread id back and the
+              // terminal mounts in its place.
+              <PaneErrorBoundary label="Codex">
+                <CodexChat conversationId={String(id)} directoryPath={conv.directoryPath} />
+              </PaneErrorBoundary>
             ) : (
               <div className="absolute inset-0 flex items-center justify-center text-muted text-sm">
                 {conv ? 'Session not ready yet…' : 'Loading…'}

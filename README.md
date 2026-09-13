@@ -14,6 +14,10 @@ model override. Chats keep running while you browse other peers, and support str
 responses, approvals, stop, saved history, and forks. The `delegate` tool accepts
 `provider: "claude"` or `provider: "codex"`; omitting it inherits the caller's provider.
 
+A conversation stays on the agent it was started with. **Fork to Codex** / **Fork to
+Claude** starts a new conversation on the other agent, seeded with a condensed
+transcript of the source and kicked off immediately, while the source keeps running.
+
 See [CODEX.md](CODEX.md) for setup, architecture, verification, and current limits.
 Claude's terminal workflow remains available. The account pool and
 per-agent performance breakdown describe Claude.

@@ -38,7 +38,6 @@ const api: AgentsFlowApi = {
     return () => ipcRenderer.removeListener('accounts:updated', listener);
   },
 
-  setActiveProvider: (provider) => ipcRenderer.invoke('accounts:setProvider', provider),
   addCodexAccount: (label) => ipcRenderer.invoke('codexAccounts:add', label),
   probeCodexAccount: (pendingId) => ipcRenderer.invoke('codexAccounts:probe', pendingId),
   cancelAddCodexAccount: (pendingId) => ipcRenderer.invoke('codexAccounts:cancelAdd', pendingId),
@@ -46,7 +45,6 @@ const api: AgentsFlowApi = {
   switchCodexAccount: (id) => ipcRenderer.invoke('codexAccounts:switch', id),
   saveCurrentCodexLogin: (label) => ipcRenderer.invoke('codexAccounts:saveCurrent', label),
   listCodexModels: () => ipcRenderer.invoke('codex:models'),
-  resumeHandover: (conversationId) => ipcRenderer.invoke('convs:resumeHandover', conversationId),
 
   getRotationPolicy: () => ipcRenderer.invoke('rotation:get'),
   setRotationPolicy: (policy) => ipcRenderer.invoke('rotation:set', policy),
@@ -59,6 +57,7 @@ const api: AgentsFlowApi = {
   listConversations: () => ipcRenderer.invoke('convs:list'),
   spawnAgent: (req: SpawnRequest) => ipcRenderer.invoke('convs:spawn', req),
   forkConversation: (conversationId) => ipcRenderer.invoke('convs:fork', conversationId),
+  forkConversationTo: (conversationId, provider, model) => ipcRenderer.invoke('convs:forkTo', conversationId, provider, model),
   updateConversationTitle: (id, title) =>
     ipcRenderer.invoke('convs:updateTitle', id, title),
   setConversationPinned: (id, pinned) => ipcRenderer.invoke('convs:setPinned', id, pinned),

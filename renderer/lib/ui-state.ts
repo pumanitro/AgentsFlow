@@ -9,6 +9,9 @@ export interface UIState {
   rightPane: 'chat' | 'file';
   sidebarMode: 'changes' | 'files';
   view: 'home' | 'stats';
+  // The Claude / Codex mark before the peer name on every conversation row.
+  // Off for anyone who runs a single provider and finds the column noise.
+  showProviderIcon: boolean;
 }
 
 const STORE_KEY = 'agentsflow:ui';
@@ -18,7 +21,13 @@ const DEFAULT: UIState = {
   rightPane: 'chat',
   sidebarMode: 'changes',
   view: 'home',
+  showProviderIcon: true,
 };
+
+// Fired on every save so a preference flipped in one place (the Settings
+// modal) is seen at once by every `useUIState` consumer on screen — the rows
+// in the list, the session header — rather than on their next mount.
+const CHANGE_EVENT = 'agentsflow:ui-state';
 
 export function loadUIState(): UIState {
   if (typeof localStorage === 'undefined') return { ...DEFAULT };
@@ -38,6 +47,7 @@ export function saveUIState(patch: Partial<UIState>): void {
     const current = loadUIState();
     const next = { ...current, ...patch };
     localStorage.setItem(STORE_KEY, JSON.stringify(next));
+    window.dispatchEvent(new Event(CHANGE_EVENT));
   } catch {
     // best-effort
   }
@@ -50,7 +60,10 @@ export function saveUIState(patch: Partial<UIState>): void {
 export function useUIState<K extends keyof UIState>(key: K): [UIState[K], (v: UIState[K]) => void] {
   const [value, setRaw] = useState<UIState[K]>(DEFAULT[key]);
   useEffect(() => {
-    setRaw(loadUIState()[key]);
+    const read = () => setRaw(loadUIState()[key]);
+    read();
+    window.addEventListener(CHANGE_EVENT, read);
+    return () => window.removeEventListener(CHANGE_EVENT, read);
   }, [key]);
   // Stable identity (only `key` matters) so consumers can safely use the setter
   // as an effect dependency without it churning on every render.

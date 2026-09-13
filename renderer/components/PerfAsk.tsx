@@ -1,12 +1,19 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { imageMarker, insertImageMarkers, removeImageMarker } from '../../shared/image-markers';
-import type { PerfReportResult, TrackedDirectory } from '../../shared/types';
+import type { AgentProvider, PerfReportResult, TrackedDirectory } from '../../shared/types';
 import { api } from '../lib/ipc';
-import { loadModelPick, modelLabel, saveModelPick, useProviderModels } from '../lib/models';
-import { useAccountsSnapshot } from '../lib/use-accounts';
+import {
+  loadModelPick,
+  loadProviderPick,
+  modelLabel,
+  PROVIDERS,
+  saveModelPick,
+  saveProviderPick,
+  useProviderModels,
+} from '../lib/models';
 import { attachmentPromptLines, imageFilesFromPaste, savePastedImages, type PastedImage } from '../lib/paste-image';
 import ImagePreviewModal from './ImagePreviewModal';
-import ProviderIcon from './ProviderIcon';
+import ProviderIcon, { providerName } from './ProviderIcon';
 
 /**
  * "Ask about this" — the composer under the performance charts.
@@ -61,10 +68,10 @@ export default function PerfAsk({ dirs, defaultDir, rangeMin, rangeLabel, onSend
   const [previewing, setPreviewing] = useState<PastedImage | null>(null);
   const [busy, setBusy] = useState<null | 'report' | 'spawn'>(null);
   const [error, setError] = useState<string | null>(null);
-  // Same rule as the composer: the provider is the selected licence, and this
-  // only picks the model inside it.
-  const { snapshot } = useAccountsSnapshot();
-  const provider = snapshot.activeProvider;
+  // Same rule as the composer: the session this starts is bound to whichever
+  // provider is picked here, and both picks are the composer's — asking about a
+  // spike should not need a separate set of choices.
+  const [provider, setProvider] = useState<AgentProvider>('claude');
   const { models, loading: modelsLoading, unavailable: modelsUnavailable } = useProviderModels(provider);
   const [model, setModel] = useState('');
   const [dirId, setDirId] = useState<string | null>(defaultDir?.id ?? null);
@@ -79,6 +86,7 @@ export default function PerfAsk({ dirs, defaultDir, rangeMin, rangeLabel, onSend
       const d = localStorage.getItem(DIR_KEY);
       if (d) setDirId(d);
     } catch { /* ignore */ }
+    setProvider(loadProviderPick());
   }, []);
 
   // The model pick is shared with the composer, per provider — asking about a
@@ -111,6 +119,12 @@ export default function PerfAsk({ dirs, defaultDir, rangeMin, rangeLabel, onSend
     el.style.height = Math.min(el.scrollHeight, 120) + 'px';
   }, [prompt]);
 
+  // The provider switch sits inside the model menu and leaves it open: the
+  // list has just become the other provider's models.
+  const pickProvider = (p: AgentProvider) => {
+    setProvider(p);
+    saveProviderPick(p);
+  };
   const pickModel = (id: string) => {
     setModel(id);
     setMenu(null);
@@ -255,21 +269,41 @@ export default function PerfAsk({ dirs, defaultDir, rangeMin, rangeLabel, onSend
               </div>
             )}
           </div>
+          {/* One chip for provider + model, the same shape as the home
+              composer: "⟨mark⟩ Model", with the provider switch at the top of
+              the menu. The chat this starts is bound for life to that provider. */}
           <div className="shrink-0 relative">
             <button
               type="button"
               onClick={() => setMenu(menu === 'model' ? null : 'model')}
               className={`${btn} font-medium`}
-              title="Model for the analysis. Change provider in Accounts."
+              title={`Model for this analysis — ${providerName(provider)}. Switch provider at the top of the menu.`}
               aria-haspopup="menu"
               aria-expanded={menu === 'model'}
             >
-              <ProviderIcon provider={provider} size={12} className="text-accent" />
+              <ProviderIcon provider={provider} size={12} className="text-accent" title={providerName(provider)} />
               <span>{modelLabel(provider, model, models)}</span>
               <span className="text-muted text-[9px]">▾</span>
             </button>
             {menu === 'model' && (
-              <div role="menu" className="absolute bottom-full left-0 mb-1 z-30 min-w-full max-h-64 overflow-y-auto rounded-md border border-border bg-panel2 shadow-lg shadow-black/40 py-1">
+              <div role="menu" className="absolute bottom-full left-0 mb-1 z-30 min-w-[10rem] rounded-md border border-border bg-panel2 shadow-lg shadow-black/40 overflow-hidden">
+                <div className="flex border-b border-border" role="group" aria-label="Provider">
+                  {PROVIDERS.map((p) => (
+                    <button
+                      key={p}
+                      type="button"
+                      role="menuitemradio"
+                      aria-checked={p === provider}
+                      onClick={() => pickProvider(p)}
+                      title={`Start on ${providerName(p)}`}
+                      className={`flex-1 flex items-center justify-center gap-1.5 px-2 py-1.5 text-[11px] font-medium whitespace-nowrap ${p === provider ? 'bg-accent text-bg' : 'text-muted hover:text-text hover:bg-panel'}`}
+                    >
+                      <ProviderIcon provider={p} size={12} className={p === provider ? 'text-bg' : 'text-muted'} />
+                      <span>{providerName(p)}</span>
+                    </button>
+                  ))}
+                </div>
+                <div className="max-h-64 overflow-y-auto py-1">
                 {modelsUnavailable ? (
                   <div className="px-3 py-1.5 text-[11px] text-muted italic whitespace-nowrap">Codex CLI not found</div>
                 ) : modelsLoading ? (
@@ -287,6 +321,7 @@ export default function PerfAsk({ dirs, defaultDir, rangeMin, rangeLabel, onSend
                     {m.isDefault && <span className={`text-[10px] ${m.id === model ? 'text-bg/70' : 'text-muted'}`}>default</span>}
                   </button>
                 ))}
+                </div>
               </div>
             )}
           </div>

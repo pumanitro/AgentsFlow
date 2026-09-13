@@ -121,6 +121,27 @@ export function saveModelPick(provider: AgentProvider, id: string): void {
   try { localStorage.setItem(KEYS[provider], id); } catch { /* ignore */ }
 }
 
+// Which provider the composers open on. A conversation is bound to the provider
+// it starts on for its whole life, so this is only the default for the NEXT one
+// — remembered because whoever spawns three Codex chats in a row wants the
+// fourth to start there too.
+const PROVIDER_KEY = 'agentsflow.spawnProvider';
+
+/** The two providers in the order the pickers list them. */
+export const PROVIDERS: AgentProvider[] = ['claude', 'codex'];
+
+export function loadProviderPick(): AgentProvider {
+  try {
+    return localStorage.getItem(PROVIDER_KEY) === 'codex' ? 'codex' : 'claude';
+  } catch {
+    return 'claude';
+  }
+}
+
+export function saveProviderPick(provider: AgentProvider): void {
+  try { localStorage.setItem(PROVIDER_KEY, provider); } catch { /* ignore */ }
+}
+
 /** The label for a pick, falling back to the raw id for a model we don't know. */
 export function modelLabel(provider: AgentProvider, id: string, models: ModelOption[]): string {
   const found = models.find((m) => m.id === id);

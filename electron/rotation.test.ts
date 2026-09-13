@@ -1,7 +1,7 @@
 import { strict as assert } from 'node:assert';
 import { test } from 'node:test';
 import { __resetForTests, __setNowForTests, bindingPercent, decide, getStatus, runOnce, type RotationDeps } from './rotation';
-import type { Account, AgentProvider, RotationPolicy, UsageMeter, UsageResult } from '../shared/types';
+import type { Account, RotationPolicy, UsageMeter, UsageResult } from '../shared/types';
 
 function meter(over: Partial<UsageMeter> = {}): UsageMeter {
   return {
@@ -218,17 +218,11 @@ function harness(opts: {
   unreadableError?: () => UsageResult;
   activeId?: string | null;
   switchImpl?: (id: string) => Promise<Account>;
-  /** Which provider the app is on. Supplying either provider option wires the
-   *  cross-provider deps — a Claude-only host simply omits them. */
-  provider?: AgentProvider;
-  /** Binding percent per provider; null (or a missing key) reads as unreadable. */
-  providerPercent?: Partial<Record<AgentProvider, number | null>>;
 }) {
   const switched: string[] = [];
-  const providerSwitches: AgentProvider[] = [];
   const accounts = Object.keys(opts.percentById).map(account);
   const deps: RotationDeps = {
-    getPolicy: () => ({ enabled: true, threshold: 95, resumeOnLimit: true, crossProvider: false, ...opts.policy }),
+    getPolicy: () => ({ enabled: true, threshold: 95, resumeOnLimit: true, ...opts.policy }),
     getAccounts: () => accounts,
     getActiveId: () => (opts.activeId === undefined ? 'a' : opts.activeId),
     getAccountUsage: async (acct) => {
@@ -245,18 +239,7 @@ function harness(opts: {
     },
     onStatus: () => {},
   };
-  if (opts.provider || opts.providerPercent) {
-    deps.getActiveProvider = () => opts.provider ?? 'claude';
-    deps.getProviderUsage = async (p) => {
-      const percent = opts.providerPercent?.[p];
-      if (percent === undefined || percent === null) {
-        return { ok: false, reason: 'unknown', error: 'no meters' };
-      }
-      return usage([meter({ percent, isActive: true })]);
-    };
-    deps.switchProvider = async (p) => { providerSwitches.push(p); };
-  }
-  return { deps, switched, providerSwitches };
+  return { deps, switched };
 }
 
 test('runOnce: switches to the account with headroom when the active one is full', async () => {
@@ -489,84 +472,4 @@ test('runOnce: reports exhaustion once, not on every tick', async () => {
   assert.deepEqual(switched, []);
   assert.equal(events.length, 1, 'the "nowhere to go" message is not repeated every minute');
   assert.match(events[0] ?? '', /no other account is below 95%/);
-});
-
-// ---------------------------------------------------------------------------
-// Cross-provider rotation
-// ---------------------------------------------------------------------------
-// The pool running dry used to be the end of the line: "no other account is
-// below 95%" and an overnight run stops there. With `crossProvider` on, the
-// other agent is the next place to go — but only on the same terms every other
-// switch gets, because moving every unfinished conversation onto a provider
-// that is also full would be strictly worse than stopping.
-
-test('runOnce: an exhausted Claude pool falls through to Codex when it has headroom', async () => {
-  __resetForTests();
-  const { deps, switched, providerSwitches } = harness({
-    policy: { crossProvider: true },
-    percentById: { a: 99, b: 97 },
-    providerPercent: { codex: 10 },
-  });
-  const outcome = await runOnce(deps);
-  assert.equal(outcome.switched, true);
-  assert.equal((outcome as { provider?: string }).provider, 'codex');
-  assert.deepEqual(providerSwitches, ['codex']);
-  assert.deepEqual(switched, [], 'no account switch — there was no account to switch to');
-  assert.match(getStatus().lastEvent ?? '', /Switched to Codex/);
-});
-
-test('runOnce: Codex is not a destination when it is full too', async () => {
-  // Handing every conversation to an agent that is also at the wall costs the
-  // handover and buys nothing; "everything is full" is the honest answer.
-  __resetForTests();
-  const { deps, switched, providerSwitches } = harness({
-    policy: { crossProvider: true },
-    percentById: { a: 99, b: 97 },
-    providerPercent: { codex: 96 },
-  });
-  const outcome = await runOnce(deps);
-  assert.equal(outcome.switched, false);
-  assert.deepEqual(providerSwitches, []);
-  assert.deepEqual(switched, []);
-  assert.match(getStatus().lastEvent ?? '', /no other account is below 95%/);
-});
-
-test('runOnce: a full Codex goes back to the Claude account with the most headroom', async () => {
-  // Symmetric with the fall-through above, plus the extra step that side needs:
-  // Claude is a POOL, so "is Claude usable" is a question about one of its
-  // accounts, and that account has to become the active one.
-  __resetForTests();
-  const { deps, switched, providerSwitches } = harness({
-    policy: { crossProvider: true },
-    provider: 'codex',
-    percentById: { a: 60, b: 10 },
-    providerPercent: { codex: 97 },
-  });
-  const outcome = await runOnce(deps);
-  assert.equal(outcome.switched, true);
-  assert.equal((outcome as { provider?: string }).provider, 'claude');
-  assert.deepEqual(providerSwitches, ['claude']);
-  assert.deepEqual(switched, ['b'], 'the account with headroom, not whatever was in the slot');
-});
-
-test('runOnce: with crossProvider off the other provider is not considered at all', async () => {
-  // Off is the default, and it has to mean off even when the wiring is present.
-  __resetForTests();
-  const exhausted = harness({
-    percentById: { a: 99, b: 97 },
-    providerPercent: { codex: 3 },
-  });
-  const outcome = await runOnce(exhausted.deps);
-  assert.equal(outcome.switched, false);
-  assert.match(outcome.reason, /no other account is below 95%/);
-  assert.deepEqual(exhausted.providerSwitches, []);
-
-  // And a single-account pool is still "only one account", not a reason to
-  // move the whole app to the other agent.
-  __resetForTests();
-  const alone = harness({ percentById: { a: 99 }, providerPercent: { codex: 3 } });
-  const lonely = await runOnce(alone.deps);
-  assert.equal(lonely.switched, false);
-  assert.match(lonely.reason, /only one account in the pool/);
-  assert.deepEqual(alone.providerSwitches, []);
 });

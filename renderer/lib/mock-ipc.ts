@@ -118,7 +118,6 @@ export function createMockApi(): AgentsFlowApi {
   // Account pool. The browser demo has no keychain and no CLI, so the pool is
   // static — but the *selection* (which provider, which Codex sign-in) is real
   // in-memory state, because every panel's layout depends on it.
-  let mockProvider: AgentProvider = 'claude';
   let mockCodexAccounts: CodexAccount[] = [
     { id: 'codex-1', email: 'demo@example.com', label: 'Personal', plan: 'pro', accountId: 'chatgpt-1', configDir: '/Users/demo/.agentsflow/codex/personal', addedAt: new Date(Date.now() - 6 * 864e5).toISOString() },
     { id: 'codex-2', email: 'work@example.com', label: 'Work', plan: 'business', accountId: 'chatgpt-2', configDir: '/Users/demo/.agentsflow/codex/work', addedAt: new Date(Date.now() - 2 * 864e5).toISOString() },
@@ -132,7 +131,6 @@ export function createMockApi(): AgentsFlowApi {
     ],
     activeId: 'acct-1',
     authIssue: null,
-    activeProvider: mockProvider,
     codexAccounts: mockCodexAccounts,
     activeCodexId: mockActiveCodexId,
   });
@@ -374,16 +372,8 @@ export function createMockApi(): AgentsFlowApi {
     switchAccount: async () => ({ ok: false as const, error: 'Switching needs the desktop app.' }),
     repairAccounts: async () => mockAccounts(),
 
-    // ---- Provider selection + the Codex pool ----
-    // Flipping the provider is the one thing the browser demo can honestly do:
-    // it is a local preference, so the panels and the composer follow it here
-    // exactly as they do in the app. Everything that needs a CLI or a keychain
-    // says so instead of pretending.
-    setActiveProvider: async (provider) => {
-      mockProvider = provider;
-      for (const cb of accountListeners) cb(mockAccounts());
-      return mockAccounts();
-    },
+    // ---- The Codex pool ----
+    // Everything that needs a CLI or a keychain says so instead of pretending.
     addCodexAccount: async () => ({ ok: false as const, error: 'Signing in with Codex needs the desktop app.' }),
     probeCodexAccount: async () => ({ status: 'pending' as const }),
     cancelAddCodexAccount: async () => {},
@@ -405,7 +395,6 @@ export function createMockApi(): AgentsFlowApi {
       { id: 'gpt-5.1-codex-mini', displayName: 'GPT-5.1 Codex mini', isDefault: false },
       { id: 'gpt-5.1', displayName: 'GPT-5.1', isDefault: false },
     ],
-    resumeHandover: async () => ({ ok: false, error: 'Continuing a handed-over chat needs the desktop app.' }),
     getAccountUsage: async (id: string) => ({
       ok: true as const,
       snapshot: {
@@ -429,7 +418,7 @@ export function createMockApi(): AgentsFlowApi {
       return () => { accountListeners.delete(cb); };
     },
     getRotationPolicy: async () => ({
-      policy: { enabled: true, threshold: 95, resumeOnLimit: true, crossProvider: false },
+      policy: { enabled: true, threshold: 95, resumeOnLimit: true },
       status: { lastEvent: null, lastEventAt: null, disabledReason: null },
     }),
     setRotationPolicy: async (policy) => ({
@@ -510,6 +499,34 @@ export function createMockApi(): AgentsFlowApi {
         status: 'idle',
         createdAt: new Date().toISOString(),
         forkFromSessionId: src.sessionId,
+      };
+      state.conversations = [fork, ...state.conversations];
+      insertRefAfter(state, { kind: 'conversation', id }, { kind: 'conversation', id: src.id });
+      save(state);
+      fire(state);
+      fireOrder(state);
+      return { conversationId: id };
+    },
+    forkConversationTo: async (conversationId: string, provider: AgentProvider) => {
+      const src = state.conversations.find((c) => c.id === conversationId);
+      if (!src) throw new Error('conversation not found');
+      const id = uuid();
+      const name = provider === 'codex' ? 'Codex' : 'Claude';
+      const fork: Conversation = {
+        ...src,
+        id,
+        provider,
+        model: undefined,
+        sessionId: provider === 'codex' ? '' : uuid() + '-' + uuid(),
+        daemonShort: '',
+        title: forkTitle(src.title || src.description),
+        description: `forked to ${name} — open the chat to continue`,
+        pinned: true,
+        state: 'idle',
+        status: 'idle',
+        createdAt: new Date().toISOString(),
+        forkFromSessionId: undefined,
+        handover: { from: src.provider === 'codex' ? 'codex' : 'claude', at: new Date().toISOString(), reason: `forked from ${src.provider === 'codex' ? 'Codex' : 'Claude'}` },
       };
       state.conversations = [fork, ...state.conversations];
       insertRefAfter(state, { kind: 'conversation', id }, { kind: 'conversation', id: src.id });

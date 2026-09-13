@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
 import { Conversation } from '../../shared/types';
 import { statusDotClass } from '../lib/status';
+import { useUIState } from '../lib/ui-state';
+import ProviderIcon, { providerName } from './ProviderIcon';
 
 interface Props {
   conv: Conversation;
@@ -42,6 +44,7 @@ interface Props {
 export default function PinnedRow({ conv, onAttach, onSaveTitle, onMarkDone, onAddTask, taskCount = 0, focused, selected, suppressHover, justAdded, onFocus, draggable, hideHandle, bare, hideBottomBorder, onDragStart, onDragEnd, onEditingChange }: Props) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(conv.title);
+  const [showProviderIcon] = useUIState('showProviderIcon');
   const inputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
@@ -68,9 +71,13 @@ export default function PinnedRow({ conv, onAttach, onSaveTitle, onMarkDone, onA
     setDraft(conv.title);
   };
 
-  // A handed-over conversation has no session on this side yet — opening it is
-  // how you start one, so the row must not be parked at "starting…".
-  const ready = !!conv.sessionId || conv.provider === 'codex' || !!conv.handover;
+  // A Claude chat needs its session; a Codex chat has a thread instead, which
+  // its own view creates on the first turn — so it must not be parked at
+  // "starting…" while waiting for one.
+  const ready = !!conv.sessionId || conv.provider === 'codex';
+
+  // Missing on legacy rows means Claude.
+  const provider = conv.provider ?? 'claude';
 
   const handleRowClick = () => {
     // eslint-disable-next-line no-console
@@ -108,6 +115,9 @@ export default function PinnedRow({ conv, onAttach, onSaveTitle, onMarkDone, onA
           className={`inline-block w-2 h-2 rounded-full shrink-0 ${statusDotClass(conv)}`}
           title={conv.state || conv.status || 'idle'}
         />
+        {/* The provider mark belongs to the name, not to the dot: extra air on
+            its left, the normal gap on its right. */}
+        {showProviderIcon && <ProviderIcon provider={provider} size={12} className="text-muted ml-1.5" title={providerName(provider)} />}
         <div className="truncate text-text font-medium">{conv.displayName}</div>
       </div>
 
