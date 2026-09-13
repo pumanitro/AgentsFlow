@@ -150,6 +150,10 @@ export function decide(opts: {
 // The loop
 // ---------------------------------------------------------------------------
 
+// Rotation is a Claude-pool feature and only a Claude-pool feature. Codex is
+// one sign-in rather than a pool, so there is nothing on that side to rotate
+// to; a Codex conversation that hits its wall gets a status line saying so (see
+// `onLimit` in main.ts) and stays where it is.
 export interface RotationDeps {
   getPolicy: () => RotationPolicy;
   getAccounts: () => Account[];
@@ -222,7 +226,9 @@ export async function runOnce(
   if (status.disabledReason) return { switched: false, reason: status.disabledReason };
 
   const accounts = deps.getAccounts();
-  if (accounts.length < 2) return { switched: false, reason: 'only one account in the pool' };
+  if (accounts.length < 2) {
+    return { switched: false, reason: 'only one account in the pool' };
+  }
   if (!urgent && now() - lastSwitchAt < COOLDOWN_MS) {
     return { switched: false, reason: 'switched too recently' };
   }
@@ -300,7 +306,7 @@ export async function runOnce(
       if (urgent && activeId) provenFullAt.set(activeId, now());
       unreadableSince = 0;
       unreadableReason = '';
-      setStatus(deps, { lastEvent: `Switched to ${target.email} — ${decision.reason}`, disabledReason: null });
+      setStatus(deps, { lastEvent: `Switched to ${target.label || target.orgName || target.email} — ${decision.reason}`, disabledReason: null });
       return { switched: true, account: target, reason: decision.reason };
     } catch (err) {
       consecutiveFailures += 1;

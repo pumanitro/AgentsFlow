@@ -141,9 +141,8 @@ function harness(opts: {
     readHit: () => (opts.hit === undefined ? WALLED : opts.hit),
     rotate: async () => {
       rotations.push(Date.now());
-      return opts.switched === false
-        ? { switched: false, reason: 'no other account is below 95%' }
-        : { switched: true, reason: 'switched' };
+      if (opts.switched === false) return { switched: false, reason: 'no other account is below 95%' };
+      return { switched: true, reason: 'switched' };
     },
     nudge: async (c, text) => {
       nudged.push(`${c.id}:${text}`);

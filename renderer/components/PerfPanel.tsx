@@ -466,7 +466,7 @@ function PerfTimeline({ history, rangeMin, cores, verdict }: { history: PerfHist
   const threads: Series[] = points.some((p) => p.threads)
     ? [
       { key: 'total', label: 'All threads', color: PALETTE[6], values: points.map((p) => (p.threads ? p.threads.total : null)) },
-      { key: 'agents', label: 'Under agents', color: PALETTE[4], values: points.map((p) => (p.threads ? p.threads.underAgents : null)) },
+      { key: 'agents', label: 'Under Claude agents', color: PALETTE[4], values: points.map((p) => (p.threads ? p.threads.underAgents : null)) },
     ]
     : [];
   const appCpu: Series[] = [
@@ -594,24 +594,24 @@ function PerfTimeline({ history, rangeMin, cores, verdict }: { history: PerfHist
         <div className={cell}><LineChart title="Machine · load & threads on CPU" unit="" times={times} series={load} reference={{ value: cores, label: `${cores} cores` }} format={pct} /></div>
         {threads.length > 0 && (
           <div className={`${cell} md:col-span-2`}>
-            <LineChart title="Machine · threads alive (all vs under agents)" unit="" times={times} series={threads} height={110} format={(v) => Math.round(v).toLocaleString()} />
+            <LineChart title="Machine · threads alive (all vs under Claude agents)" unit="" times={times} series={threads} height={110} format={(v) => Math.round(v).toLocaleString()} />
           </div>
         )}
         <div className={cell}><LineChart title="This app · CPU" unit="%" times={times} series={appCpu} format={pct} /></div>
         <div className={cell}><LineChart title="This app · event-loop lag" unit="" times={times} series={lag} format={(v) => (v >= 1000 ? `${(v / 1000).toFixed(1)}s` : `${Math.round(v)}ms`)} /></div>
         <div className={cell}>
           {activity.length > 0
-            ? <LineChart title="Agents · CPU by activity (stacked)" unit="%" times={times} series={activity} stacked height={150} format={pct} detail={actionsAt} />
+            ? <LineChart title="Claude agents · CPU by activity (stacked)" unit="%" times={times} series={activity} stacked height={150} format={pct} detail={actionsAt} />
             : <div className="text-[11px] text-muted italic px-1 py-6">No agent census in this range yet.</div>}
         </div>
         <div className={cell}>
           {perAgent.length > 0
-            ? <LineChart title="Agents · CPU per agent" unit="%" times={times} series={perAgent} height={150} format={pct} detail={actionsAt} />
+            ? <LineChart title="Claude agents · CPU per agent" unit="%" times={times} series={perAgent} height={150} format={pct} detail={actionsAt} />
             : <div className="text-[11px] text-muted italic px-1 py-6">No agent census in this range yet.</div>}
         </div>
         <div className={`${cell} md:col-span-2`}>
           {actions.length > 0
-            ? <LineChart title="Agents · CPU by action — the commands behind the spikes (stacked)" unit="%" times={times} series={actions} stacked height={170} format={pct} detail={actionsAt} />
+            ? <LineChart title="Claude agents · CPU by action — the commands behind the spikes (stacked)" unit="%" times={times} series={actions} stacked height={170} format={pct} detail={actionsAt} />
             : <div className="text-[11px] text-muted italic px-1 py-6">No agent actions recorded in this range yet (needs a main-process restart after this update).</div>}
         </div>
         <div className={`${cell} md:col-span-2`}>
@@ -709,7 +709,7 @@ function PerfBody({ snap, uiFrameGapMs, onOpenLog, loading, layout }: { snap: Pe
   const agents = (
     <>
       <SectionLabel>
-        Agents{snap.agents ? ` · ${snap.agents.rows.length} · ${Math.round(snap.agents.totalCpu)}% CPU` : ''}
+        Claude agents{snap.agents ? ` · ${snap.agents.rows.length} · ${Math.round(snap.agents.totalCpu)}% CPU` : ''}
       </SectionLabel>
       {!snap.agents ? (
         <div className="px-3 py-1 text-[11px] text-muted italic">

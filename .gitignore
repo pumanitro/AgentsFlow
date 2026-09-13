@@ -8,3 +8,5 @@ renderer/.next-dev
 *.log
 .DS_Store
 .agentsflow/
+
+SETUP.local.md

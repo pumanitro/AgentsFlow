@@ -1,29 +1,26 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { imageMarker, insertImageMarkers, removeImageMarker } from '../../shared/image-markers';
-import { SlashCommand, TrackedDirectory } from '../../shared/types';
+import { AgentProvider, SlashCommand, TrackedDirectory } from '../../shared/types';
 import { api } from '../lib/ipc';
+import {
+  loadModelPick,
+  loadProviderPick,
+  modelLabel,
+  PROVIDERS,
+  saveModelPick,
+  saveProviderPick,
+  useProviderModels,
+} from '../lib/models';
 import { attachmentPromptLines, imageFilesFromPaste, savePastedImages, type PastedImage } from '../lib/paste-image';
 import ImagePreviewModal from './ImagePreviewModal';
+import ProviderIcon, { providerName } from './ProviderIcon';
 
 interface Props {
   targetDir: TrackedDirectory | null;
+  // `provider:model` on the wire (index.tsx splits it) — both halves are picked
+  // here, because the provider is a property of the chat being started, not of
+  // the app.
   onSend: (prompt: string, attachments: string[], model: string) => Promise<void>;
-}
-
-// Short model aliases passed straight to `claude --model`. The CLI resolves each
-// to the latest model in that family, so these stay correct as models roll over.
-const MODELS = ['fable', 'opus', 'sonnet', 'haiku'] as const;
-type ModelAlias = (typeof MODELS)[number];
-const MODEL_STORAGE_KEY = 'agentsflow.spawnModel';
-
-function loadModel(): ModelAlias {
-  try {
-    const saved = window.localStorage.getItem(MODEL_STORAGE_KEY);
-    if (saved && (MODELS as readonly string[]).includes(saved)) return saved as ModelAlias;
-  } catch {
-    /* localStorage unavailable — fall through to default */
-  }
-  return 'fable';
 }
 
 // Survives navigation to /session and back. Cleared only after a successful send.
@@ -34,41 +31,54 @@ export default function SpawnBar({ targetDir, onSend }: Props) {
   const [busy, setBusy] = useState(false);
   const [images, setImages] = useState<PastedImage[]>(draft.images);
   const [previewing, setPreviewing] = useState<PastedImage | null>(null);
-  // Start from the deterministic default so the first client render matches the
-  // SSR/exported HTML; the persisted pick is loaded after mount (below).
-  const [model, setModel] = useState<ModelAlias>('fable');
-  const [modelMenuOpen, setModelMenuOpen] = useState(false);
-  const modelMenuRef = useRef<HTMLDivElement | null>(null);
-  const skipFirstModelPersist = useRef(true);
+  // The provider a new chat starts on, picked right here: a conversation is
+  // bound to one provider for its whole life, so this is the only moment the
+  // choice is open. Starts on the deterministic default so the first client
+  // render matches the SSR/exported HTML; the persisted pick loads after mount.
+  const [provider, setProvider] = useState<AgentProvider>('claude');
+  const { models, loading: modelsLoading, unavailable: modelsUnavailable } = useProviderModels(provider);
+  const [model, setModel] = useState('');
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const chipsRef = useRef<HTMLDivElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
 
-  // Load the saved model after mount. Reading localStorage during render (the
-  // previous useState initializer) mismatched the server-rendered HTML — which
-  // always emits the 'fable' default — and threw a React hydration error.
-  useEffect(() => { setModel(loadModel()); }, []);
+  useEffect(() => { setProvider(loadProviderPick()); }, []);
 
-  // Remember the picked model across sends and app restarts. Skip the first run
-  // so the mount-time default doesn't clobber a stored value before the hydrate
-  // effect above has swapped it in.
-  useEffect(() => {
-    if (skipFirstModelPersist.current) { skipFirstModelPersist.current = false; return; }
-    try { window.localStorage.setItem(MODEL_STORAGE_KEY, model); } catch { /* ignore */ }
-  }, [model]);
+  // Load the saved model after mount, and again whenever the provider changes —
+  // each provider remembers its own pick, so switching back restores it rather
+  // than sending a Claude alias to Codex. Reading localStorage during render
+  // (the previous useState initializer) mismatched the server-rendered HTML and
+  // threw a React hydration error.
+  useEffect(() => { setModel(loadModelPick(provider)); }, [provider]);
 
-  // Close the model menu on outside-click / Escape.
+  // Switching provider keeps the menu open: the list under the switch is now
+  // the other provider's models, and picking one of them is the usual next
+  // step. Picking a model is what closes it.
+  const pickProvider = (p: AgentProvider) => {
+    setProvider(p);
+    saveProviderPick(p);
+  };
+
+  const pickModel = (id: string) => {
+    setModel(id);
+    saveModelPick(provider, id);
+    setPickerOpen(false);
+  };
+
+  // Close the picker on outside-click / Escape.
   useEffect(() => {
-    if (!modelMenuOpen) return;
+    if (!pickerOpen) return;
     const onDocClick = (e: MouseEvent) => {
-      if (modelMenuRef.current && !modelMenuRef.current.contains(e.target as Node)) setModelMenuOpen(false);
+      if (chipsRef.current && !chipsRef.current.contains(e.target as Node)) setPickerOpen(false);
     };
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setModelMenuOpen(false); };
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setPickerOpen(false); };
     document.addEventListener('mousedown', onDocClick);
     document.addEventListener('keydown', onKey);
     return () => {
       document.removeEventListener('mousedown', onDocClick);
       document.removeEventListener('keydown', onKey);
     };
-  }, [modelMenuOpen]);
+  }, [pickerOpen]);
 
   // --- Slash command / skill autocomplete --------------------------------
   const [slashCommands, setSlashCommands] = useState<SlashCommand[]>([]);
@@ -83,13 +93,14 @@ export default function SpawnBar({ targetDir, onSend }: Props) {
   // (Re)load the available commands whenever the spawn target changes. Project
   // (.claude in the target dir) shadows user-level (~/.claude) entries.
   useEffect(() => {
+    if (provider === 'codex') { setSlashCommands([]); return; }
     let alive = true;
     api()
       .listSlashCommands(targetDir?.path ?? null)
       .then((cmds) => { if (alive) setSlashCommands(cmds); })
       .catch(() => { if (alive) setSlashCommands([]); });
     return () => { alive = false; };
-  }, [targetDir?.path]);
+  }, [targetDir?.path, provider]);
 
   // Find a "/token" at the caret: the word being typed just before the cursor
   // that starts with "/". This works ANYWHERE in the prompt, so a command/skill
@@ -223,7 +234,7 @@ export default function SpawnBar({ targetDir, onSend }: Props) {
     const attachments = validImages.map((i) => i.savedPath);
     setBusy(true);
     try {
-      await onSend(finalPrompt, attachments, model);
+      await onSend(finalPrompt, attachments, `${provider}:${model}`);
       setPrompt('');
       setCaret(0);
       setImages([]);
@@ -327,9 +338,11 @@ export default function SpawnBar({ targetDir, onSend }: Props) {
             ))}
           </div>
         )}
+        {/* One-line textarea, chips and Send are all 38px tall so they sit on
+            one baseline; when the textarea grows the row stays bottom-aligned. */}
         <div className="flex items-end gap-2">
           <div
-            className="shrink-0 flex items-center gap-1.5 px-2 py-1.5 rounded-md bg-panel2 border border-border text-xs max-w-[10rem]"
+            className="shrink-0 h-[38px] flex items-center gap-1.5 px-2 rounded-md bg-panel2 border border-border text-xs max-w-[10rem]"
             title={targetDir ? `Spawn in ${targetDir.displayName}` : 'Select a directory to spawn in'}
           >
             <svg
@@ -343,40 +356,74 @@ export default function SpawnBar({ targetDir, onSend }: Props) {
               {targetDir ? targetDir.displayName : 'select a directory'}
             </span>
           </div>
-          <div className="shrink-0 relative" ref={modelMenuRef}>
+          {/* One chip for both choices: the provider is changed rarely and
+              the model often, so the chip reads "⟨mark⟩ Model" and the menu
+              puts a two-way provider switch above the model list. */}
+          <div className="shrink-0 relative" ref={chipsRef}>
             <button
               type="button"
-              onClick={() => setModelMenuOpen((v) => !v)}
-              title="Model the spawned agent runs on (claude --model)"
+              onClick={() => setPickerOpen((v) => !v)}
+              title={`Model for this chat — ${providerName(provider)}. Switch provider at the top of the menu. A chat stays on the provider it starts on; “⑂ Fork to …” inside a chat is what moves work across.`}
               aria-haspopup="menu"
-              aria-expanded={modelMenuOpen}
-              className="inline-flex items-center gap-1.5 pl-2.5 pr-2 py-1.5 rounded-md bg-panel2 border border-border text-xs font-medium text-text capitalize outline-none cursor-pointer hover:border-accent/60 focus:border-accent"
+              aria-expanded={pickerOpen}
+              className="h-[38px] inline-flex items-center gap-1.5 pl-2.5 pr-2 rounded-md bg-panel2 border border-border text-xs font-medium text-text outline-none cursor-pointer hover:border-accent/60 focus:border-accent"
             >
-              <span>{model}</span>
+              <ProviderIcon provider={provider} size={13} className="text-accent" title={providerName(provider)} />
+              <span>{modelLabel(provider, model, models)}</span>
               <span className="text-muted text-[10px]">▾</span>
             </button>
-            {modelMenuOpen && (
+            {pickerOpen && (
               <div
                 role="menu"
-                className="absolute bottom-full left-0 mb-1 z-30 min-w-full rounded-md border border-border bg-panel2 shadow-lg shadow-black/40 py-1"
+                className="absolute bottom-full left-0 mb-1 z-30 min-w-[11rem] rounded-md border border-border bg-panel2 shadow-lg shadow-black/40 overflow-hidden"
               >
-                {MODELS.map((m) => {
-                  const active = m === model;
-                  return (
-                    <button
-                      key={m}
-                      type="button"
-                      role="menuitem"
-                      onClick={() => { setModel(m); setModelMenuOpen(false); }}
-                      className={`w-full text-left pl-2 pr-4 py-1.5 text-xs capitalize flex items-center gap-1.5 ${
-                        active ? 'bg-accent text-bg' : 'text-text hover:bg-panel'
-                      }`}
-                    >
-                      <span className="w-3 shrink-0 text-center">{active ? '✓' : ''}</span>
-                      <span>{m}</span>
-                    </button>
-                  );
-                })}
+                {/* A segmented switch rather than two more rows: one click to
+                    move, and the list below turns into that provider's models. */}
+                <div className="flex border-b border-border" role="group" aria-label="Provider">
+                  {PROVIDERS.map((p) => {
+                    const active = p === provider;
+                    return (
+                      <button
+                        key={p}
+                        type="button"
+                        role="menuitemradio"
+                        aria-checked={active}
+                        onClick={() => pickProvider(p)}
+                        title={`Start new chats on ${providerName(p)}`}
+                        className={`flex-1 flex items-center justify-center gap-1.5 px-2 py-1.5 text-[11px] font-medium whitespace-nowrap ${
+                          active ? 'bg-accent text-bg' : 'text-muted hover:text-text hover:bg-panel'
+                        }`}
+                      >
+                        <ProviderIcon provider={p} size={12} className={active ? 'text-bg' : 'text-muted'} />
+                        <span>{providerName(p)}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+                <div className="max-h-64 overflow-y-auto py-1">
+                  {modelsUnavailable ? (
+                    <div className="px-3 py-1.5 text-xs text-muted italic whitespace-nowrap">Codex CLI not found</div>
+                  ) : modelsLoading ? (
+                    <div className="px-3 py-1.5 text-xs text-muted italic whitespace-nowrap">Loading models…</div>
+                  ) : models.map((m) => {
+                    const active = m.id === model;
+                    return (
+                      <button
+                        key={m.id}
+                        type="button"
+                        role="menuitem"
+                        onClick={() => pickModel(m.id)}
+                        className={`w-full text-left pl-2 pr-4 py-1.5 text-xs flex items-center gap-1.5 whitespace-nowrap ${
+                          active ? 'bg-accent text-bg' : 'text-text hover:bg-panel'
+                        }`}
+                      >
+                        <span className="w-3 shrink-0 text-center">{active ? '✓' : ''}</span>
+                        <span>{m.label}</span>
+                        {m.isDefault && <span className={`text-[10px] ${active ? 'text-bg/70' : 'text-muted'}`}>default</span>}
+                      </button>
+                    );
+                  })}
+                </div>
               </div>
             )}
           </div>
@@ -422,7 +469,7 @@ export default function SpawnBar({ targetDir, onSend }: Props) {
           <button
             onClick={submit}
             disabled={disabled}
-            className="shrink-0 px-4 py-2 rounded-md bg-accent text-bg font-medium text-sm disabled:opacity-40 disabled:cursor-not-allowed hover:bg-accent2"
+            className="shrink-0 h-[38px] px-4 rounded-md bg-accent text-bg font-medium text-sm disabled:opacity-40 disabled:cursor-not-allowed hover:bg-accent2"
           >
             {busy ? 'Spawning…' : 'Send'}
           </button>

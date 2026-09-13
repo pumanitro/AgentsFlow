@@ -1,4 +1,4 @@
-import type { AgentsFlowApi, Conversation, PinnedDivider, PinnedItemRef, PinnedTodo, TrackedDirectory, SpawnRequest, GitStatusResult, FileEntry, SearchOptions, SearchResult, SearchMatchLine, WorktreeInfo } from '../../shared/types';
+import type { AccountsSnapshot, AgentProvider, AgentsFlowApi, CodexAccount, Conversation, PinnedDivider, PinnedItemRef, PinnedTodo, TrackedDirectory, SpawnRequest, GitStatusResult, FileEntry, SearchOptions, SearchResult, SearchMatchLine, WorktreeInfo } from '../../shared/types';
 import { forkTitle } from '../../shared/fork-title';
 
 const STORE_KEY = 'agentsflow:mock:v3';
@@ -114,6 +114,26 @@ function insertRefAtEndOfFirstSection(state: MockShape, ref: PinnedItemRef) {
 
 export function createMockApi(): AgentsFlowApi {
   let state = load();
+
+  // Account pool. The browser demo has no keychain and no CLI, so the pool is
+  // static — but the *selection* (which provider, which Codex sign-in) is real
+  // in-memory state, because every panel's layout depends on it.
+  let mockCodexAccounts: CodexAccount[] = [
+    { id: 'codex-1', email: 'demo@example.com', label: 'Personal', plan: 'pro', accountId: 'chatgpt-1', configDir: '/Users/demo/.agentsflow/codex/personal', addedAt: new Date(Date.now() - 6 * 864e5).toISOString() },
+    { id: 'codex-2', email: 'work@example.com', label: 'Work', plan: 'business', accountId: 'chatgpt-2', configDir: '/Users/demo/.agentsflow/codex/work', addedAt: new Date(Date.now() - 2 * 864e5).toISOString() },
+  ];
+  let mockActiveCodexId: string | null = 'codex-1';
+  const accountListeners = new Set<(snapshot: AccountsSnapshot) => void>();
+  const mockAccounts = (): AccountsSnapshot => ({
+    accounts: [
+      { id: 'acct-1', email: 'same@example.com', label: 'Personal', orgName: 'Personal', orgId: 'personal', configDir: '/Users/demo/.agentsflow/accounts/first-a1b2c3', accountUuid: 'uuid-1', subscriptionType: 'max', addedAt: new Date(Date.now() - 12 * 864e5).toISOString() },
+      { id: 'acct-2', email: 'same@example.com', label: 'Work', orgName: 'Example Company', orgId: 'work', configDir: '/Users/demo/.agentsflow/accounts/second-d4e5f6', accountUuid: 'uuid-2', subscriptionType: 'max', addedAt: new Date(Date.now() - 3 * 864e5).toISOString() },
+    ],
+    activeId: 'acct-1',
+    authIssue: null,
+    codexAccounts: mockCodexAccounts,
+    activeCodexId: mockActiveCodexId,
+  });
 
   // Fake worktree set so the Changes-view worktree section renders in the
   // browser demo. Mutable so `removeWorktree` visibly drops a row.
@@ -343,19 +363,38 @@ export function createMockApi(): AgentsFlowApi {
     // Account pool. The browser demo has no keychain, so this is a static pool
     // that exercises the layout (active marker, per-account meters) without
     // pretending a switch is possible.
-    listAccounts: async () => ({
-      accounts: [
-        { id: 'acct-1', email: 'first@gmail.com', configDir: '/Users/demo/.agentsflow/accounts/first-a1b2c3', accountUuid: 'uuid-1', subscriptionType: 'max', addedAt: new Date(Date.now() - 12 * 864e5).toISOString() },
-        { id: 'acct-2', email: 'second@gmail.com', configDir: '/Users/demo/.agentsflow/accounts/second-d4e5f6', accountUuid: 'uuid-2', subscriptionType: 'max', addedAt: new Date(Date.now() - 3 * 864e5).toISOString() },
-      ],
-      activeId: 'acct-1',
-    }),
+    getCodexAccount: async () => ({ signedIn: true, email: 'demo@example.com', plan: 'pro', authType: 'chatgpt', usage: { ok: true, snapshot: { meters: [{ key: 'codex:primary', label: 'Codex · 5 hours', group: 'session', percent: 18, severity: 'normal', resetsAt: null, isActive: true }], plan: 'pro', fetchedAt: new Date().toISOString() } } }),
+    listAccounts: async () => mockAccounts(),
     addAccount: async () => ({ ok: false as const, error: 'Signing in needs the desktop app.' }),
     probeAccount: async () => ({ status: 'pending' as const }),
     cancelAddAccount: async () => {},
     removeAccount: async () => {},
     switchAccount: async () => ({ ok: false as const, error: 'Switching needs the desktop app.' }),
-    repairAccounts: async () => ({ accounts: [], activeId: null, authIssue: null }),
+    repairAccounts: async () => mockAccounts(),
+
+    // ---- The Codex pool ----
+    // Everything that needs a CLI or a keychain says so instead of pretending.
+    addCodexAccount: async () => ({ ok: false as const, error: 'Signing in with Codex needs the desktop app.' }),
+    probeCodexAccount: async () => ({ status: 'pending' as const }),
+    cancelAddCodexAccount: async () => {},
+    removeCodexAccount: async (id: string) => {
+      mockCodexAccounts = mockCodexAccounts.filter((a) => a.id !== id);
+      if (mockActiveCodexId === id) mockActiveCodexId = mockCodexAccounts[0]?.id ?? null;
+      for (const cb of accountListeners) cb(mockAccounts());
+    },
+    switchCodexAccount: async (id: string) => {
+      const account = mockCodexAccounts.find((a) => a.id === id);
+      if (!account) return { ok: false as const, error: 'That Codex sign-in is no longer saved.' };
+      mockActiveCodexId = id;
+      for (const cb of accountListeners) cb(mockAccounts());
+      return { ok: true as const, account };
+    },
+    saveCurrentCodexLogin: async () => ({ ok: false as const, error: 'Saving a Codex login needs the desktop app.' }),
+    listCodexModels: async () => [
+      { id: 'gpt-5.1-codex', displayName: 'GPT-5.1 Codex', isDefault: true, description: 'The default Codex model.' },
+      { id: 'gpt-5.1-codex-mini', displayName: 'GPT-5.1 Codex mini', isDefault: false },
+      { id: 'gpt-5.1', displayName: 'GPT-5.1', isDefault: false },
+    ],
     getAccountUsage: async (id: string) => ({
       ok: true as const,
       snapshot: {
@@ -374,7 +413,10 @@ export function createMockApi(): AgentsFlowApi {
         ],
       },
     }),
-    onAccountsUpdated: () => () => undefined,
+    onAccountsUpdated: (cb) => {
+      accountListeners.add(cb);
+      return () => { accountListeners.delete(cb); };
+    },
     getRotationPolicy: async () => ({
       policy: { enabled: true, threshold: 95, resumeOnLimit: true },
       status: { lastEvent: null, lastEventAt: null, disabledReason: null },
@@ -386,6 +428,10 @@ export function createMockApi(): AgentsFlowApi {
     onRotationStatus: () => () => undefined,
 
     listConversations: async () => state.conversations,
+    codexSnapshot: async () => { throw new Error('Codex requires the desktop app'); },
+    codexSend: async () => { throw new Error('Codex requires the desktop app'); },
+    codexReply: async () => {},
+    onCodexUpdated: () => () => {},
     spawnAgent: async (req: SpawnRequest) => {
       const dir = state.directories.find((d) => d.id === req.directoryId);
       if (!dir) throw new Error('directory not found');
@@ -453,6 +499,34 @@ export function createMockApi(): AgentsFlowApi {
         status: 'idle',
         createdAt: new Date().toISOString(),
         forkFromSessionId: src.sessionId,
+      };
+      state.conversations = [fork, ...state.conversations];
+      insertRefAfter(state, { kind: 'conversation', id }, { kind: 'conversation', id: src.id });
+      save(state);
+      fire(state);
+      fireOrder(state);
+      return { conversationId: id };
+    },
+    forkConversationTo: async (conversationId: string, provider: AgentProvider) => {
+      const src = state.conversations.find((c) => c.id === conversationId);
+      if (!src) throw new Error('conversation not found');
+      const id = uuid();
+      const name = provider === 'codex' ? 'Codex' : 'Claude';
+      const fork: Conversation = {
+        ...src,
+        id,
+        provider,
+        model: undefined,
+        sessionId: provider === 'codex' ? '' : uuid() + '-' + uuid(),
+        daemonShort: '',
+        title: forkTitle(src.title || src.description),
+        description: `forked to ${name} — open the chat to continue`,
+        pinned: true,
+        state: 'idle',
+        status: 'idle',
+        createdAt: new Date().toISOString(),
+        forkFromSessionId: undefined,
+        handover: { from: src.provider === 'codex' ? 'codex' : 'claude', at: new Date().toISOString(), reason: `forked from ${src.provider === 'codex' ? 'Codex' : 'Claude'}` },
       };
       state.conversations = [fork, ...state.conversations];
       insertRefAfter(state, { kind: 'conversation', id }, { kind: 'conversation', id: src.id });

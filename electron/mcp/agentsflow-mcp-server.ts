@@ -165,6 +165,7 @@ function resolveDirectory(token: string, dirs: TrackedDirectory[]): TrackedDirec
 }
 
 interface DelegateArgs {
+  provider?: unknown;
   directory?: unknown;
   goal?: unknown;
   deliverable?: unknown;
@@ -221,10 +222,12 @@ function runBridgeDelegate(
   goal: string,
   deliverable: string,
   timeoutMs: number,
+  provider?: 'claude' | 'codex',
 ): Promise<Record<string, unknown> | null> {
   return bridgeRequest(
     {
       type: 'delegate',
+      provider,
       id: `${Date.now()}-${process.pid}`,
       rootConversationId: ROOT_CONVERSATION_ID,
       directory,
@@ -310,6 +313,8 @@ function writeArtifact(envelope: Record<string, unknown>, dirName: string): stri
 }
 
 async function toolDelegate(rawArgs: DelegateArgs): Promise<Record<string, unknown>> {
+  if (rawArgs.provider !== undefined && rawArgs.provider !== 'claude' && rawArgs.provider !== 'codex') return textContent('Unknown agent provider', true);
+  const provider = rawArgs.provider as 'claude' | 'codex' | undefined;
   const directoryToken = typeof rawArgs.directory === 'string' ? rawArgs.directory : '';
   const goal = typeof rawArgs.goal === 'string' ? rawArgs.goal : '';
   const deliverable = typeof rawArgs.deliverable === 'string' ? rawArgs.deliverable : '';
@@ -334,20 +339,19 @@ async function toolDelegate(rawArgs: DelegateArgs): Promise<Record<string, unkno
   // PEERSFLOW_BRIDGE_SOCK, so headless/test runs skip straight to the fallback.
   if (BRIDGE_SOCK) {
     log(`delegating "${directoryToken}" via bridge — timeout ${timeoutMs}ms`);
-    const envelope = await runBridgeDelegate(directoryToken, goal, deliverable, timeoutMs);
+    const envelope = await runBridgeDelegate(directoryToken, goal, deliverable, timeoutMs, provider);
     if (envelope) {
       const artifactPath = writeArtifact(envelope, String(envelope.directory || directoryToken));
       // `watchable: true` — this ran as a tracked app session with a sub-peer row.
       return textContent(JSON.stringify({ ...envelope, watchable: true, artifactPath }, null, 2), envelope.status === 'failure');
     }
     // BRIDGE_SOCK was set (we're inside the app) but the bridge was unreachable.
-    // We still run the work headless so it gets done, but flag it as DEGRADED so
-    // the calling agent surfaces that it was not watchable and produced no
-    // sub-peer row — instead of the failure looking identical to a normal run.
-    log('bridge unavailable/failed — falling back to headless claude -p (DEGRADED)');
-    return runInlineDelegate(directoryToken, goal, deliverable, timeoutMs, true);
+    // It may have accepted the work before the connection failed. Do not launch
+    // a duplicate task or silently substitute a provider.
+    return textContent(JSON.stringify({ status: 'failure', error: 'Peers Flow bridge is unavailable. Reopen the app before retrying; no second agent was launched.' }), true);
   }
 
+  if (provider === 'codex') return textContent('Codex delegation requires the running Peers Flow app.', true);
   return runInlineDelegate(directoryToken, goal, deliverable, timeoutMs, false);
 }
 

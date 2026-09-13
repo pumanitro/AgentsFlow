@@ -1,6 +1,8 @@
 import { useEffect } from 'react';
 import { Conversation, TrackedDirectory } from '../../shared/types';
 import { statusDotClass } from '../lib/status';
+import { useUIState } from '../lib/ui-state';
+import ProviderIcon, { providerName } from './ProviderIcon';
 
 interface Props {
   dir: TrackedDirectory;
@@ -20,6 +22,7 @@ function relTime(iso: string): string {
 }
 
 export default function HistoryModal({ dir, conversations, onClose, onAttach, onTogglePin, onRemove }: Props) {
+  const [showProviderIcon] = useUIState('showProviderIcon');
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
     window.addEventListener('keydown', onKey);
@@ -60,7 +63,19 @@ export default function HistoryModal({ dir, conversations, onClose, onAttach, on
                 key={c.id}
                 className="group grid grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-3 px-5 py-3 border-b border-border hover:bg-panel2"
               >
-                <span className={`inline-block w-2 h-2 rounded-full ${statusDotClass(c)}`} />
+                {/* Dot then provider mark, the same pair and the same order as
+                    a pinned row — a chat is recognised by both everywhere. */}
+                <span className="flex items-center gap-2">
+                  <span className={`inline-block w-2 h-2 rounded-full ${statusDotClass(c)}`} />
+                  {showProviderIcon && (
+                    <ProviderIcon
+                      provider={c.provider ?? 'claude'}
+                      size={12}
+                      className="text-muted ml-1.5"
+                      title={providerName(c.provider ?? 'claude')}
+                    />
+                  )}
+                </span>
                 <div className="min-w-0">
                   <div className="flex items-baseline gap-2">
                     <div className="truncate text-sm font-medium text-text">{c.title || <span className="text-muted italic">untitled</span>}</div>
@@ -89,9 +104,9 @@ export default function HistoryModal({ dir, conversations, onClose, onAttach, on
                   </button>
                   <button
                     onClick={() => onAttach(c)}
-                    disabled={!c.sessionId}
+                    disabled={!c.sessionId && c.provider !== 'codex'}
                     className="text-xs px-2 py-1 rounded text-muted hover:text-text hover:bg-panel disabled:opacity-40 disabled:cursor-not-allowed"
-                    title={c.sessionId ? 'Attach terminal' : 'Session is still starting…'}
+                    title={c.sessionId || c.provider === 'codex' ? 'Open conversation' : 'Session is still starting…'}
                   >open →</button>
                   <button
                     onClick={() => onRemove(c)}

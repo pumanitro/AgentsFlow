@@ -20,6 +20,7 @@ import * as fs from 'fs';
 import type { BridgeHealth } from '../shared/types';
 
 export interface DelegateRequest {
+  provider?: 'claude' | 'codex';
   type?: 'delegate';
   id: string;
   rootConversationId: string;

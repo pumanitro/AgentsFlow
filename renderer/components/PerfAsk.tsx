@@ -1,9 +1,19 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { imageMarker, insertImageMarkers, removeImageMarker } from '../../shared/image-markers';
-import type { PerfReportResult, TrackedDirectory } from '../../shared/types';
+import type { AgentProvider, PerfReportResult, TrackedDirectory } from '../../shared/types';
 import { api } from '../lib/ipc';
+import {
+  loadModelPick,
+  loadProviderPick,
+  modelLabel,
+  PROVIDERS,
+  saveModelPick,
+  saveProviderPick,
+  useProviderModels,
+} from '../lib/models';
 import { attachmentPromptLines, imageFilesFromPaste, savePastedImages, type PastedImage } from '../lib/paste-image';
 import ImagePreviewModal from './ImagePreviewModal';
+import ProviderIcon, { providerName } from './ProviderIcon';
 
 /**
  * "Ask about this" — the composer under the performance charts.
@@ -15,9 +25,6 @@ import ImagePreviewModal from './ImagePreviewModal';
  * of them.
  */
 
-const MODELS = ['opus', 'fable', 'sonnet', 'haiku'] as const;
-type ModelAlias = (typeof MODELS)[number];
-const MODEL_KEY = 'agentsflow:perf:askModel';
 const DIR_KEY = 'agentsflow:perf:askDir';
 
 // Kept outside the component so a closed-and-reopened monitor doesn't lose a
@@ -61,7 +68,12 @@ export default function PerfAsk({ dirs, defaultDir, rangeMin, rangeLabel, onSend
   const [previewing, setPreviewing] = useState<PastedImage | null>(null);
   const [busy, setBusy] = useState<null | 'report' | 'spawn'>(null);
   const [error, setError] = useState<string | null>(null);
-  const [model, setModel] = useState<ModelAlias>('opus');
+  // Same rule as the composer: the session this starts is bound to whichever
+  // provider is picked here, and both picks are the composer's — asking about a
+  // spike should not need a separate set of choices.
+  const [provider, setProvider] = useState<AgentProvider>('claude');
+  const { models, loading: modelsLoading, unavailable: modelsUnavailable } = useProviderModels(provider);
+  const [model, setModel] = useState('');
   const [dirId, setDirId] = useState<string | null>(defaultDir?.id ?? null);
   const [menu, setMenu] = useState<null | 'model' | 'dir'>(null);
   const menuRef = useRef<HTMLDivElement | null>(null);
@@ -71,12 +83,15 @@ export default function PerfAsk({ dirs, defaultDir, rangeMin, rangeLabel, onSend
   // exported HTML's hydration — same reason as SpawnBar).
   useEffect(() => {
     try {
-      const m = localStorage.getItem(MODEL_KEY);
-      if (m && (MODELS as readonly string[]).includes(m)) setModel(m as ModelAlias);
       const d = localStorage.getItem(DIR_KEY);
       if (d) setDirId(d);
     } catch { /* ignore */ }
+    setProvider(loadProviderPick());
   }, []);
+
+  // The model pick is shared with the composer, per provider — asking about a
+  // spike should not need a second choice of model.
+  useEffect(() => { setModel(loadModelPick(provider)); }, [provider]);
 
   useEffect(() => { draft.prompt = prompt; }, [prompt]);
   useEffect(() => { draft.images = images; }, [images]);
@@ -104,10 +119,16 @@ export default function PerfAsk({ dirs, defaultDir, rangeMin, rangeLabel, onSend
     el.style.height = Math.min(el.scrollHeight, 120) + 'px';
   }, [prompt]);
 
-  const pickModel = (m: ModelAlias) => {
-    setModel(m);
+  // The provider switch sits inside the model menu and leaves it open: the
+  // list has just become the other provider's models.
+  const pickProvider = (p: AgentProvider) => {
+    setProvider(p);
+    saveProviderPick(p);
+  };
+  const pickModel = (id: string) => {
+    setModel(id);
     setMenu(null);
-    try { localStorage.setItem(MODEL_KEY, m); } catch { /* ignore */ }
+    saveModelPick(provider, id);
   };
   const pickDir = (d: TrackedDirectory) => {
     setDirId(d.id);
@@ -164,7 +185,7 @@ export default function PerfAsk({ dirs, defaultDir, rangeMin, rangeLabel, onSend
       await onSend(
         buildPrompt(prompt, report, rangeLabel, imagePaths),
         [report.markdownPath, report.jsonPath, ...imagePaths],
-        model,
+        `${provider}:${model}`,
         target.id,
       );
       setPrompt('');
@@ -248,32 +269,59 @@ export default function PerfAsk({ dirs, defaultDir, rangeMin, rangeLabel, onSend
               </div>
             )}
           </div>
+          {/* One chip for provider + model, the same shape as the home
+              composer: "⟨mark⟩ Model", with the provider switch at the top of
+              the menu. The chat this starts is bound for life to that provider. */}
           <div className="shrink-0 relative">
             <button
               type="button"
               onClick={() => setMenu(menu === 'model' ? null : 'model')}
-              className={`${btn} capitalize font-medium`}
-              title="Model the analysis session runs on (claude --model)"
+              className={`${btn} font-medium`}
+              title={`Model for this analysis — ${providerName(provider)}. Switch provider at the top of the menu.`}
               aria-haspopup="menu"
               aria-expanded={menu === 'model'}
             >
-              <span>{model}</span>
+              <ProviderIcon provider={provider} size={12} className="text-accent" title={providerName(provider)} />
+              <span>{modelLabel(provider, model, models)}</span>
               <span className="text-muted text-[9px]">▾</span>
             </button>
             {menu === 'model' && (
-              <div role="menu" className="absolute bottom-full left-0 mb-1 z-30 min-w-full rounded-md border border-border bg-panel2 shadow-lg shadow-black/40 py-1">
-                {MODELS.map((m) => (
+              <div role="menu" className="absolute bottom-full left-0 mb-1 z-30 min-w-[10rem] rounded-md border border-border bg-panel2 shadow-lg shadow-black/40 overflow-hidden">
+                <div className="flex border-b border-border" role="group" aria-label="Provider">
+                  {PROVIDERS.map((p) => (
+                    <button
+                      key={p}
+                      type="button"
+                      role="menuitemradio"
+                      aria-checked={p === provider}
+                      onClick={() => pickProvider(p)}
+                      title={`Start on ${providerName(p)}`}
+                      className={`flex-1 flex items-center justify-center gap-1.5 px-2 py-1.5 text-[11px] font-medium whitespace-nowrap ${p === provider ? 'bg-accent text-bg' : 'text-muted hover:text-text hover:bg-panel'}`}
+                    >
+                      <ProviderIcon provider={p} size={12} className={p === provider ? 'text-bg' : 'text-muted'} />
+                      <span>{providerName(p)}</span>
+                    </button>
+                  ))}
+                </div>
+                <div className="max-h-64 overflow-y-auto py-1">
+                {modelsUnavailable ? (
+                  <div className="px-3 py-1.5 text-[11px] text-muted italic whitespace-nowrap">Codex CLI not found</div>
+                ) : modelsLoading ? (
+                  <div className="px-3 py-1.5 text-[11px] text-muted italic whitespace-nowrap">Loading models…</div>
+                ) : models.map((m) => (
                   <button
-                    key={m}
+                    key={m.id}
                     type="button"
                     role="menuitem"
-                    onClick={() => pickModel(m)}
-                    className={`w-full text-left pl-2 pr-4 py-1.5 text-[11px] capitalize flex items-center gap-1.5 ${m === model ? 'bg-accent text-bg' : 'text-text hover:bg-panel'}`}
+                    onClick={() => pickModel(m.id)}
+                    className={`w-full text-left pl-2 pr-4 py-1.5 text-[11px] flex items-center gap-1.5 whitespace-nowrap ${m.id === model ? 'bg-accent text-bg' : 'text-text hover:bg-panel'}`}
                   >
-                    <span className="w-3 shrink-0 text-center">{m === model ? '✓' : ''}</span>
-                    <span>{m}</span>
+                    <span className="w-3 shrink-0 text-center">{m.id === model ? '✓' : ''}</span>
+                    <span>{m.label}</span>
+                    {m.isDefault && <span className={`text-[10px] ${m.id === model ? 'text-bg/70' : 'text-muted'}`}>default</span>}
                   </button>
                 ))}
+                </div>
               </div>
             )}
           </div>
@@ -300,7 +348,7 @@ export default function PerfAsk({ dirs, defaultDir, rangeMin, rangeLabel, onSend
           </button>
         </div>
         <div className="text-[10px] text-subtle leading-snug">
-          Starts a Claude Code session in {target ? <span className="text-muted">{target.displayName}</span> : 'a tracked directory'} with the last {rangeLabel} of samples
+          Starts a {provider === 'codex' ? 'Codex' : 'Claude Code'} session in {target ? <span className="text-muted">{target.displayName}</span> : 'a tracked directory'} with the last {rangeLabel} of samples
           {' '}+ the live snapshot attached as a report it can read. Empty question ⇒ it explains what it sees.
         </div>
       </div>

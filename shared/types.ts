@@ -1,3 +1,41 @@
+export type AgentProvider = 'claude' | 'codex';
+
+// Where a conversation forked to the other provider came from. A conversation
+// belongs to one provider for its whole life; the only way across is "Fork to
+// Codex" / "Fork to Claude", which starts a NEW conversation on the other side
+// seeded with a condensed transcript of this one. This record names that
+// source so the seed can be built when the new side first speaks.
+export interface ConversationHandover {
+  from: AgentProvider;
+  // The Claude session (from === 'claude') or Codex thread (from === 'codex')
+  // whose transcript is condensed into the first message on the new side.
+  sessionId?: string;
+  threadId?: string;
+  directoryPath?: string;
+  at: string;
+  reason?: string;
+}
+
+// One saved Codex (ChatGPT) sign-in. `configDir` is the vault holding its
+// auth.json — switching copies it into the Codex home the CLI reads.
+export interface CodexAccount {
+  id: string;
+  email: string;
+  label?: string;
+  plan?: string;
+  accountId?: string;
+  configDir: string;
+  addedAt: string;
+}
+
+// A model the Codex CLI offers, as reported by `model/list`.
+export interface CodexModel {
+  id: string;
+  displayName: string;
+  isDefault: boolean;
+  description?: string;
+}
+
 export interface TrackedDirectory {
   id: string;
   path: string;
@@ -7,6 +45,12 @@ export interface TrackedDirectory {
 
 // test
 export interface Conversation {
+  provider?: AgentProvider; // Missing on legacy records means Claude.
+  model?: string;
+  lastResult?: string;
+  // Set on a conversation forked from the other provider until its first turn
+  // has been sent with the condensed transcript of the source; then this clears.
+  handover?: ConversationHandover;
   id: string;
   sessionId: string;
   daemonShort: string;
@@ -106,6 +150,7 @@ export interface SlashCommand {
 }
 
 export interface SpawnRequest {
+  provider?: AgentProvider;
   directoryId: string;
   prompt: string;
   attachments?: string[];
@@ -159,8 +204,8 @@ export interface McpPeerSummary {
 /**
  * Liveness of the delegation bridge — the unix-domain socket the MCP server
  * calls back on to spawn *tracked, watchable* peer sessions. When it is down,
- * `delegate` silently degrades to a headless `claude -p` (no sub-peer row, not
- * watchable), so the UI surfaces this so a dead bridge is never invisible.
+ * `delegate` returns an explicit failure. The UI surfaces a dead bridge instead
+ * of silently launching duplicate, untracked work.
  */
 export interface BridgeHealth {
   socketPath: string;
@@ -470,10 +515,13 @@ export interface Account {
   // included. Also its label in the UI and the value verified against
   // `claude auth status` after login.
   email: string;
+  // Optional friendly name; memberships sharing an email remain distinct.
+  label?: string;
+  orgName?: string;
   // Vault path passed as CLAUDE_CONFIG_DIR. Permanent — see above.
   configDir: string;
   // Identity as reported by the CLI after a successful login. `accountUuid` is
-  // what makes the duplicate guard reliable (two labels, one real account).
+  // paired with orgId distinguishes personal and managed memberships.
   accountUuid?: string;
   orgId?: string;
   // 'max' | 'pro' | … straight from `claude auth status --json`.
@@ -484,6 +532,15 @@ export interface Account {
   // short of a fresh login brings it back. Runtime-only: filled into snapshots
   // by the main process, never persisted.
   needsLogin?: string;
+}
+
+export interface CodexAccountStatus {
+  signedIn: boolean;
+  email?: string;
+  plan?: string;
+  authType?: string;
+  error?: string;
+  usage: UsageResult;
 }
 
 export interface AccountsSnapshot {
@@ -497,7 +554,19 @@ export interface AccountsSnapshot {
   // silently on a timer; this is reserved for "there is nothing left to restore",
   // which is the one case that really does need the user.
   authIssue?: string | null;
+  // Saved Codex sign-ins, and which of them is the CLI's current login (null
+  // when the current login is not saved in the pool, or Codex is signed out).
+  codexAccounts: CodexAccount[];
+  activeCodexId: string | null;
 }
+
+export type ProbeCodexResult =
+  | { status: 'pending' }
+  | { status: 'ok'; account: CodexAccount }
+  | { status: 'duplicate'; error: string };
+export type SwitchCodexResult =
+  | { ok: true; account: CodexAccount }
+  | { ok: false; error: string };
 
 // Started an add: the caller opens a terminal on `shellId` (the login command is
 // already queued to run in it) and then polls `probeAccount(pendingId)`.
@@ -579,10 +648,11 @@ export interface AgentsFlowApi {
   // The switchable pool of Anthropic accounts. Switching swaps which account's
   // credentials sit in the keychain slot Claude Code reads — no browser, no
   // login: sessions already running pick it up on their next keychain read.
+  getCodexAccount: (force?: boolean) => Promise<CodexAccountStatus>;
   listAccounts: () => Promise<AccountsSnapshot>;
   // Starts an add for an email address. Rejects malformed addresses and ones
   // already in the pool without touching anything.
-  addAccount: (email: string) => Promise<AddAccountResult>;
+  addAccount: (email: string, label?: string) => Promise<AddAccountResult>;
   // Polled while the login terminal is open; finalises the account once the
   // browser flow lands, or tears the vault down if it authorised the wrong one.
   probeAccount: (pendingId: string) => Promise<ProbeAccountResult>;
@@ -598,6 +668,18 @@ export interface AgentsFlowApi {
   getAccountUsage: (id: string, force?: boolean) => Promise<UsageResult>;
   onAccountsUpdated: (cb: (snapshot: AccountsSnapshot) => void) => () => void;
 
+  // ---- The Codex pool ----
+  // Adding runs `codex login` in a terminal with an isolated CODEX_HOME.
+  addCodexAccount: (label?: string) => Promise<AddAccountResult>;
+  probeCodexAccount: (pendingId: string) => Promise<ProbeCodexResult>;
+  cancelAddCodexAccount: (pendingId: string) => Promise<void>;
+  removeCodexAccount: (id: string) => Promise<void>;
+  switchCodexAccount: (id: string) => Promise<SwitchCodexResult>;
+  // Copies the CLI's current login into the pool without another browser flow.
+  saveCurrentCodexLogin: (label?: string) => Promise<SwitchCodexResult>;
+  // The models the Codex CLI offers right now (empty when it cannot be asked).
+  listCodexModels: () => Promise<CodexModel[]>;
+
   // Automatic rotation at a usage threshold — what makes an unattended
   // overnight run possible without anyone clicking a switch.
   getRotationPolicy: () => Promise<{ policy: RotationPolicy; status: RotationStatus }>;
@@ -605,11 +687,20 @@ export interface AgentsFlowApi {
   onRotationStatus: (cb: (status: RotationStatus) => void) => () => void;
 
   listConversations: () => Promise<Conversation[]>;
+  codexSnapshot: (id: string, older?: boolean) => Promise<import('./codex').CodexSnapshot>;
+  codexSend: (id: string, prompt: string, images?: string[]) => Promise<void>;
+  codexReply: (id: string, requestId: string | number, reply: import('./codex').CodexReply) => Promise<void>;
+  onCodexUpdated: (cb: (snapshot: import('./codex').CodexSnapshot) => void) => () => void;
   spawnAgent: (req: SpawnRequest) => Promise<SpawnResult>;
   // Branches a copy of an existing conversation's session (`--fork-session`):
   // full history, new session id, independent from the original — the escape
   // hatch when the original is stuck (e.g. held by a crash-looping bg daemon).
   forkConversation: (conversationId: string) => Promise<{ conversationId: string }>;
+  // Starts a NEW conversation on the other provider, seeded with a condensed
+  // transcript of this one, and kicks it off so it is live at once. The source
+  // keeps running where it is. `model` is the target provider's model alias;
+  // omitted ⇒ that provider's default.
+  forkConversationTo: (conversationId: string, provider: AgentProvider, model?: string) => Promise<{ conversationId: string }>;
   updateConversationTitle: (id: string, title: string) => Promise<void>;
   setConversationPinned: (id: string, pinned: boolean) => Promise<void>;
   stopAgent: (id: string) => Promise<void>;

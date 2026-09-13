@@ -1,5 +1,7 @@
 import { Conversation } from '../../shared/types';
 import { statusDotClass } from '../lib/status';
+import { useUIState } from '../lib/ui-state';
+import ProviderIcon, { providerName } from './ProviderIcon';
 
 interface Props {
   conv: Conversation;
@@ -17,6 +19,9 @@ interface Props {
  */
 export default function DelegatedChildRow({ conv, onAttach, selected }: Props) {
   const ready = !!conv.sessionId;
+  const [showProviderIcon] = useUIState('showProviderIcon');
+  // Missing on legacy rows means Claude.
+  const provider = conv.provider ?? 'claude';
 
   return (
     <div
@@ -31,6 +36,8 @@ export default function DelegatedChildRow({ conv, onAttach, selected }: Props) {
         className={`inline-block w-2 h-2 rounded-full shrink-0 ${statusDotClass(conv, true)}`}
         title={conv.state || conv.status || 'idle'}
       />
+      {/* Same spacing as a pinned row: the mark sits with the name, apart from the dot. */}
+      {showProviderIcon && <ProviderIcon provider={provider} size={12} className="text-muted ml-1.5" title={providerName(provider)} />}
       <span className="font-medium text-text/90 shrink-0">{conv.displayName}</span>
       <span className="text-muted text-xs shrink-0">·</span>
       <span className="truncate text-text/70 min-w-0 flex-1" title={conv.title || conv.description}>

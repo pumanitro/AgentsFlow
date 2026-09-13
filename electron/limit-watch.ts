@@ -254,10 +254,15 @@ export function isRescuable(conv: Conversation): boolean {
 
 export interface LimitWatchDeps {
   getPolicy: () => RotationPolicy;
+  /**
+   * The chats worth watching. Claude only: the wall is read out of a Claude
+   * transcript, and the rescue is another Claude account — Codex has one
+   * sign-in, so there is nothing to switch it to.
+   */
   getConversations: () => Conversation[];
   /** Defaults to the real transcript read; injected in tests. */
   readHit?: (conv: Conversation) => LimitHit | null;
-  /** One urgent rotation pass. True when an account switch actually happened. */
+  /** One urgent rotation pass. True when a switch actually happened. */
   rotate: () => Promise<{ switched: boolean; reason: string }>;
   /** Type a message into the session. */
   nudge: (conv: Conversation, text: string) => Promise<{ ok: boolean; error?: string }>;

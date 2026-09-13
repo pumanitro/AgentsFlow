@@ -2,6 +2,14 @@ import { contextBridge, ipcRenderer, IpcRendererEvent } from 'electron';
 import type { AccountsSnapshot, AgentsFlowApi, Conversation, OpenFileNavPayload, PinnedDivider, PinnedItemRef, PinnedTodo, RotationStatus, SpawnRequest } from '../shared/types';
 
 const api: AgentsFlowApi = {
+  codexSnapshot: (id, older) => ipcRenderer.invoke('codex:snapshot', id, older),
+  codexSend: (id, prompt, images) => ipcRenderer.invoke('codex:send', id, prompt, images),
+  codexReply: (id, requestId, reply) => ipcRenderer.invoke('codex:reply', id, requestId, reply),
+  onCodexUpdated: (cb) => {
+    const listener = (_e: IpcRendererEvent, snapshot: import('../shared/codex').CodexSnapshot) => cb(snapshot);
+    ipcRenderer.on('codex:updated', listener);
+    return () => ipcRenderer.removeListener('codex:updated', listener);
+  },
   listDirectories: () => ipcRenderer.invoke('dirs:list'),
   addDirectory: () => ipcRenderer.invoke('dirs:add'),
   removeDirectory: (id) => ipcRenderer.invoke('dirs:remove', id),
@@ -15,8 +23,9 @@ const api: AgentsFlowApi = {
   getPerfHistory: () => ipcRenderer.invoke('perf:history'),
   savePerfReport: (rangeMin: number) => ipcRenderer.invoke('perf:report', rangeMin),
 
+  getCodexAccount: (force) => ipcRenderer.invoke('codex:account', force),
   listAccounts: () => ipcRenderer.invoke('accounts:list'),
-  addAccount: (email) => ipcRenderer.invoke('accounts:add', email),
+  addAccount: (email, label) => ipcRenderer.invoke('accounts:add', email, label),
   probeAccount: (pendingId) => ipcRenderer.invoke('accounts:probe', pendingId),
   cancelAddAccount: (pendingId) => ipcRenderer.invoke('accounts:cancelAdd', pendingId),
   removeAccount: (id) => ipcRenderer.invoke('accounts:remove', id),
@@ -29,6 +38,14 @@ const api: AgentsFlowApi = {
     return () => ipcRenderer.removeListener('accounts:updated', listener);
   },
 
+  addCodexAccount: (label) => ipcRenderer.invoke('codexAccounts:add', label),
+  probeCodexAccount: (pendingId) => ipcRenderer.invoke('codexAccounts:probe', pendingId),
+  cancelAddCodexAccount: (pendingId) => ipcRenderer.invoke('codexAccounts:cancelAdd', pendingId),
+  removeCodexAccount: (id) => ipcRenderer.invoke('codexAccounts:remove', id),
+  switchCodexAccount: (id) => ipcRenderer.invoke('codexAccounts:switch', id),
+  saveCurrentCodexLogin: (label) => ipcRenderer.invoke('codexAccounts:saveCurrent', label),
+  listCodexModels: () => ipcRenderer.invoke('codex:models'),
+
   getRotationPolicy: () => ipcRenderer.invoke('rotation:get'),
   setRotationPolicy: (policy) => ipcRenderer.invoke('rotation:set', policy),
   onRotationStatus: (cb) => {
@@ -40,6 +57,7 @@ const api: AgentsFlowApi = {
   listConversations: () => ipcRenderer.invoke('convs:list'),
   spawnAgent: (req: SpawnRequest) => ipcRenderer.invoke('convs:spawn', req),
   forkConversation: (conversationId) => ipcRenderer.invoke('convs:fork', conversationId),
+  forkConversationTo: (conversationId, provider, model) => ipcRenderer.invoke('convs:forkTo', conversationId, provider, model),
   updateConversationTitle: (id, title) =>
     ipcRenderer.invoke('convs:updateTitle', id, title),
   setConversationPinned: (id, pinned) => ipcRenderer.invoke('convs:setPinned', id, pinned),

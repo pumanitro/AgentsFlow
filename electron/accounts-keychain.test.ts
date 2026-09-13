@@ -67,7 +67,7 @@ describe('credential reconciliation (keychain)', { skip: keychainUsable() ? fals
     process.env.USER = TEST_KEYCHAIN_ACCOUNT;
     vaultDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agentsflow-keychain-test-'));
     VAULT = serviceNameFor(vaultDir);
-    account = { id: 'test-1', email: 'test@gmail.com', configDir: vaultDir, addedAt: '2026-01-01T00:00:00.000Z' };
+    account = { accountUuid: 'test-person', orgId: 'test-org', id: 'test-1', email: 'test@gmail.com', configDir: vaultDir, addedAt: '2026-01-01T00:00:00.000Z' };
   });
 
   after(() => {
@@ -85,14 +85,14 @@ describe('credential reconciliation (keychain)', { skip: keychainUsable() ? fals
     write(MAIN, { claudeAiOauth: creds('access-old', 'refresh-SPENT', 0), mcpOAuth: { 'srv|h': { accessToken: 'mcp-keep' } } });
     write(VAULT, { claudeAiOauth: creds('access-new', 'refresh-LIVE', 100) });
 
-    const result = await reconcileActive(account, [account]);
+    const result = await reconcileActive(account, [account], () => ({ accountUuid: account.accountUuid, orgId: account.orgId }));
     assert.equal(result.outcome, 'repaired-main');
     assert.equal(read(MAIN).claudeAiOauth.refreshToken, 'refresh-LIVE');
     // Invariant 1: the main slot also holds MCP server tokens.
     assert.equal(read(MAIN).mcpOAuth['srv|h'].accessToken, 'mcp-keep');
 
     // And it settles — a repair that re-fires every tick would be a write loop.
-    assert.equal((await reconcileActive(account, [account])).outcome, 'in-sync');
+    assert.equal((await reconcileActive(account, [account], () => ({ accountUuid: account.accountUuid, orgId: account.orgId }))).outcome, 'in-sync');
   });
 
   test('adopts the CLI\'s own rotation into the vault instead of overwriting it', async () => {
@@ -101,7 +101,7 @@ describe('credential reconciliation (keychain)', { skip: keychainUsable() ? fals
     write(MAIN, { claudeAiOauth: creds('cli-new', 'refresh-CLI', 100) });
     write(VAULT, { claudeAiOauth: creds('access-old', 'refresh-OLD', 0) });
 
-    const result = await reconcileActive(account, [account]);
+    const result = await reconcileActive(account, [account], () => ({ accountUuid: account.accountUuid, orgId: account.orgId }));
     assert.equal(result.outcome, 'adopted-main');
     assert.equal(read(VAULT).claudeAiOauth.refreshToken, 'refresh-CLI');
     assert.equal(read(MAIN).claudeAiOauth.accessToken, 'cli-new', 'the live session must be left alone');
@@ -113,10 +113,28 @@ describe('credential reconciliation (keychain)', { skip: keychainUsable() ? fals
     write(MAIN, { mcpOAuth: { 'srv|h': { accessToken: 'mcp-keep' } } });
     write(VAULT, { claudeAiOauth: creds('survivor', 'refresh-SURVIVOR', 0) });
 
-    const result = await reconcileActive(account, [account]);
+    const result = await reconcileActive(account, [account], () => ({ accountUuid: account.accountUuid, orgId: account.orgId }));
     assert.equal(result.outcome, 'repaired-main');
     assert.equal(read(MAIN).claudeAiOauth.accessToken, 'survivor');
     assert.equal(read(MAIN).mcpOAuth['srv|h'].accessToken, 'mcp-keep');
+  });
+
+  test('same person in another organization is foreign and neither credential slot is overwritten', async () => {
+    const other = { ...account, id: 'other-org', orgId: 'work-org' };
+    write(MAIN, { claudeAiOauth: creds('work-token', 'work-refresh', 200) });
+    write(VAULT, { claudeAiOauth: creds('personal-token', 'personal-refresh', 0) });
+    const result = await reconcileActive(account, [account, other], () => ({ accountUuid: account.accountUuid, orgId: other.orgId }));
+    assert.deepEqual(result, { outcome: 'foreign', ownerAccountId: 'other-org' });
+    assert.equal(read(VAULT).claudeAiOauth.accessToken, 'personal-token');
+    assert.equal(read(MAIN).claudeAiOauth.accessToken, 'work-token');
+  });
+
+  test('missing organization identity cannot merge two different credential chains', async () => {
+    write(MAIN, { claudeAiOauth: creds('unknown-org-token', 'unknown-refresh', 200) });
+    write(VAULT, { claudeAiOauth: creds('personal-token', 'personal-refresh', 0) });
+    const result = await reconcileActive(account, [account], () => ({ accountUuid: account.accountUuid }));
+    assert.equal(result.outcome, 'foreign');
+    assert.equal(read(VAULT).claudeAiOauth.accessToken, 'personal-token');
   });
 
   test('reports signed-out rather than healthy when both copies are gone', async () => {
@@ -124,7 +142,7 @@ describe('credential reconciliation (keychain)', { skip: keychainUsable() ? fals
     // staring at an ACTIVE account that cannot authenticate, with no explanation.
     write(MAIN, {});
     write(VAULT, {});
-    const result = await reconcileActive(account, [account]);
+    const result = await reconcileActive(account, [account], () => ({ accountUuid: account.accountUuid, orgId: account.orgId }));
     assert.equal(result.outcome, 'signed-out');
     assert.match((result as { error: string }).error, /add it again/);
   });

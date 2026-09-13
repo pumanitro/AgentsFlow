@@ -3,7 +3,7 @@ import * as os from 'os';
 import * as path from 'path';
 import { performance } from 'node:perf_hooks';
 import { app } from 'electron';
-import { Account, Conversation, PinnedDivider, PinnedItemRef, PinnedTodo, RotationPolicy, TrackedDirectory } from '../shared/types';
+import { Account, CodexAccount, Conversation, PinnedDivider, PinnedItemRef, PinnedTodo, RotationPolicy, TrackedDirectory } from '../shared/types';
 import { DEFAULT_POLICY } from './rotation';
 import { placePinnedRefAfter, placePinnedRefAtEndOfFirstSection } from './pinned-order';
 import { makeIndexer } from './conv-index';
@@ -20,6 +20,9 @@ interface StoreShape {
   accounts: Account[];
   activeAccountId: string | null;
   rotationPolicy: RotationPolicy;
+  // The Codex sign-ins, beside the Claude pool above. There is no app-wide
+  // provider to record: every conversation carries its own (see Conversation).
+  codexAccounts: CodexAccount[];
 }
 
 let cache: StoreShape | null = null;
@@ -93,8 +96,27 @@ function migrateConversation(c: any): Conversation {
   const isLegacy = c.title === undefined && c.summary !== undefined;
   let title: string = isLegacy ? (c.description ?? '') : (c.title ?? '');
   if (/^agentsflow:[0-9a-f]+$/i.test(title)) title = '';
+  const provider = c.provider === 'codex' ? 'codex' : 'claude';
+  const handover =
+    c.handover && typeof c.handover === 'object' && (c.handover.from === 'claude' || c.handover.from === 'codex')
+      ? c.handover
+      : undefined;
+  // Debris from the app-wide provider switch this app used to have. That switch
+  // moved a conversation by clearing its session id, so a row sitting on Claude
+  // with a handover and no session names a session nobody can open any more —
+  // eighteen of them were left that way. The row stays (its title and history
+  // are the only record of the work), but it is presented as finished rather
+  // than as something the user can click into and continue.
+  const lostInSwitch = provider === 'claude' && Boolean(handover) && !(c.sessionId ?? '');
   return {
     id: c.id,
+    provider,
+    model: typeof c.model === 'string' ? c.model : undefined,
+    lastResult: typeof c.lastResult === 'string' ? c.lastResult : undefined,
+    attachments: Array.isArray(c.attachments) ? c.attachments : [],
+    forkFromSessionId: typeof c.forkFromSessionId === 'string' ? c.forkFromSessionId : undefined,
+    worktreePath: typeof c.worktreePath === 'string' ? c.worktreePath : undefined,
+    handover: lostInSwitch ? undefined : handover,
     sessionId: c.sessionId ?? '',
     daemonShort: c.daemonShort ?? '',
     sessionName: c.sessionName ?? '',
@@ -102,10 +124,12 @@ function migrateConversation(c: any): Conversation {
     directoryPath: c.directoryPath ?? '',
     displayName: c.displayName ?? '',
     title,
-    description: isLegacy ? (c.summary ?? '') : (c.description ?? ''),
+    description: lostInSwitch
+      ? 'session lost in a provider switch — start a new chat'
+      : isLegacy ? (c.summary ?? '') : (c.description ?? ''),
     pinned: c.pinned ?? true,
-    state: c.state ?? '',
-    status: c.status ?? '',
+    state: lostInSwitch ? 'done' : (c.state ?? ''),
+    status: lostInSwitch ? '' : (c.status ?? ''),
     intent: c.intent ?? '',
     createdAt: c.createdAt ?? new Date().toISOString(),
     unpinnedAt: typeof c.unpinnedAt === 'string' ? c.unpinnedAt : undefined,
@@ -193,6 +217,10 @@ function sanitizePinnedOrder(
  * A stored rotation policy is only trusted within sane bounds — a threshold of
  * 0 would switch accounts on every tick, and 100 would only fire after the wall
  * has already been hit, which is the thing rotation exists to avoid.
+ *
+ * The result is built field by field, so a key an older build wrote and this
+ * one no longer knows (`crossProvider`, from when rotation could move the whole
+ * app to the other provider) is simply dropped on the next save.
  */
 function sanitizeRotationPolicy(raw: unknown): RotationPolicy {
   const p = raw as Partial<RotationPolicy> | undefined;
@@ -243,6 +271,9 @@ function load(): StoreShape {
     accounts: Array.isArray(parsed.accounts) ? parsed.accounts : [],
     activeAccountId: typeof parsed.activeAccountId === 'string' ? parsed.activeAccountId : null,
     rotationPolicy: sanitizeRotationPolicy(parsed.rotationPolicy),
+    // An `activeProvider` written by an older build is read past: a provider is
+    // a property of each conversation now, not of the app.
+    codexAccounts: Array.isArray(parsed.codexAccounts) ? parsed.codexAccounts : [],
   };
   // Seed from what's already archived so the first flush doesn't needlessly
   // rewrite history.json.
@@ -304,6 +335,7 @@ function serializeSplit(s: StoreShape, now: number): { hotJson: string; coldJson
     accounts: s.accounts,
     activeAccountId: s.activeAccountId,
     rotationPolicy: s.rotationPolicy,
+    codexAccounts: s.codexAccounts,
     conversations: hot,
   });
   perf.record('store:save', performance.now() - t0);
@@ -492,6 +524,20 @@ export const store = {
   setActiveAccountId(id: string | null): void {
     const s = load();
     s.activeAccountId = id;
+    save();
+  },
+  getCodexAccounts(): CodexAccount[] {
+    return load().codexAccounts;
+  },
+  addCodexAccount(account: CodexAccount): CodexAccount {
+    const s = load();
+    s.codexAccounts = [...s.codexAccounts.filter((a) => a.id !== account.id), account];
+    save();
+    return account;
+  },
+  removeCodexAccount(id: string): void {
+    const s = load();
+    s.codexAccounts = s.codexAccounts.filter((a) => a.id !== id);
     save();
   },
   getRotationPolicy(): RotationPolicy {

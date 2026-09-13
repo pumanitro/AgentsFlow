@@ -1,3 +1,7 @@
+import './cli-environment';
+import { CodexAgents } from './codex-agent';
+import * as codexServer from './codex-server';
+import type { CodexReply } from '../shared/codex';
 import { app, BrowserWindow, clipboard, dialog, ipcMain, nativeImage, powerMonitor, shell } from 'electron';
 import * as path from 'path';
 import * as fs from 'fs';
@@ -10,6 +14,8 @@ import * as sysmon from './sysmon';
 import { buildPerfReport, reportBasename, serializeReportData } from './perf-report';
 
 const APP_NAME = 'Peers Flow';
+// Isolated data directory for development and smoke tests.
+if (process.env.AGENTSFLOW_USER_DATA) app.setPath('userData', path.resolve(process.env.AGENTSFLOW_USER_DATA));
 app.setName(APP_NAME);
 
 // Earliest possible: mirror console.* to a log file and install last-resort
@@ -35,6 +41,8 @@ const ICON_PATH = resolveIconPath();
 import { store } from './store';
 import { getUsage, getUsageForService, resetUsageCache } from './usage';
 import * as accounts from './accounts';
+import * as codexAccounts from './codex-accounts';
+import * as handover from './handover';
 import * as rotation from './rotation';
 import * as limitWatch from './limit-watch';
 import { forkTitle } from '../shared/fork-title';
@@ -59,13 +67,106 @@ import { gitStatus, listBranches, listFiles, listWorktrees, removeWorktree } fro
 import { searchInFiles } from './search';
 import { deleteAttachmentFiles, pastedImagesRoot, prunePastedImages, sweepOrphanAttachments, todayDateSlug } from './attachments';
 import { noteDirForPath, sweepNoteDir, sweepNoteImages } from './note-images';
-import { Account, AccountsSnapshot, AddAccountResult, BridgeHealth, Conversation, FileEntry, PerfReportResult, PinnedDivider, PinnedItemRef, PinnedTodo, ProbeAccountResult, RotationPolicy, SlashCommand, SpawnRequest, SwitchAccountResult, TrackedDirectory, UsageResult } from '../shared/types';
+import { Account, AccountsSnapshot, AddAccountResult, AgentProvider, BridgeHealth, CodexModel, Conversation, FileEntry, PerfReportResult, PinnedDivider, PinnedItemRef, PinnedTodo, ProbeAccountResult, ProbeCodexResult, RotationPolicy, SlashCommand, SpawnRequest, SwitchAccountResult, SwitchCodexResult, TrackedDirectory, UsageResult } from '../shared/types';
 
 const isDev = process.env.NODE_ENV === 'development';
 const loadURL = isDev ? null : serve({ directory: path.join(__dirname, '..', '..', '..', 'renderer', 'out') });
 
 let mainWindow: BrowserWindow | null = null;
 let peersBridge: PeersBridge | null = null;
+// Built as a value rather than inline so the seed and limit hooks below can be
+// added before the Codex runtime declares them — the alternative is an
+// excess-property error on a literal passed straight to the constructor.
+const codexDeps = {
+  // Where the app-server's control socket lives, and how to enumerate the
+  // conversations whose threads have to be rejoined after a restart. Both are
+  // plain properties so this object type-checks before the Codex runtime
+  // declares them.
+  userData: app.getPath('userData'),
+  list: () => store.getConversations(),
+  get: (id: string) => store.getConversation(id),
+  update: (id: string, patch: Partial<Conversation>) => { store.updateConversation(id, patch); broadcastConversations(); },
+  // Every row, so a reconnect can find the pinned Codex threads to rejoin, and
+  // the directory the app-server's own socket lives under.
+  options: (conv: Conversation) => {
+    const configPath = !conv.delegatedByConversationId ? writeMcpConfigForConversation(conv.id, conv.directoryPath) : undefined;
+    const server = configPath ? JSON.parse(fs.readFileSync(configPath, 'utf8')).mcpServers.peersflow : undefined;
+    return {
+      // approvalPolicy / sandbox come from CodexAgents' unattended defaults
+      // ('never' + workspace-write): a detached turn must never park on a prompt.
+      approvalsReviewer: 'user',
+      ...(server ? {
+        config: { 'mcp_servers.peersflow': { ...server, required: true, tool_timeout_sec: 1860 } },
+        developerInstructions: buildBootstrapSystemPrompt(store.getDirectories()),
+      } : {}),
+    };
+  },
+  changed: (snapshot: import('../shared/codex').CodexSnapshot) => {
+    if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.webContents.isDestroyed()) mainWindow.webContents.send('codex:updated', snapshot);
+  },
+
+  // ---- Fork seed ----
+  // A conversation forked from Claude has no Codex thread of its own: its first
+  // turn is the one that has to explain what already happened. The Claude
+  // transcript is read HERE, when that thread actually starts, rather than
+  // copied at fork time — a fork that never gets going costs nothing, and the
+  // source is still running, so reading late gets the newest state of it.
+  handoverContext: (conv: Conversation): string | undefined =>
+    conv.handover?.from === 'claude'
+      ? handover.buildHandoverContext({
+          from: 'claude',
+          history: handover.claudeHistoryFor(conv.handover),
+          reason: conv.handover.reason,
+        })
+      : undefined,
+
+  // Codex's own wall. The Claude side has a pool to rotate through; Codex is
+  // one sign-in, so there is nowhere to move this chat to and nothing useful to
+  // do automatically. Say so on the same status line the Claude rotation writes
+  // to — once per refusal, which is what `limitedTurns` in codex-agent.ts
+  // guarantees — so the morning after reads as an explanation rather than a
+  // silence.
+  onLimit: (id: string, message: string): void => {
+    console.warn('[agentsflow][codex] a chat hit the Codex limit', { conversationId: id, message });
+    const title = store.getConversation(id)?.title || 'a Codex chat';
+    rotation.recordEvent(rotationDeps, `Hit the Codex limit in “${title}” — ${message}`);
+  },
+};
+
+const codex = new CodexAgents(codexDeps);
+
+// The Codex runtime surface this file needs, declared locally and optional so
+// it compiles (and runs) both before and after the Codex side lands it. Every
+// call below is guarded accordingly.
+interface CodexRuntimeExt {
+  /** The models `codex` offers right now. */
+  listModels?(): Promise<CodexModel[]>;
+  /** Drop the app-server connection so the next call picks up a new sign-in. */
+  restart?(): Promise<void>;
+  /** A condensed transcript of one Codex thread, for a move back to Claude. */
+  historyText?(conversationId: string): Promise<string>;
+  /** True while any Codex conversation has a turn in flight. */
+  hasRunningTurn?(): boolean;
+  /** Drop the cached account/usage read after a sign-in change. */
+  invalidateAccount?(): void;
+}
+const codexExt = codex as unknown as CodexAgents & CodexRuntimeExt;
+
+ipcMain.handle('codex:account', (_e, force?: boolean) => codex.accountStatus(Boolean(force)));
+
+ipcMain.handle('codex:models', async (): Promise<CodexModel[]> => {
+  try {
+    return (await codexExt.listModels?.()) ?? [];
+  } catch (err) {
+    console.warn('[agentsflow][codex] could not list models', (err as Error)?.message ?? err);
+    return [];
+  }
+});
+
+ipcMain.handle('codex:snapshot', (_e, id: string, older?: boolean) => codex.snapshot(id, older));
+ipcMain.handle('codex:send', (_e, id: string, prompt: string, images?: string[]) => codex.send(id, prompt, images));
+ipcMain.handle('codex:reply', (_e, id: string, requestId: string | number, reply: CodexReply) => codex.reply(id, requestId, reply));
+
 
 // Single-instance guard. Two overlapping mains race on the delegation-bridge
 // socket: the one that quits first runs its teardown `unlinkSync` and deletes
@@ -439,6 +540,7 @@ app.on('window-all-closed', () => {
 });
 
 app.on('before-quit', () => {
+  codex.close();
   try { peersBridge?.stop(); } catch { /* ignore */ }
   // Flush any debounced store changes synchronously so a quit never loses the
   // last few mutations (the async debounce window would otherwise drop them).
@@ -565,6 +667,7 @@ rawIpcHandle('perf:report', async (_e: unknown, rangeMin: number): Promise<PerfR
 let authIssue: string | null = null;
 
 function accountsSnapshot(): AccountsSnapshot {
+  const codexPool = store.getCodexAccounts();
   return {
     accounts: store.getAccounts().map((a) => {
       const needsLogin = accounts.revokedReason(a.id);
@@ -572,6 +675,11 @@ function accountsSnapshot(): AccountsSnapshot {
     }),
     activeId: store.getActiveAccountId(),
     authIssue,
+    codexAccounts: codexPool,
+    // Read from the CLI's own auth.json rather than remembered: the user can
+    // run `codex login` outside the app, and then the pool's idea of who is
+    // signed in is simply wrong.
+    activeCodexId: codexAccounts.currentAccountId(codexPool),
   };
 }
 
@@ -650,17 +758,13 @@ const credentialSyncDeps: accounts.SyncDeps = {
 
 ipcMain.handle('accounts:list', () => accountsSnapshot());
 
-ipcMain.handle('accounts:add', (_e, email: string): AddAccountResult => {
+ipcMain.handle('accounts:add', (_e, email: string, label?: string): AddAccountResult => {
   const trimmed = (email ?? '').trim();
   if (!accounts.isEmailAddress(trimmed)) {
     return { ok: false, error: 'Enter an email address (…@gmail.com, or your work domain).' };
   }
-  const existing = store.getAccounts();
-  if (existing.some((a) => a.email.toLowerCase() === trimmed.toLowerCase())) {
-    return { ok: false, error: `${trimmed} is already in the pool.` };
-  }
   try {
-    const entry = accounts.beginAdd(trimmed);
+    const entry = accounts.beginAdd(trimmed, label);
     // Queue the one-time login so it starts the moment the terminal attaches.
     pty.queueShellCommand(entry.shellId, accounts.loginCommandFor(entry.configDir, entry.email));
     return { ok: true, pendingId: entry.pendingId, shellId: entry.shellId, email: entry.email, cwd: os.homedir() };
@@ -678,8 +782,7 @@ ipcMain.handle('accounts:probe', async (_e, pendingId: string): Promise<ProbeAcc
     // nobody is active until the user switched to the account they are already on.
     if (
       !store.getActiveAccountId() &&
-      result.account.accountUuid &&
-      result.account.accountUuid === accounts.currentLoginAccountUuid()
+      accounts.isCurrentMembership(result.account)
     ) {
       store.setActiveAccountId(result.account.id);
     }
@@ -735,6 +838,84 @@ ipcMain.handle('accounts:usage', (_e, id: string, force?: boolean) => {
     return { ok: false, reason: 'no-auth', error: 'Account not found.' } as const;
   }
   return accountUsage(account, Boolean(force));
+});
+
+// ----- The Codex pool -----
+// Saved Codex sign-ins, and which of them the CLI is currently logged in as.
+// There is no app-wide provider to select beside it: each conversation names
+// its own agent in the composer and keeps it for life.
+
+ipcMain.handle('codexAccounts:add', (_e, label?: string): AddAccountResult => {
+  try {
+    const entry = codexAccounts.beginAdd(label);
+    // The browser round-trip runs in a terminal the renderer opens on this
+    // shell id; queueing it means it starts the moment that attaches.
+    pty.queueShellCommand(entry.shellId, codexAccounts.loginCommandFor(entry.configDir));
+    // Codex has no address to ask for up front — the e-mail only becomes known
+    // once the login lands in the vault, which is what the probe reports.
+    return { ok: true, pendingId: entry.pendingId, shellId: entry.shellId, email: '', cwd: os.homedir() };
+  } catch (err) {
+    return { ok: false, error: `Could not prepare the Codex account: ${(err as Error)?.message ?? err}` };
+  }
+});
+
+ipcMain.handle('codexAccounts:probe', (_e, pendingId: string): ProbeCodexResult => {
+  const result = codexAccounts.probeAdd(pendingId, store.getCodexAccounts());
+  if (result.status === 'ok') {
+    store.addCodexAccount(result.account);
+    broadcastAccounts();
+  }
+  return result;
+});
+
+ipcMain.handle('codexAccounts:cancelAdd', (_e, pendingId: string) => {
+  const entry = codexAccounts.getPending(pendingId);
+  if (!entry) return;
+  pty.cancelShellCommand(entry.shellId);
+  codexAccounts.clearPending(pendingId);
+  codexAccounts.destroyVault(entry.configDir);
+});
+
+ipcMain.handle('codexAccounts:remove', (_e, id: string) => {
+  const account = store.getCodexAccounts().find((a) => a.id === id);
+  if (!account) return;
+  store.removeCodexAccount(id);
+  codexAccounts.destroyVault(account.configDir);
+  broadcastAccounts();
+});
+
+ipcMain.handle('codexAccounts:switch', async (_e, id: string): Promise<SwitchCodexResult> => {
+  const account = store.getCodexAccounts().find((a) => a.id === id);
+  if (!account) return { ok: false, error: 'That Codex account is no longer in the pool.' };
+  // Switching replaces the file the app-server authenticates with and then
+  // restarts it, which would abandon a turn mid-flight — the Claude pool can
+  // swap a keychain slot under a running session, this cannot.
+  if (codexExt.hasRunningTurn?.()) {
+    return { ok: false, error: 'A Codex chat is still working. Stop it first, then switch accounts.' };
+  }
+  try {
+    const outcome = codexAccounts.switchTo(account, store.getCodexAccounts());
+    // An unpooled outgoing login is rescued into a vault rather than overwritten.
+    if (outcome?.savedOutgoing) store.addCodexAccount(outcome.savedOutgoing);
+    await codexExt.restart?.();
+    codexExt.invalidateAccount?.();
+    broadcastAccounts();
+    console.log('[agentsflow][codex-accounts] switched', { email: account.email });
+    return { ok: true, account };
+  } catch (err) {
+    const error = (err as Error)?.message ?? String(err);
+    console.error('[agentsflow][codex-accounts] switch failed', { id, error });
+    return { ok: false, error };
+  }
+});
+
+ipcMain.handle('codexAccounts:saveCurrent', (_e, label?: string): SwitchCodexResult => {
+  const result = codexAccounts.saveCurrentLogin(label, store.getCodexAccounts());
+  if (result.ok) {
+    store.addCodexAccount(result.account);
+    broadcastAccounts();
+  }
+  return result;
 });
 
 // ----- Automatic rotation -----
@@ -825,9 +1006,12 @@ accounts.onAccountRevoked((account, reason) => {
 // status line — see limit-watch.ts for why a forecast alone isn't enough.
 const limitWatchDeps: limitWatch.LimitWatchDeps = {
   getPolicy: () => store.getRotationPolicy(),
-  getConversations: () => store.getConversations(),
+  getConversations: () => store.getConversations().filter((c) => c.provider !== 'codex'),
   rotate: () => rotation.runOnce(rotationDeps, { urgent: true }),
-  nudge: (conv, text) => {
+  nudge: async (conv, text) => {
+    // The live row, not the snapshot the pass started from: a session id or a
+    // daemon short id can have landed since the wall was read.
+    const live = store.getConversation(conv.id) ?? conv;
     // Snapshotted BEFORE anything is typed: the receipt for this nudge is a
     // user turn that wasn't in the transcript a moment ago.
     //
@@ -836,14 +1020,14 @@ const limitWatchDeps: limitWatch.LimitWatchDeps = {
     // session's own opening prompt. Every chat this path rescues has a
     // transcript deep enough to have one, since that is where its rate-limit
     // error was found, so a zero here is an anomaly and gets no false receipt.
-    const before = limitWatch.lastUserTurnAt(conv);
+    const before = limitWatch.lastUserTurnAt(live);
     return pty.sendToSession({
-      sessionId: conv.sessionId,
+      sessionId: live.sessionId,
       // Mirrors term:attach's rule: the daemon short id when there is one, else
       // the session id's own 8-char prefix.
-      attachId: conv.daemonShort || conv.sessionId.slice(0, 8),
+      attachId: live.daemonShort || live.sessionId.slice(0, 8),
       text,
-      verify: before > 0 ? () => limitWatch.lastUserTurnAt(conv) > before : undefined,
+      verify: before > 0 ? () => limitWatch.lastUserTurnAt(live) > before : undefined,
     });
   },
   onEvent: (message) => rotation.recordEvent(rotationDeps, message),
@@ -865,6 +1049,72 @@ ipcMain.handle('rotation:set', (_e, policy: RotationPolicy) => {
 ipcMain.handle('convs:list', () => store.getConversations());
 
 /**
+ * Start a `--bg` Claude session for an EXISTING conversation row and record the
+ * ids it comes back with. Split out of spawnConversation because the row is
+ * written and broadcast before the session exists: the UI shows a "starting…"
+ * chat the moment it is asked for, and this fills in the ids when they land.
+ */
+async function dispatchClaudeInto(
+  conversationId: string,
+  cwd: string,
+  prompt: string,
+  opts: { peerAware: boolean; model?: string; delegated?: boolean },
+): Promise<{ sessionId: string; daemonShort: string }> {
+  let mcpConfigPath: string | undefined;
+  let appendSystemPrompt: string | undefined;
+  if (opts.peerAware) {
+    try {
+      mcpConfigPath = writeMcpConfigForConversation(conversationId, cwd);
+      appendSystemPrompt = buildBootstrapSystemPrompt(store.getDirectories());
+    } catch (err) {
+      console.error('[agentsflow] MCP bootstrap failed — spawning without peer awareness', err);
+    }
+  }
+
+  const startedBefore = Date.now();
+  const claimedSessionIds = new Set(store.getConversations().map((c) => c.sessionId).filter(Boolean));
+  const dispatch = await dispatchBackground({ cwd, prompt, mcpConfigPath, appendSystemPrompt, model: opts.model });
+  const daemonShortFromOut = dispatch.daemonShort ?? '';
+  let resolved = daemonShortFromOut
+    ? await resolveSessionByDaemonShort(daemonShortFromOut, 10000)
+    : null;
+  if (!resolved) {
+    console.warn('[agentsflow] dispatch.daemonShort empty or unresolved — falling back to latest-session-in-cwd lookup');
+    resolved = await resolveLatestSessionInCwd({
+      cwd,
+      startedAfterMs: startedBefore,
+      excludeSessionIds: claimedSessionIds,
+      maxWaitMs: 10000,
+    });
+  }
+
+  const sessionId = resolved?.sessionId ?? '';
+  const daemonShort = daemonShortFromOut || (sessionId ? sessionId.slice(0, 8) : '');
+  console.log('[agentsflow] spawn resolved', { sessionId, daemonShort, daemonShortFromOut, delegated: Boolean(opts.delegated) });
+  store.updateConversation(conversationId, { sessionId, daemonShort });
+  syncWatchers();
+
+  const job = readJobState(daemonShort);
+  if (job) {
+    store.updateConversation(conversationId, {
+      state: job.state ?? 'idle',
+      description: (job.detail ?? 'starting…') || 'starting…',
+    });
+  }
+
+  // Don't block the spawn on a full `claude agents --json` poll. The 5s poller
+  // and the per-conversation file-watcher already reconcile this session, and
+  // awaiting a refresh here both added ~1.5s of latency to every spawn AND
+  // injected an extra heavy agent-list spawn into the middle of a spawn burst —
+  // the main driver of the multi-second spawn latency observed under load. Fire
+  // it detached so a not-yet-listed daemon is still picked up promptly, then
+  // return on the optimistic + job-state we already applied above.
+  void refreshNow().catch(() => undefined);
+  broadcastConversations();
+  return { sessionId, daemonShort };
+}
+
+/**
  * Spawns a tracked background session in `dir` and returns its ids. Shared by
  * the user-initiated `convs:spawn` IPC and the delegation bridge.
  *
@@ -874,9 +1124,16 @@ ipcMain.handle('convs:list', () => store.getConversations());
  *   hop — a delegated peer has no `delegate` tool.
  * - `delegatedByConversationId`, when set, nests this session under its parent
  *   in the UI and feeds the parent's "a peer is working" banner.
+ * - `provider` binds this conversation to one agent for its whole life; it is
+ *   never changed afterwards. Omitted means Claude, except for a delegated peer,
+ *   which belongs to the chat that spawned it and follows that chat's agent.
+ * - `row` / `afterConversationId` / `cwd` exist for "fork to the other provider"
+ *   (see `convs:forkTo`), which needs extra fields on the row, a place in the
+ *   pinned list beside its source, and the source's worktree as its directory.
  */
 async function spawnConversation(opts: {
   dir: TrackedDirectory;
+  provider?: 'claude' | 'codex';
   prompt: string;
   // Display title for the conversation. Defaults to the (possibly boilerplate)
   // prompt — delegations pass the human-readable goal instead.
@@ -887,13 +1144,25 @@ async function spawnConversation(opts: {
   delegatedByConversationId?: string;
   // Model alias passed to `claude --model`; undefined ⇒ CLI default.
   model?: string;
+  // Extra fields written onto the new row, e.g. a fork's own description and
+  // the seed its first turn has to carry.
+  row?: Partial<Conversation>;
+  // Anchors the row in the pinned list; default is the end of the first section.
+  afterConversationId?: string;
+  // Where the session runs. Defaults to the tracked directory's path.
+  cwd?: string;
 }): Promise<{ conversationId: string; sessionId: string; daemonShort: string }> {
   const { dir, prompt } = opts;
   const conversationId = uuid();
   const title = (opts.title ?? prompt).trim().slice(0, 80);
+  const parent = opts.delegatedByConversationId ? store.getConversation(opts.delegatedByConversationId) : null;
+  const provider: AgentProvider = opts.provider ?? parent?.provider ?? 'claude';
+  const cwd = opts.cwd || dir.path;
 
   const optimistic: Conversation = {
     id: conversationId,
+    provider,
+    model: opts.model,
     sessionId: '',
     daemonShort: '',
     sessionName: '',
@@ -910,62 +1179,28 @@ async function spawnConversation(opts: {
     createdAt: new Date().toISOString(),
     lastPrompt: prompt,
     delegatedByConversationId: opts.delegatedByConversationId,
+    ...opts.row,
   };
-  store.addConversation(optimistic);
+  store.addConversation(optimistic, opts.afterConversationId ? { afterConversationId: opts.afterConversationId } : undefined);
   broadcastConversations();
   broadcastPinnedOrder();
 
-  let mcpConfigPath: string | undefined;
-  let appendSystemPrompt: string | undefined;
-  if (opts.peerAware) {
+  if (provider === 'codex') {
     try {
-      mcpConfigPath = writeMcpConfigForConversation(conversationId, dir.path);
-      appendSystemPrompt = buildBootstrapSystemPrompt(store.getDirectories());
-    } catch (err) {
-      console.error('[agentsflow] MCP bootstrap failed — spawning without peer awareness', err);
+      await codex.send(conversationId, prompt, opts.attachments);
+      return { conversationId, sessionId: store.getConversation(conversationId)?.sessionId || '', daemonShort: '' };
+    } catch (error) {
+      store.updateConversation(conversationId, { state: 'error', status: 'error', description: (error as Error).message });
+      broadcastConversations();
+      throw error;
     }
   }
 
-  const startedBefore = Date.now();
-  const claimedSessionIds = new Set(store.getConversations().map((c) => c.sessionId).filter(Boolean));
-  const dispatch = await dispatchBackground({ cwd: dir.path, prompt, mcpConfigPath, appendSystemPrompt, model: opts.model });
-  const daemonShortFromOut = dispatch.daemonShort ?? '';
-  let resolved = daemonShortFromOut
-    ? await resolveSessionByDaemonShort(daemonShortFromOut, 10000)
-    : null;
-  if (!resolved) {
-    console.warn('[agentsflow] dispatch.daemonShort empty or unresolved — falling back to latest-session-in-cwd lookup');
-    resolved = await resolveLatestSessionInCwd({
-      cwd: dir.path,
-      startedAfterMs: startedBefore,
-      excludeSessionIds: claimedSessionIds,
-      maxWaitMs: 10000,
-    });
-  }
-
-  const sessionId = resolved?.sessionId ?? '';
-  const daemonShort = daemonShortFromOut || (sessionId ? sessionId.slice(0, 8) : '');
-  console.log('[agentsflow] spawn resolved', { sessionId, daemonShort, daemonShortFromOut, delegated: !!opts.delegatedByConversationId });
-  store.updateConversation(conversationId, { sessionId, daemonShort });
-  syncWatchers();
-
-  const job = readJobState(daemonShort);
-  if (job) {
-    store.updateConversation(conversationId, {
-      state: job.state ?? 'idle',
-      description: (job.detail ?? optimistic.description) || 'starting…',
-    });
-  }
-
-  // Don't block the spawn on a full `claude agents --json` poll. The 5s poller
-  // and the per-conversation file-watcher already reconcile this session, and
-  // awaiting a refresh here both added ~1.5s of latency to every spawn AND
-  // injected an extra heavy agent-list spawn into the middle of a spawn burst —
-  // the main driver of the multi-second spawn latency observed under load. Fire
-  // it detached so a not-yet-listed daemon is still picked up promptly, then
-  // return on the optimistic + job-state we already applied above.
-  void refreshNow().catch(() => undefined);
-  broadcastConversations();
+  const { sessionId, daemonShort } = await dispatchClaudeInto(conversationId, cwd, prompt, {
+    peerAware: opts.peerAware,
+    model: opts.model,
+    delegated: Boolean(opts.delegatedByConversationId),
+  });
   return { conversationId, sessionId, daemonShort };
 }
 
@@ -974,7 +1209,12 @@ ipcMain.handle('convs:spawn', async (_e, req: SpawnRequest): Promise<{ conversat
   if (!dir) throw new Error('directory not found');
   const prompt = req.prompt.trim();
   if (!prompt) throw new Error('prompt required');
-  return spawnConversation({ dir, prompt, attachments: req.attachments, model: req.model, pinned: true, peerAware: true });
+  if (req.provider && req.provider !== 'claude' && req.provider !== 'codex') throw new Error('Unknown agent provider');
+  return spawnConversation({
+    dir, prompt,
+    provider: req.provider,
+    attachments: req.attachments, model: req.model, pinned: true, peerAware: true,
+  });
 });
 
 // How long a freshly minted fork can absorb further ⑂ clicks on its source
@@ -984,17 +1224,31 @@ ipcMain.handle('convs:spawn', async (_e, req: SpawnRequest): Promise<{ conversat
 // scores NaN here and fails the comparison, which mints: the safe direction.
 const FORK_DEDUPE_WINDOW_MS = 30_000;
 
-// Branch a copy of an existing conversation's session. The fork gets its own
-// conversation entry and a pre-assigned session id; the transcript itself is
-// materialized lazily on the fork's first attach, which runs
-// `claude --resume <source> --fork-session --session-id <new>`. Forking is the
-// escape hatch when the original can neither be attached nor resumed — e.g. a
-// bg daemon stuck in a crash-respawn loop: `--fork-session` branches the
+// Branch a copy of an existing conversation's session ON THE SAME PROVIDER. The
+// fork gets its own conversation entry and a pre-assigned session id; the
+// transcript itself is materialized lazily on the fork's first attach, which
+// runs `claude --resume <source> --fork-session --session-id <new>`. Forking is
+// the escape hatch when the original can neither be attached nor resumed — e.g.
+// a bg daemon stuck in a crash-respawn loop: `--fork-session` branches the
 // transcript without needing the resident session at all.
-ipcMain.handle('convs:fork', async (_e, conversationId: string): Promise<{ conversationId: string }> => {
+//
+// A function rather than only an IPC handler because `convs:forkTo` routes here
+// whenever the provider asked for is the one the conversation is already on.
+async function forkConversation(conversationId: string): Promise<{ conversationId: string }> {
   const src = store.getConversations().find((c) => c.id === conversationId);
   if (!src) throw new Error(`conversation ${conversationId} not found`);
   if (!src.sessionId) throw new Error('source session has no sessionId yet — nothing to fork');
+
+  if (src.provider === 'codex') {
+    const fork: Conversation = { ...src, id: uuid(), sessionId: '', provider: 'codex', daemonShort: '',
+      title: forkTitle(src.title), description: 'Forked copy', state: 'idle', status: 'idle',
+      pinned: true, attachments: [], lastResult: '', createdAt: new Date().toISOString(),
+      forkFromSessionId: src.sessionId, delegatedByConversationId: undefined, unpinnedAt: undefined };
+    store.addConversation(fork, { afterConversationId: src.id });
+    broadcastConversations(); broadcastPinnedOrder();
+    await codex.snapshot(fork.id);
+    return { conversationId: fork.id };
+  }
 
   // Forking is one click, but each fork that gets opened costs a *persistent*
   // `claude --resume` PTY which lives until it has been both detached and silent
@@ -1057,6 +1311,68 @@ ipcMain.handle('convs:fork', async (_e, conversationId: string): Promise<{ conve
   broadcastPinnedOrder();
   console.log('[agentsflow] forked conversation', { from: src.id, fromSession: src.sessionId, to: fork.id, toSession: fork.sessionId });
   return { conversationId: fork.id };
+}
+
+ipcMain.handle('convs:fork', (_e, conversationId: string) => forkConversation(conversationId));
+
+// ---------------------------------------------------------------------------
+// Fork to the other provider
+// ---------------------------------------------------------------------------
+// The only way a piece of work crosses from Claude to Codex or back. It does
+// NOT move the conversation: a NEW one is started on the other agent, seeded
+// with a condensed transcript of this one and kicked off immediately so it is
+// live, while the source keeps running untouched. That is the whole difference
+// from the app-wide provider switch this replaced, which cleared the session id
+// of every pinned chat to move it — and lost eighteen of them when the sessions
+// it named turned out to be the only way back in.
+ipcMain.handle('convs:forkTo', async (_e, conversationId: string, provider: AgentProvider, model?: string): Promise<{ conversationId: string }> => {
+  if (provider !== 'claude' && provider !== 'codex') throw new Error('Unknown agent provider');
+  const src = store.getConversation(conversationId);
+  if (!src) throw new Error(`conversation ${conversationId} not found`);
+  const from: AgentProvider = src.provider === 'codex' ? 'codex' : 'claude';
+  // Asking for the agent it is already on is an ordinary fork of the session.
+  if (from === provider) return forkConversation(conversationId);
+  if (!src.sessionId) {
+    throw new Error('this conversation has not started yet — send it a message first, then fork it to the other agent');
+  }
+
+  // A Codex thread lives inside the app-server, which forgets it on a restart
+  // or a sign-in change, so it has to be read NOW and travel inside the first
+  // Claude prompt. The other direction reads a file on disk when the Codex
+  // thread starts (see `handoverContext`), so it passes no history here.
+  let history = '';
+  if (from === 'codex') {
+    try {
+      history = (await codexExt.historyText?.(src.id)) ?? '';
+    } catch (err) {
+      console.warn('[agentsflow][fork] could not read the Codex transcript', { conversationId: src.id, error: (err as Error)?.message ?? err });
+    }
+    if (!history.trim()) {
+      console.warn('[agentsflow][fork] forking without a transcript — the new chat is told it could not be read', { conversationId: src.id });
+    }
+  }
+
+  const plan = handover.planFork({ source: src, target: provider, at: new Date().toISOString(), history });
+  // The tracked directory is where the row's file tree is rooted. A source whose
+  // directory has since been untracked still carries all three fields itself,
+  // and a fork of it is more useful than a refusal.
+  const dir = store.getDirectories().find((d) => d.id === src.directoryId)
+    ?? { id: src.directoryId, path: src.directoryPath, displayName: src.displayName, addedAt: src.createdAt };
+
+  const spawn = await spawnConversation({
+    dir,
+    provider,
+    prompt: plan.prompt,
+    title: plan.title,
+    model,
+    pinned: true,
+    peerAware: true,
+    row: plan.row,
+    afterConversationId: src.id,
+    cwd: plan.cwd,
+  });
+  console.log('[agentsflow][fork] forked to the other provider', { from: src.id, to: spawn.conversationId, provider, cwd: plan.cwd });
+  return { conversationId: spawn.conversationId };
 });
 
 // ----- Delegation bridge: the MCP server asks main to spawn a tracked peer ----
@@ -1081,12 +1397,14 @@ async function waitForDelegationCompletion(
   let lastSessionId = '';
   while (Date.now() - start < timeoutMs) {
     await new Promise((r) => setTimeout(r, 1200));
-    try { await refreshNow(); } catch { /* keep polling on transient CLI failure */ }
+    if (store.getConversation(conversationId)?.provider !== 'codex') {
+      try { await refreshNow(); } catch { /* retry on transient CLI failure */ }
+    }
     const conv = store.getConversations().find((c) => c.id === conversationId);
     if (!conv) return { status: 'failure', result: lastResult, sessionId: lastSessionId, error: 'delegated conversation was removed' };
     if (conv.sessionId) lastSessionId = conv.sessionId;
-    const job = readJobState(conv.daemonShort);
-    const r = (job?.output?.result || '').trim();
+    const job = conv.provider === 'codex' ? null : readJobState(conv.daemonShort);
+    const r = (conv.provider === 'codex' ? conv.lastResult || '' : job?.output?.result || '').trim();
     if (r) lastResult = r;
     const st = (conv.state || '').toLowerCase();
     if (Date.now() - start > minRunMs && FINISHED_STATES.has(st)) {
@@ -1120,10 +1438,16 @@ async function handleDelegate(req: DelegateRequest): Promise<Record<string, unkn
     return { status: 'failure', directory: dir.displayName, error: `Path does not exist: ${dir.path}` };
   }
 
+  const parent = store.getConversation(req.rootConversationId);
+  if (!parent || parent.delegatedByConversationId) return { status: 'failure', error: 'Delegation requires a root conversation and is limited to one hop.' };
+  if (req.provider && req.provider !== 'claude' && req.provider !== 'codex') return { status: 'failure', error: 'Unknown agent provider' };
   const started = Date.now();
   const prompt = buildDelegatePrompt(req.goal, req.deliverable || '');
   const spawn = await spawnConversation({
     dir,
+    // Omitted means "the agent the calling chat runs on" — resolved from the
+    // parent inside spawnConversation, which is where that rule lives.
+    provider: req.provider,
     prompt,
     // The goal is the human-readable summary — use it as the row title instead
     // of the delegate-prompt boilerplate.
@@ -1257,14 +1581,20 @@ ipcMain.handle('convs:setPinned', (_e, id: string, pinned: boolean) => {
 ipcMain.handle('convs:stop', async (_e, id: string) => {
   const conv = store.getConversations().find((c) => c.id === id);
   if (!conv) return;
-  await cliStop(conv.daemonShort);
+  if (conv.provider === 'codex') await codex.stop(conv.id);
+  // A chat that has not started yet has no daemon — stopping the empty id
+  // would address whatever the CLI makes of an empty string.
+  else if (conv.daemonShort) await cliStop(conv.daemonShort);
 });
 
 ipcMain.handle('convs:remove', async (_e, id: string) => {
   const conv = store.getConversations().find((c) => c.id === id);
   if (!conv) return;
-  await cliStop(conv.daemonShort).catch(() => undefined);
-  await cliRemove(conv.daemonShort).catch(() => undefined);
+  if (conv.provider === 'codex') await codex.forget(conv.id);
+  else if (conv.daemonShort) {
+    await cliStop(conv.daemonShort).catch(() => undefined);
+    await cliRemove(conv.daemonShort).catch(() => undefined);
+  }
   unwatchConversation(id);
   deleteAttachmentFiles(conv.attachments);
   store.removeConversation(id);
@@ -1279,8 +1609,11 @@ ipcMain.handle('dirs:removeWithHistory', async (_e, id: string): Promise<{ remov
   if (!dir) return { removedConversations: 0 };
   const targets = store.getConversations().filter((c) => c.directoryId === id);
   for (const c of targets) {
-    await cliStop(c.daemonShort).catch(() => undefined);
-    await cliRemove(c.daemonShort).catch(() => undefined);
+    if (c.provider === 'codex') await codex.forget(c.id);
+    else if (c.daemonShort) {
+      await cliStop(c.daemonShort).catch(() => undefined);
+      await cliRemove(c.daemonShort).catch(() => undefined);
+    }
     unwatchConversation(c.id);
     deleteAttachmentFiles(c.attachments);
     store.removeConversation(c.id);
@@ -1401,6 +1734,11 @@ function resumePeerAwareness(conv: Conversation): { mcpConfigPath?: string; appe
   }
 }
 
+// The socket the detached Codex server listens on (see codex-server.ts).
+function codexSocketPath(): string {
+  return codexServer.codexSocketPath(app.getPath('userData'));
+}
+
 ipcMain.handle('term:attach', async (_e, conversationId: string, cols: number, rows: number) => {
   console.log('[agentsflow] term:attach received', { conversationId, cols, rows });
   const conv = store.getConversations().find((c) => c.id === conversationId);
@@ -1409,12 +1747,31 @@ ipcMain.handle('term:attach', async (_e, conversationId: string, cols: number, r
     throw new Error(`conversation ${conversationId} not found`);
   }
   if (!conv.sessionId) {
+    // Codex reaches this too: a thread only exists once the first message has
+    // been sent, and there is nothing to attach a TUI to until then.
     console.error('[agentsflow] term:attach: no sessionId yet', conv);
     throw new Error('session not ready (sessionId is empty)');
   }
   const win = mainWindow ?? BrowserWindow.fromWebContents(_e.sender);
   if (!win) throw new Error('no window');
   const channelId = uuid();
+
+  // Codex: the chat pane IS the Codex CLI's own TUI. `codex resume <thread>
+  // --remote unix://<sock>` attaches it to the thread already living in the
+  // app-server we own, so it renders the full history, joins an in-flight turn,
+  // and receives any pending approval. It is a viewer, not the execution: the
+  // thread outlives the PTY, the app, and the machine going to sleep. See the
+  // 'codex' mode note in pty-manager for why it rides the resume machinery.
+  if (conv.provider === 'codex') {
+    const cwd = conv.worktreePath || conv.directoryPath;
+    console.log('[agentsflow] spawning pty for codex resume', { threadId: conv.sessionId, cwd, channelId });
+    const replay = await pty.attach({
+      channelId, sessionId: conv.sessionId, cols, rows, win,
+      mode: 'codex', cwd, codexSocket: codexSocketPath(),
+    });
+    return { channelId, replay };
+  }
+
   const attachId = conv.daemonShort || conv.sessionId.slice(0, 8);
 
   // An in-app `claude --resume` PTY already runs this session → re-subscribe

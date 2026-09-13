@@ -72,8 +72,8 @@ export function attachmentPromptLines(paths: string[]): string[] {
   return [
     '',
     paths.length === 1
-      ? `I attached one image; ${imageMarker(1)} marks where it belongs in the text above. Use the Read tool on this absolute path to view it:`
-      : `I attached ${paths.length} images; each [Image #n] marker in the text above shows where that image belongs. Use the Read tool on these absolute paths to view them:`,
+      ? `I attached one image; ${imageMarker(1)} marks where it belongs in the text above. The image is available at this absolute path:`
+      : `I attached ${paths.length} images; each [Image #n] marker in the text above shows where that image belongs. The images are available at these absolute paths:`,
     ...paths.map((p, i) => `${imageMarker(i + 1)} ${p}`),
   ];
 }
