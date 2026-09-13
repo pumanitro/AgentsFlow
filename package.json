@@ -1,8 +1,8 @@
 {
   "name": "agentsflow",
-  "version": "10.1.0-codex.3",
+  "version": "11.0.0",
   "private": true,
-  "description": "Peers Flow \u2014 Claude Code and Codex agents with cross-directory peer delegation",
+  "description": "Peers Flow — Claude Code and Codex agents with cross-directory peer delegation",
   "main": "dist/electron/electron/main.js",
   "scripts": {
     "dev": "concurrently -k -n next,electron -c blue,magenta \"npm:dev:next\" \"npm:dev:electron\"",
