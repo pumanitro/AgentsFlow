@@ -14,6 +14,9 @@ interface Props {
   // Controls whether the terminal grabs focus on mount and refocuses on window
   // focus. Shells pass false so they never steal focus from the chat/file pane.
   autoFocus?: boolean;
+  // Hold the view at the bottom while the attached chat streams its history in,
+  // so opening lands on the latest output. Used for Codex chats — see pinToBottom.
+  followOnOpen?: boolean;
 }
 
 interface ScrollState {
@@ -30,7 +33,7 @@ interface XtermViewport {
   syncScrollArea: (immediate?: boolean) => void;
 }
 
-export default function Terminal({ conversationId, shellId, shellCwd, baseDir, onExit, autoFocus = true }: Props) {
+export default function Terminal({ conversationId, shellId, shellCwd, baseDir, onExit, autoFocus = true, followOnOpen = false }: Props) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   // Read fresh inside the link provider so a later prop change is picked up
   // without rebuilding the xterm instance.
@@ -42,6 +45,8 @@ export default function Terminal({ conversationId, shellId, shellCwd, baseDir, o
   const [termGen, setTermGen] = useState(0);
   const onExitRef = useRef<typeof onExit>(onExit);
   onExitRef.current = onExit;
+  const followOnOpenRef = useRef(followOnOpen);
+  followOnOpenRef.current = followOnOpen;
 
   const [scroll, setScroll] = useState<ScrollState>({ viewportY: 0, baseY: 0, rows: 0, altBuffer: false });
 
@@ -297,9 +302,55 @@ export default function Terminal({ conversationId, shellId, shellCwd, baseDir, o
       // Re-asserting the size here closes that race.
       api().resizeTerminal(cid, term.cols, term.rows);
 
+      // Opening a Codex chat should land on its latest output. On attach the TUI
+      // streams the whole thread history into scrollback (hundreds of KB, or the
+      // replay buffer on a re-attach). During that burst the viewport can receive
+      // a scroll event whose scrollTop lags the growing scroll area; xterm reads
+      // it as a scroll-up, marks the buffer "user is scrolling", and every later
+      // line lands below the view — the chat opens mid-history. scrollToBottom()
+      // clears that mark, so re-pin after each write until the output goes quiet
+      // (bounded, since a working thread's spinner never does).
+      //
+      // Let go the moment the user wheels, clicks or presses a key. Those are
+      // synchronous DOM events; gating on onScroll instead lags a busy stream and
+      // drags the user back down mid-gesture.
+      const FOLLOW_QUIET_MS = 600;
+      const FOLLOW_MAX_MS = 8000;
+      const followDeadline = performance.now() + FOLLOW_MAX_MS;
+      let following = followOnOpenRef.current;
+      let followTimer: number | null = null;
+      const stopFollowing = () => {
+        following = false;
+        if (followTimer !== null) { clearTimeout(followTimer); followTimer = null; }
+        container.removeEventListener('wheel', stopFollowing, { capture: true } as any);
+        container.removeEventListener('mousedown', stopFollowing, { capture: true } as any);
+        container.removeEventListener('keydown', stopFollowing, { capture: true } as any);
+      };
+      const pinToBottom = () => {
+        if (!following || disposed) return;
+        term.scrollToBottom();
+        if (followTimer !== null) clearTimeout(followTimer);
+        const wait = Math.min(FOLLOW_QUIET_MS, followDeadline - performance.now());
+        if (wait <= 0) { stopFollowing(); return; }
+        followTimer = window.setTimeout(() => {
+          followTimer = null;
+          if (following && !disposed) term.scrollToBottom();
+          stopFollowing();
+        }, wait);
+      };
+      if (following) {
+        container.addEventListener('wheel', stopFollowing, { capture: true, passive: true });
+        container.addEventListener('mousedown', stopFollowing, { capture: true });
+        container.addEventListener('keydown', stopFollowing, { capture: true });
+        // A freshly spawned TUI takes a moment to print anything, so the quiet
+        // window only starts with the first write; this bounds a silent attach.
+        followTimer = window.setTimeout(stopFollowing, FOLLOW_MAX_MS);
+      }
+      const afterWrite = () => { sync(); pinToBottom(); };
+
       const offData = api().onTerminalData((id, data) => {
         if (id !== cid) return;
-        term.write(data, sync);
+        term.write(data, afterWrite);
       });
       const offExit = api().onTerminalExit((id) => {
         if (id !== cid) return;
@@ -347,7 +398,7 @@ export default function Terminal({ conversationId, shellId, shellCwd, baseDir, o
 
       // Replay buffered history now that the data listener is registered. Doing
       // this earlier would race with listener wiring and the replay would be lost.
-      if (replay) term.write(replay, sync);
+      if (replay) term.write(replay, afterWrite);
 
       // In alternate-screen mode (TUI apps like Claude Code), xterm has no scrollback,
       // so wheel events have no effect. Translate them into Page Up/Down bytes the app can read.
@@ -391,11 +442,13 @@ export default function Terminal({ conversationId, shellId, shellCwd, baseDir, o
           fit.fit();
           api().resizeTerminal(cid, term.cols, term.rows);
           sync();
+          pinToBottom();
         } catch {}
       });
       ro.observe(container);
 
       detach = () => {
+        stopFollowing();
         pathLinks.dispose();
         scrollDisp.dispose();
         bufDisp.dispose();

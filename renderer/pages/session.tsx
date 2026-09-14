@@ -520,7 +520,7 @@ export default function SessionPage() {
                 // that is the CLI's own TUI attached to the live thread, the
                 // same thing the user would see in a shell, approvals included.
                 <PaneErrorBoundary key={chatGen} label="Terminal">
-                  <Terminal key={chatGen} conversationId={String(id)} baseDir={conv.provider === 'codex' ? (conv.worktreePath || conv.directoryPath) : conv.directoryPath} onExit={() => setChatExited(true)} autoFocus={rightPane === 'chat'} />
+                  <Terminal key={chatGen} conversationId={String(id)} baseDir={conv.provider === 'codex' ? (conv.worktreePath || conv.directoryPath) : conv.directoryPath} onExit={() => setChatExited(true)} autoFocus={rightPane === 'chat'} followOnOpen={conv.provider === 'codex'} />
                 </PaneErrorBoundary>
               )
             ) : conv && conv.provider === 'codex' ? (

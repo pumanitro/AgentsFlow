@@ -8,6 +8,7 @@ import type { IPty } from 'node-pty';
 import { terminalEnvironment } from './terminal-environment';
 import { buildResumeArgs, redactResumeArgs } from './resume-args';
 import { codexResumeArgs } from './codex-resume-args';
+import { appendBuffer, replayText, type ReplayBuffer } from './replay-buffer';
 
 // Re-exported so the PTY layer stays the single import site for terminal argv,
 // while the builder itself lives in a module that pulls in neither `electron`
@@ -84,7 +85,10 @@ function safeSend(win: BrowserWindow, channel: string, ...args: unknown[]): void
 //    screen and a detach must not tear the TUI down under the other one.
 //    Measured (probe E4): killing the PTY is a pure detach — the thread stays
 //    loaded, keeps its in-flight turn, and other clients see no event at all.
-//    So the idle reaper reclaiming a Codex PTY costs a redraw, never a turn.
+//    So the PTY lives exactly as long as someone is watching it: the last
+//    detach kills it and the next open spawns a fresh TUI, which re-renders
+//    the complete history at the current size (see detach for why a warm
+//    replay is the wrong tool here).
 
 const env = terminalEnvironment;
 
@@ -102,11 +106,11 @@ function codexEnv(): Record<string, string> {
 interface ClaudeChannel { id: string; pty: IPty; win: BrowserWindow; sessionId: string; }
 const claudeChannels = new Map<string, ClaudeChannel>();
 
-interface ResumeSession {
+interface ResumeSession extends ReplayBuffer {
   sessionId: string;
   pty: IPty;
-  buffer: string[];
-  bufferBytes: number;
+  // A Codex TUI viewer ('codex' mode above): torn down on its last detach.
+  isCodex: boolean;
   subscribers: Map<string, ShellSubscriber>;
   lastDataAt: number;            // last time the PTY produced output
   detachedAt: number | null;     // when the last subscriber left (null while watched)
@@ -489,8 +493,10 @@ async function attachResume(opts: {
     const newSess: ResumeSession = {
       sessionId: opts.sessionId,
       pty,
+      isCodex,
       buffer: [],
       bufferBytes: 0,
+      trimmed: false,
       subscribers: new Map(),
       lastDataAt: Date.now(),
       detachedAt: null,
@@ -498,9 +504,14 @@ async function attachResume(opts: {
     resumeSessions.set(opts.sessionId, newSess);
     sess = newSess;
 
+    // Both callbacks check that the session under this id is still OURS: a
+    // Codex TUI is killed on its last detach, and the next open — possibly
+    // before that process has reported its exit — spawns a fresh one under the
+    // same thread id. The old process's trailing output and exit must not land
+    // on the new session's viewers.
     pty.onData(guardCb(`${label} onData`, (data) => {
       const s = resumeSessions.get(opts.sessionId);
-      if (!s) return;
+      if (!s || s.pty !== pty) return;
       s.lastDataAt = Date.now();
       appendBuffer(s, data, RESUME_BUFFER_MAX_BYTES);
       for (const sub of s.subscribers.values()) {
@@ -508,9 +519,9 @@ async function attachResume(opts: {
       }
     }));
     pty.onExit(guardCb(`${label} onExit`, (e) => {
-      console.log(`[agentsflow][pty] ${label} onExit`, { sessionId: opts.sessionId, exitCode: e.exitCode, signal: e.signal });
+      console.log(`[agentsflow][pty] ${label} onExit`, { sessionId: opts.sessionId, pid: pty.pid, exitCode: e.exitCode, signal: e.signal });
       const s = resumeSessions.get(opts.sessionId);
-      if (!s) return;
+      if (!s || s.pty !== pty) return;
       for (const sub of s.subscribers.values()) {
         safeSend(sub.win, 'terminal:exit', sub.channelId);
         resumeChannelToSessionId.delete(sub.channelId);
@@ -532,18 +543,16 @@ async function attachResume(opts: {
   resumeChannelToSessionId.set(opts.channelId, opts.sessionId);
 
   // Replay buffer is written by the renderer after its data listener is wired.
-  return sess.buffer.length > 0 ? sess.buffer.join('') : '';
+  return replayText(sess);
 }
 
 // ---------- Shells: one PTY per shellId, survives renderer detach ----------
 
 interface ShellSubscriber { channelId: string; win: BrowserWindow; }
-interface ShellState {
+interface ShellState extends ReplayBuffer {
   shellId: string;
   pty: IPty;
   cwd: string;
-  buffer: string[];        // chunks of recent output, capped by total bytes
-  bufferBytes: number;
   subscribers: Map<string, ShellSubscriber>;
   lastDataAt: number;            // last time the PTY produced output
   detachedAt: number | null;     // when the last subscriber left (null while watched)
@@ -561,19 +570,6 @@ const SHELL_BUFFER_MAX_BYTES = 256 * 1024;
 // are few and user-opened (unlike chatty shells), so the memory trade-off is
 // cheap. ~4 MB comfortably holds a reprint within xterm's 10 000-line window.
 const RESUME_BUFFER_MAX_BYTES = Number(process.env.AGENTSFLOW_RESUME_BUFFER_MAX_BYTES) || 4 * 1024 * 1024;
-
-function appendBuffer(
-  s: { buffer: string[]; bufferBytes: number },
-  data: string,
-  maxBytes: number = SHELL_BUFFER_MAX_BYTES,
-) {
-  s.buffer.push(data);
-  s.bufferBytes += data.length;
-  while (s.bufferBytes > maxBytes && s.buffer.length > 1) {
-    const removed = s.buffer.shift()!;
-    s.bufferBytes -= removed.length;
-  }
-}
 
 // A command to run automatically the first time a given shell is spawned. Used
 // by the account-add flow, which must open a terminal *and* start the one-time
@@ -628,6 +624,7 @@ export async function attachShell(opts: {
       cwd: opts.cwd,
       buffer: [],
       bufferBytes: 0,
+      trimmed: false,
       subscribers: new Map(),
       lastDataAt: Date.now(),
       detachedAt: null,
@@ -639,7 +636,7 @@ export async function attachShell(opts: {
       const s = shells.get(opts.shellId);
       if (!s) return;
       s.lastDataAt = Date.now();
-      appendBuffer(s, data);
+      appendBuffer(s, data, SHELL_BUFFER_MAX_BYTES);
       for (const sub of s.subscribers.values()) {
         safeSend(sub.win, 'terminal:data', sub.channelId, data);
       }
@@ -682,7 +679,7 @@ export async function attachShell(opts: {
   // Return the replay buffer to the caller so the renderer can write it AFTER
   // it has registered its `terminal:data` listener. Sending the replay through
   // the data IPC here would race the listener registration and get dropped.
-  return shell.buffer.length > 0 ? shell.buffer.join('') : '';
+  return replayText(shell);
 }
 
 export function listShellIds(): string[] {
@@ -947,8 +944,27 @@ export function detach(channelId: string): void {
     const rs = resumeSessions.get(rsid);
     rs?.subscribers.delete(channelId);
     resumeChannelToSessionId.delete(channelId);
-    // Last viewer gone — start the idle clock so the reaper can reclaim the PTY.
-    if (rs && rs.subscribers.size === 0) rs.detachedAt = Date.now();
+    if (rs && rs.subscribers.size === 0) {
+      // Codex: the last viewer leaving ends the TUI. Keeping it warm for an
+      // instant re-open is what blanked the chat (2026-09-14): a working
+      // thread's status line repaints ~10×/s, so within the hour the replay
+      // buffer hits its cap and evicts its head — which is the history the
+      // TUI printed once, on spawn, and never again. The re-open then replayed
+      // an hour of spinner frames drawn for the old geometry, opening on a
+      // torn escape sequence ("5;49m" top-left) over an otherwise empty pane.
+      // A fresh `codex resume` re-renders the whole thread at the current size
+      // in about a second, and the kill is a pure detach (probe E4): the turn
+      // runs on in the app-server. The history a second viewer joins from is
+      // still the replay buffer, so that path is unchanged.
+      if (rs.isCodex) {
+        console.log('[agentsflow][pty] codex viewer closed — ending the TUI', { sessionId: rsid, pid: rs.pty.pid });
+        resumeSessions.delete(rsid);
+        try { rs.pty.kill(); } catch { /* ignore */ }
+        return;
+      }
+      // Last viewer gone — start the idle clock so the reaper can reclaim the PTY.
+      rs.detachedAt = Date.now();
+    }
     return;
   }
   // Shell: just unsubscribe — PTY stays alive for future re-attach.
