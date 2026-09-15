@@ -367,6 +367,15 @@ test('a thread status becomes a row state, and says nothing when the server is n
   assert.deepEqual(mapThreadStatus({ type: 'idle' }, { stored: 'working' }), { state: 'done' }); // Finished while we were away.
   assert.equal(mapThreadStatus({ type: 'idle' }, { stored: 'done' }), null);
   assert.deepEqual(mapThreadStatus({ type: 'idle' }, { stored: 'idle' }), { state: 'idle' });
+
+  // A thread that has run nothing has finished nothing: `thread/start` answers
+  // idle, and reading that as an ending painted a new chat "done" — a green dot
+  // — for the whole of its first turn.
+  assert.equal(mapThreadStatus({ type: 'idle' }, { stored: 'working', hasTurns: false }), null);
+  assert.equal(mapThreadStatus({ type: 'idle' }, { stored: 'starting', hasTurns: false }), null);
+  assert.equal(mapThreadStatus({ type: 'idle' }, { stored: 'idle', hasTurns: false }), null);
+  // Having turns is not itself an ending — the last turn's status still decides.
+  assert.deepEqual(mapThreadStatus({ type: 'idle' }, { stored: 'working', hasTurns: true }), { state: 'done' });
 });
 
 test('reconnecting resumes every pinned Codex thread, applies its status and backfills what was missed', async () => {
@@ -490,6 +499,50 @@ test('a broadcast status change reaches a row the app never resumed', async () =
     f.event('thread/started', 'thread-somebody-else', { thread: { id: 'thread-somebody-else', status: { type: 'active' } } });
     await settle();
     assert.equal(f.statuses.length, 1);
+  } finally { f.manager.close(); }
+});
+
+test('the thread/started broadcast cannot mark a brand-new chat done during its first turn', async () => {
+  const f = fixture();
+  try {
+    f.conversations.get('one')!.state = 'starting'; // What main.ts writes when the chat is spawned.
+    await f.manager.send('one', 'first message');
+    assert.equal(f.conversations.get('one')!.state, 'working');
+
+    // `thread/start` makes the server broadcast `thread/started` carrying
+    // `status: idle` — it reaches every client, and it used to land *after*
+    // send() had painted the row working.
+    f.event('thread/started', 'thread-1', { thread: { id: 'thread-1', status: { type: 'idle' } } });
+    await settle();
+    assert.equal(f.conversations.get('one')!.state, 'working'); // Still blue, not "Codex finished".
+
+    // The same, for a server that refuses to list the turns of a thread whose
+    // first user message has not been recorded yet.
+    f.rpc.queued.set('thread/turns/list', [new Error('thread thread-1 is not materialized yet; thread/turns/list is unavailable before first user message')]);
+    f.event('thread/status/changed', 'thread-1', { status: { type: 'idle' } });
+    await settle();
+    assert.equal(f.conversations.get('one')!.state, 'working');
+
+    // The turn's own completion is still what ends it.
+    f.event('turn/completed', 'thread-1', { turn: { status: 'completed', items: [] } });
+    assert.equal(f.conversations.get('one')!.state, 'done');
+  } finally { f.manager.close(); }
+});
+
+test('an idle status overtaken while we ask how the last turn ended is dropped', async () => {
+  const f = fixture();
+  try {
+    pinned(f.conversations.get('one')!, 'thread-x', 'idle');
+    // The previous turn really did complete — but a new one starts while
+    // `thread/turns/list` is in flight, which is the whole race: the answer is
+    // about the turn before the one now running.
+    f.rpc.queued.set('thread/turns/list', [() => {
+      f.conversations.get('one')!.state = 'working';
+      return { data: [{ status: 'completed' }] };
+    }]);
+    f.event('thread/status/changed', 'thread-x', { status: { type: 'idle' } });
+    await settle();
+    assert.equal(f.conversations.get('one')!.state, 'working');
   } finally { f.manager.close(); }
 });
 

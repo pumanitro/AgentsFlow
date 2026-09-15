@@ -39,6 +39,14 @@ export const RESUME_RETRY = { attempts: 5, delayMs: 2_000 };
 const NO_ROLLOUT = /no rollout found/i;
 
 /**
+ * How `thread/turns/list` refuses a thread that exists but has never been given
+ * a first user message: `thread <id> is not materialized yet; thread/turns/list
+ * is unavailable before first user message`. It is an answer — "no turns" — not
+ * a failure to answer.
+ */
+const NOT_MATERIALIZED = /not materialized yet/i;
+
+/**
  * How the app-server refuses a method it does not have. It answers -32600 with
  * `unknown variant \`thread/queue/add\``, not -32601, and `CodexRpc` keeps only
  * the message — so this is matched on text, and covers the capability gate too.
@@ -49,6 +57,12 @@ const METHOD_ABSENT = /unknown (variant|method)|method not found|unsupported|exp
 export const SETTLED_STATES = new Set(['done', 'error', 'stopped']);
 /** Row states that mean "a turn was in flight when we last looked". */
 const LIVE_STATES = new Set(['working', 'starting', 'active', 'needs-input', 'blocked']);
+/**
+ * The subset of those that can only come from a turn the server is running
+ * right now — unlike `starting`, which this app writes onto a row before the
+ * thread even exists. Nothing inconclusive may paint over these.
+ */
+const TURN_IN_FLIGHT = new Set(['working', 'active', 'needs-input', 'blocked']);
 
 const NEEDS_INPUT = 'Codex needs your input';
 
@@ -60,6 +74,14 @@ export interface ThreadStatusContext {
   /** `thread/turns/list` limit 1, newest first — only read when it can change the answer. */
   lastTurnStatus?: string;
   lastTurnError?: string;
+  /**
+   * False when the thread is known to have run nothing yet — an empty
+   * `thread/turns/list`, or its refusal to answer at all for a thread that has
+   * not been materialized by a first user message. Undefined means "not asked
+   * / could not tell", which is not the same thing and must not be read as
+   * "finished". See the `idle` branch of `mapThreadStatus`.
+   */
+  hasTurns?: boolean;
 }
 
 /**
@@ -84,6 +106,12 @@ export function mapThreadStatus(status: WireObject | undefined | null, ctx: Thre
   if (ctx.lastTurnStatus === 'failed') return { state: 'error', detail: ctx.lastTurnError || 'The last Codex turn failed' };
   if (ctx.lastTurnStatus === 'interrupted') return { state: 'stopped' };
   if (ctx.lastTurnStatus === 'completed') return { state: 'done' };
+  // A thread that has run nothing has finished nothing. `thread/start`
+  // broadcasts `thread/started` with status idle, and that arrives while the
+  // row is still `starting`/`working` from the send that created it — reading
+  // it as an ending is what painted a brand-new chat's dot green for the whole
+  // of its first turn.
+  if (ctx.hasTurns === false) return null;
   if (ctx.stored && SETTLED_STATES.has(ctx.stored)) return null; // Already settled; idle adds nothing.
   if (ctx.stored && LIVE_STATES.has(ctx.stored)) return { state: 'done' }; // It ended while we were away.
   return { state: 'idle' };
@@ -403,10 +431,26 @@ export class CodexAgents {
     try {
       const page = await this.rpc.request('thread/turns/list', { threadId, limit: 1, sortDirection: 'desc' });
       const turn = page?.data?.[0];
-      return turn ? { lastTurnStatus: turn.status, lastTurnError: turn.error?.message } : {};
-    } catch {
-      return {};
+      return turn ? { hasTurns: true, lastTurnStatus: turn.status, lastTurnError: turn.error?.message } : { hasTurns: false };
+    } catch (error) {
+      // "not materialized yet" is an answer, not a failure: the thread exists
+      // and has never been given a turn. Every other error means we could not
+      // ask, which stays undefined so no ending is inferred from it either.
+      return NOT_MATERIALIZED.test((error as Error).message) ? { hasTurns: false } : {};
     }
+  }
+
+  /**
+   * True when an `idle` status has been overtaken while we were asking the
+   * server how the last turn ended: a turn is in flight now, or something more
+   * recent than this notification has already repainted the row. Painting it
+   * anyway drops "Codex finished" on top of a live turn's working dot, where it
+   * stays until the turn ends — the row reads as done for the whole turn.
+   */
+  private staleIdle(id: string, stored?: string): boolean {
+    if (this.sessions.get(id)?.turnId) return true;
+    const now = this.deps.get(id)?.state;
+    return now !== undefined && stored !== undefined && now !== stored;
   }
 
   /** Paint one thread status onto its row. Returns what was applied, or null. */
@@ -414,6 +458,7 @@ export class CodexAgents {
     let ctx: ThreadStatusContext = { stored };
     if (status?.type === 'idle' && threadId && !(stored && SETTLED_STATES.has(stored))) {
       ctx = { ...ctx, ...(await this.lastTurn(threadId)) };
+      if (this.staleIdle(id, stored)) return null;
     }
     const mapped = mapThreadStatus(status, ctx);
     if (!mapped) return null;
@@ -592,7 +637,11 @@ export class CodexAgents {
       // resume response is the only status snapshot the server ever gives.
       if (await this.applyThreadStatus(id, thread.status, conv.state, thread.id)) return s;
     }
-    this.state(id, 'idle');
+    // Nothing conclusive came back. "Ready to continue" is right for a cold
+    // thread, but not on top of a row that says a turn is in flight — the
+    // status may have been dropped precisely because it was overtaken by one.
+    const live = (this.deps.get(id)?.state || '').toLowerCase();
+    if (!TURN_IN_FLIGHT.has(live)) this.state(id, 'idle');
     return s;
   }
 
