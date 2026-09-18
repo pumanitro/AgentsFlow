@@ -11,7 +11,14 @@ test.describe('codexResumeArgs', () => {
       'resume', THREAD,
       '--remote', `unix://${SOCK}`,
       '--no-alt-screen',
+      '-c', 'check_for_update_on_startup=false',
     ]);
+  });
+
+  test('never lets the TUI offer its self-update — that runs npm install -g inside a PTY the app kills', () => {
+    const args = codexResumeArgs(THREAD, SOCK);
+    const at = args.indexOf('check_for_update_on_startup=false');
+    assert.ok(at > 0 && args[at - 1] === '-c', 'the override must be passed as a -c pair');
   });
 
   test('carries no per-invocation agent flags — the thread already holds them', () => {

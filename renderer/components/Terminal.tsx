@@ -10,7 +10,8 @@ interface Props {
   // when turning them into clickable "reveal in Finder" links. For a chat pane
   // this is the conversation's directory; for a shell it's the shell's cwd.
   baseDir?: string;
-  onExit?: () => void;
+  /** `reason` is set only when the terminal never came up (a failed attach). */
+  onExit?: (reason?: string) => void;
   // Controls whether the terminal grabs focus on mount and refocuses on window
   // focus. Shells pass false so they never steal focus from the chat/file pane.
   autoFocus?: boolean;
@@ -352,9 +353,9 @@ export default function Terminal({ conversationId, shellId, shellCwd, baseDir, o
         if (id !== cid) return;
         term.write(data, afterWrite);
       });
-      const offExit = api().onTerminalExit((id) => {
+      const offExit = api().onTerminalExit((id, reason) => {
         if (id !== cid) return;
-        onExitRef.current?.();
+        onExitRef.current?.(reason);
       });
       off.push(offData, offExit);
 

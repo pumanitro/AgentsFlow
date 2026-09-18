@@ -1,11 +1,16 @@
 import { execFile } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
+import * as path from 'node:path';
 import { CodexAccountReader } from './codex-account';
 import { agentEnvironment } from './cli-environment';
+import { pinnedCodexCli } from './codex-cli';
 import type { CodexModel, Conversation } from '../shared/types';
 import type { CodexEntry, CodexReply, CodexRequest, CodexSnapshot } from '../shared/codex';
 import { CodexRpc, WireObject } from './codex-protocol';
 import { codexHistoryText } from './handover';
+import { CODEX_DEFAULT_APPROVAL_POLICY, CODEX_DEFAULT_SANDBOX } from './codex-permissions';
+
+export { CODEX_DEFAULT_APPROVAL_POLICY, CODEX_DEFAULT_SANDBOX } from './codex-permissions';
 
 /** How the app-server words "you are out of quota", in any of its shapes. */
 const LIMIT_MESSAGE = /rate.?limit|usage limit|quota|too many requests|429/i;
@@ -17,16 +22,6 @@ const MODEL_CACHE_MS = 10 * 60_000;
 export const CODEX_SWITCHED = 'Codex account switched — reopen to continue';
 
 const HANDOVER_NOTE = 'Forked from Claude Code — that conversation was passed to Codex as context.';
-
-/**
- * Spawn defaults for a thread this app starts. Codex parks a turn forever at
- * `waitingOnApproval` while nobody is connected, so an unattended run must not
- * be able to ask — the same reason Claude conversations here run `--bg` in
- * bypass mode. The sandbox is what keeps that safe. `deps.options(conv)`
- * overrides both, so an attended conversation can still ask for approvals.
- */
-export const CODEX_DEFAULT_APPROVAL_POLICY = 'never';
-export const CODEX_DEFAULT_SANDBOX = 'workspace-write';
 
 /**
  * `thread/resume` fails with `no rollout found` until the thread's first turn
@@ -143,10 +138,15 @@ export function approvalResult(method: string, params: WireObject, reply: CodexR
  * `thread/queue/add`; replaced wholesale in tests rather than mocked per call.
  */
 export const queueCli = {
-  run: (args: string[]): Promise<void> => new Promise((resolve, reject) => {
-    execFile(process.env.CODEX_BIN || 'codex', args, { env: agentEnvironment() }, (error, _out, stderr) =>
-      error ? reject(new Error(`${error.message}${stderr ? `\n${stderr}` : ''}`)) : resolve());
-  }),
+  // `socket` names the server the message is for; its directory holds the record
+  // of the CLI that server was started with (codex-cli.ts).
+  run: async (args: string[], socket?: string): Promise<void> => {
+    const bin = socket ? (await pinnedCodexCli(path.dirname(socket))).bin : process.env.CODEX_BIN || 'codex';
+    await new Promise<void>((resolve, reject) => {
+      execFile(bin, args, { env: agentEnvironment() }, (error, _out, stderr) =>
+        error ? reject(new Error(`${error.message}${stderr ? `\n${stderr}` : ''}`)) : resolve());
+    });
+  },
 };
 
 /**
@@ -216,6 +216,8 @@ export interface Dependencies {
 export class CodexAgents {
   private closing = false;
   private restarting = false;
+  /** What a parked row says after a deliberate restart: why it has to be reopened. */
+  private restartNote = CODEX_SWITCHED;
   private sessions = new Map<string, Session>();
   private threads = new Map<string, string>();
   private loading = new Map<string, Promise<Session>>();
@@ -263,8 +265,9 @@ export class CodexAgents {
    * process. Threads are not lost — each row keeps its thread id, and the
    * reconnect that follows re-syncs them all.
    */
-  async restart(): Promise<void> {
+  async restart(note = CODEX_SWITCHED): Promise<void> {
     if (this.closing) return;
+    this.restartNote = note;
     this.restarting = true;
     this.accountReader.invalidate();
     this.models = undefined;
@@ -284,7 +287,7 @@ export class CodexAgents {
       s.snapshot.requests = []; s.rawRequests.clear();
       s.snapshot.state = 'idle'; s.snapshot.error = undefined;
       s.turnId = undefined; s.busy = false;
-      this.deps.update(id, { state: 'idle', status: 'idle', description: CODEX_SWITCHED });
+      this.deps.update(id, { state: 'idle', status: 'idle', description: this.restartNote });
       this.deps.changed(s.snapshot);
     }
     this.sessions.clear(); this.threads.clear(); this.loading.clear();
@@ -294,6 +297,17 @@ export class CodexAgents {
   hasRunningTurn(): boolean {
     for (const s of this.sessions.values()) if (s.turnId || s.busy) return true;
     return false;
+  }
+
+  /**
+   * Threads the SERVER is running a turn on, whoever started them — a delegated
+   * child or a terminal pane's turn never shows up in `sessions`. Only asks a
+   * server that is already there: this must not be what starts one.
+   */
+  async activeThreadCount(): Promise<number> {
+    await this.rpc.start();
+    const page = await this.rpc.request('thread/list', { limit: 100, excludeTurns: true });
+    return (page?.data || []).filter((row: WireObject) => row?.status?.type === 'active').length;
   }
 
   /** The models this Codex CLI offers, default first. Never throws: [] on any failure. */
@@ -598,7 +612,11 @@ export class CodexAgents {
     } finally { this.loading.delete(id); }
   }
 
-  /** Thread options, with a pending fork's seed folded into the developer instructions. */
+  /**
+   * Apply the same execution defaults to start, fork, resume and reconnect,
+   * including when reusing a daemon launched before these defaults changed.
+   * Explicit dependency options can still override them for an attended client.
+   */
   private threadOptions(conv: Conversation, handover: boolean): WireObject {
     const options: WireObject = {
       approvalPolicy: CODEX_DEFAULT_APPROVAL_POLICY, sandbox: CODEX_DEFAULT_SANDBOX,
@@ -720,7 +738,7 @@ export class CodexAgents {
       }
     }
     const socket = this.rpc.socketPath?.();
-    await queueCli.run(['queue', '--thread', threadId, '--message', text, ...(socket ? ['--remote', `unix://${socket}`] : [])]);
+    await queueCli.run(['queue', '--thread', threadId, '--message', text, ...(socket ? ['--remote', `unix://${socket}`] : [])], socket);
   }
 
   async stop(id: string): Promise<void> {

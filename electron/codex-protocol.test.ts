@@ -428,6 +428,10 @@ test('a real codex app-server survives a disconnect and is reused', {
     await rpc.start();
     assert.equal(rpc.isConnected(), true);
 
+    const { config } = await rpc.request('config/read', { includeLayers: false });
+    assert.equal(config.approval_policy, 'never');
+    assert.equal(config.sandbox_mode, 'danger-full-access');
+
     // A round trip over the real wire. Whichever of these the current sign-in
     // allows, the point is that a response comes back through the WebSocket.
     let answered = false;

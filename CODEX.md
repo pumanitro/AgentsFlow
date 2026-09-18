@@ -46,6 +46,33 @@ terminals, and all sixteen ANSI theme colors are defined. Color-aware commands c
 use the full 256-color palette or 24-bit RGB. Shell startup files can still choose
 their own color preferences; no global shell configuration is changed.
 
+## Updating the Codex CLI
+
+Update Codex in your own terminal (`npm install -g @openai/codex`), never from a chat
+pane. The pane's TUI is started with `check_for_update_on_startup=false` so it does not
+offer to: its "Update now" runs `npm install -g` inside a PTY that Peers Flow kills
+when the pane closes, which on 2026-09-18 left the machine with no `codex` on PATH and
+a truncated binary, and every Codex chat exiting 1 on open. (The threads were never
+lost; they run in the daemon.)
+
+A global update, whether finished, interrupted or still running, does not reach open
+chats: they run the pinned copy described under Implementation. Peers Flow then follows
+the update by itself (`electron/codex-upgrade.ts`): every two minutes it compares the
+version the running daemon reports with the installed CLI, and once the install has
+been left alone for a minute, answers `--version`, and no Codex turn is running and no
+Codex pane is open, it restarts the daemon onto the new version. Threads are resumed
+from their rollout files when their row is next opened; an open row is labelled
+"Codex updated to X — reopen to continue". A half-written or broken install is never
+followed. If the global install is broken when a daemon has to start, the newest kept
+copy is used (two are kept) and the log says so. If a pane still cannot start, it shows
+the CLI's own error instead of "the terminal closed". Look for `[codex-upgrade]` and
+`[codex-cli]` in `~/Library/Logs/Peers Flow/main.log`.
+
+Repairing an interrupted npm update by hand: in `<npm prefix>/lib/node_modules/@openai/`
+the previous version survives as `.codex-XXXXXXXX` and its launcher link as
+`<npm prefix>/bin/.codex-XXXXXXXX`. Either rename both back to `codex`, or remove them
+and the half-written `codex` directory and run `npm install -g @openai/codex` again.
+
 ## Accounts and usage
 
 The **Accounts** and **Usage** panels show Claude and Codex separately within the
@@ -87,10 +114,13 @@ changes the machine's Claude CLI login, including Claude sessions outside Peers 
   app-server forgets a thread on restart). A fork to Codex records which Claude session
   to read and reads it as developer instructions when the thread starts, so it picks up
   the newest state of a source that is still running.
-- Questions and tool approvals appear in the chat. Each approval applies once. Codex
-  sessions use workspace-write sandboxing and on-request approval, reviewed by the user;
-  this does not change global Codex settings. Claude retains the upstream permission
-  behavior, including its background-launch `bypassPermissions` mode.
+- Codex sessions default to full filesystem and network access with no interactive
+  command approvals (`sandbox: "danger-full-access"`, `approvalPolicy: "never"`).
+  This applies to UI launches (including Ask about performance), delegated peers,
+  Codex forks, Claude-to-Codex handovers, and thread resumes/reconnects. Questions and
+  separate connection/Computer Use/browser consent can still require input. Global
+  Codex settings and credentials are unchanged. Claude retains its existing
+  background-launch `bypassPermissions` mode.
 - Paste images in either the initial composer or a Codex follow-up. They are passed as
   native Codex image inputs and tracked with the conversation's attachments.
 - The MCP `delegate` tool accepts an optional provider. For example:
@@ -111,10 +141,33 @@ failure never silently launches a second agent or switches providers.
 
 ## Implementation
 
-`electron/codex-protocol.ts` owns one local `codex app-server --stdio` child and its
-JSON-RPC connection. `electron/codex-agent.ts` routes events and requests by thread ID,
+`electron/codex-server.ts` starts or reuses a detached `codex app-server --listen unix://…`
+daemon; `electron/codex-protocol.ts` connects over WebSocket on its Unix socket.
+`electron/codex-permissions.ts` shares execution defaults between the daemon's
+`-c approval_policy="never" -c sandbox_mode="danger-full-access"` arguments and
+the `thread/start`, `thread/fork`, and `thread/resume` requests. Explicit thread
+settings also cover a reused daemon that started with older defaults. The remote
+`codex resume` terminal and `codex queue` fallback use the existing thread's settings;
+there is no Codex SDK or standalone `codex exec` launch path.
+`electron/codex-cli.ts` decides WHICH Codex CLI runs. It is never bare `codex` on
+PATH: when a daemon starts, the healthy global npm install is cloned (APFS clone, no
+bytes copied) into `<userData>/codex/cli/<version>/`, the daemon runs from that copy,
+and `codex/app-server.cli.json` records it. Every chat pane (`codex resume --remote`)
+and the `codex queue` fallback use the recorded CLI, so they always match the running
+daemon. A daemon started before this existed is adopted on first use. `CODEX_BIN`
+bypasses all of it.
+
+`electron/codex-agent.ts` routes events and requests by thread ID,
 keeps independent turn state, and loads history through `thread/items/list` pagination.
 `renderer/components/CodexChat.tsx` renders the transcript and approval forms.
+
+After changing these defaults, run `npm run build:electron`, then quit and relaunch
+Peers Flow when active work permits (`npm start` for a source production build,
+`npm run dev` for development). A renderer-only reload cannot update the main process.
+Packaged installations need a rebuilt/reinstalled app (`npm run package`). No Codex
+daemon restart is required for newly launched threads: they receive explicit settings
+even on an already running daemon. Daemon-wide defaults take effect the next time a
+daemon is started normally; do not stop it while it has active work.
 
 The normal Peers Flow store holds provider, thread ID, model, and final-result metadata.
 Codex remains the source of truth for conversation history. Legacy records without a
@@ -123,7 +176,9 @@ account rotation, or terminal attach paths. The MCP configuration is scoped to e
 root conversation and rebuilt on resume/fork.
 
 Official protocol references: [Codex app-server](https://learn.chatgpt.com/docs/app-server)
-and [CLI options](https://learn.chatgpt.com/docs/cli/reference).
+and [CLI options](https://learn.chatgpt.com/docs/developer-commands?surface=cli).
+The [documented full-access settings](https://learn.chatgpt.com/docs/sandboxing#configure-defaults)
+were checked against the TypeScript protocol generated by installed Codex CLI 0.154.0.
 
 ## Verification — 2026-09-11
 

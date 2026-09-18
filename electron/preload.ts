@@ -80,7 +80,7 @@ const api: AgentsFlowApi = {
     return () => ipcRenderer.removeListener('terminal:data', listener);
   },
   onTerminalExit: (cb) => {
-    const listener = (_e: IpcRendererEvent, channelId: string) => cb(channelId);
+    const listener = (_e: IpcRendererEvent, channelId: string, reason?: string) => cb(channelId, reason);
     ipcRenderer.on('terminal:exit', listener);
     return () => ipcRenderer.removeListener('terminal:exit', listener);
   },

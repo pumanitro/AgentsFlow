@@ -52,6 +52,8 @@ export default function SessionPage() {
   // Reopen (re-attach / resume) or go Back deliberately — matching the app's
   // explicit ⌘←/Back navigation model.
   const [chatExited, setChatExited] = useState(false);
+  // Why the chat terminal never came up, when it failed rather than closed.
+  const [chatExitReason, setChatExitReason] = useState<string | null>(null);
   // Bumped by Reopen to force a fresh Terminal mount (and a new attach).
   const [chatGen, setChatGen] = useState(0);
   // 1-based line to jump to when a file is opened from search. The nonce makes
@@ -196,6 +198,7 @@ export default function SessionPage() {
     // New conversation in view → clear any prior "chat ended" notice so the
     // fresh terminal mounts instead of showing the stale Reopen panel.
     setChatExited(false);
+    setChatExitReason(null);
     const a = api();
     const apply = (cs: Conversation[]) => {
       setConv(cs.find((c) => c.id === id) ?? null);
@@ -493,15 +496,20 @@ export default function SessionPage() {
             {conv?.sessionId ? (
               chatExited ? (
                 <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 px-6 text-center">
-                  <div className="text-sm text-text">The chat terminal closed.</div>
+                  <div className="text-sm text-text">{chatExitReason ? 'The chat terminal could not start.' : 'The chat terminal closed.'}</div>
+                  {chatExitReason && (
+                    <pre className="max-w-xl max-h-40 overflow-auto whitespace-pre-wrap text-left text-[11px] text-red-300 border border-red-500/60 bg-panel rounded-md px-3 py-2">{chatExitReason}</pre>
+                  )}
                   <div className="text-xs text-muted max-w-sm">
-                    {conv.provider === 'codex'
+                    {chatExitReason && conv.provider === 'codex'
+                      ? 'The thread itself is unaffected — it runs in the background app-server. Fix the Codex CLI named above, then Reopen.'
+                      : conv.provider === 'codex'
                       ? 'Closing the Codex terminal only detaches the view — the thread keeps running in the background. Reopen to attach again; it comes back with its full history and any turn still in flight.'
                       : 'The session ended or couldn’t attach (a finished agent just replays and exits). Reopen to reconnect — a finished session resumes where it left off. If it keeps failing, Fork branches an independent copy with the full history.'}
                   </div>
                   <div className="flex items-center gap-2">
                     <button
-                      onClick={() => { setChatExited(false); setChatGen((g) => g + 1); }}
+                      onClick={() => { setChatExited(false); setChatExitReason(null); setChatGen((g) => g + 1); }}
                       className="px-3 py-1 text-[11px] uppercase tracking-wider rounded-md bg-accent text-bg font-semibold hover:opacity-90"
                     >Reopen</button>
                     <button
@@ -520,7 +528,7 @@ export default function SessionPage() {
                 // that is the CLI's own TUI attached to the live thread, the
                 // same thing the user would see in a shell, approvals included.
                 <PaneErrorBoundary key={chatGen} label="Terminal">
-                  <Terminal key={chatGen} conversationId={String(id)} baseDir={conv.provider === 'codex' ? (conv.worktreePath || conv.directoryPath) : conv.directoryPath} onExit={() => setChatExited(true)} autoFocus={rightPane === 'chat'} followOnOpen={conv.provider === 'codex'} />
+                  <Terminal key={chatGen} conversationId={String(id)} baseDir={conv.provider === 'codex' ? (conv.worktreePath || conv.directoryPath) : conv.directoryPath} onExit={(reason) => { setChatExitReason(reason ?? null); setChatExited(true); }} autoFocus={rightPane === 'chat'} followOnOpen={conv.provider === 'codex'} />
                 </PaneErrorBoundary>
               )
             ) : conv && conv.provider === 'codex' ? (

@@ -1,6 +1,8 @@
 import './cli-environment';
 import { CodexAgents } from './codex-agent';
 import * as codexServer from './codex-server';
+import { codexUpgradeAvailable } from './codex-cli';
+import { upgradeCodexWhenIdle } from './codex-upgrade';
 import type { CodexReply } from '../shared/codex';
 import { app, BrowserWindow, clipboard, dialog, ipcMain, nativeImage, powerMonitor, shell } from 'electron';
 import * as path from 'path';
@@ -93,7 +95,7 @@ const codexDeps = {
     const server = configPath ? JSON.parse(fs.readFileSync(configPath, 'utf8')).mcpServers.peersflow : undefined;
     return {
       // approvalPolicy / sandbox come from CodexAgents' unattended defaults
-      // ('never' + workspace-write): a detached turn must never park on a prompt.
+      // ('never' + danger-full-access), matching Claude's bypassPermissions mode.
       approvalsReviewer: 'user',
       ...(server ? {
         config: { 'mcp_servers.peersflow': { ...server, required: true, tool_timeout_sec: 1860 } },
@@ -525,6 +527,23 @@ app.whenReady().then(() => {
   };
   sweepNotes();
   setInterval(sweepNotes, 6 * 60 * 60 * 1000);
+
+  // Follow Codex updates: once a newer CLI is installed and nothing Codex is
+  // running or on screen, move the app-server onto it (codex-upgrade.ts).
+  const followCodexUpdates = () => void upgradeCodexWhenIdle({
+    serverVersion: () => codexServer.probeCodexServerVersion(codexSocketPath()),
+    available: codexUpgradeAvailable,
+    busy: async () => {
+      if (codexExt.hasRunningTurn?.()) return 'a Codex chat is working';
+      if (pty.hasCodexViewers()) return 'a Codex chat is open';
+      const active = await codex.activeThreadCount();
+      return active ? `${active} Codex thread(s) have a turn in flight` : null;
+    },
+    restart: (note) => codex.restart(note),
+    log: (message, detail) => console.log(`[agentsflow][codex-upgrade] ${message}`, detail ?? {}),
+  }).catch((err) => console.warn('[agentsflow][codex-upgrade] check failed', (err as Error)?.message ?? err));
+  setTimeout(followCodexUpdates, 20_000);
+  setInterval(followCodexUpdates, 2 * 60 * 1000);
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();

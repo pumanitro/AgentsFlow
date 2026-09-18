@@ -714,7 +714,8 @@ export interface AgentsFlowApi {
   resizeTerminal: (channelId: string, cols: number, rows: number) => Promise<void>;
   detachTerminal: (channelId: string) => Promise<void>;
   onTerminalData: (cb: (channelId: string, data: string) => void) => () => void;
-  onTerminalExit: (cb: (channelId: string) => void) => () => void;
+  /** `reason` is set only when the terminal never came up (a failed attach), not on an ordinary close. */
+  onTerminalExit: (cb: (channelId: string, reason?: string) => void) => () => void;
 
   onConversationsUpdated: (cb: (conversations: Conversation[]) => void) => () => void;
   /**

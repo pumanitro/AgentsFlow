@@ -8,6 +8,7 @@ import type { IPty } from 'node-pty';
 import { terminalEnvironment } from './terminal-environment';
 import { buildResumeArgs, redactResumeArgs } from './resume-args';
 import { codexResumeArgs } from './codex-resume-args';
+import { pinnedCodexCli } from './codex-cli';
 import { appendBuffer, replayText, type ReplayBuffer } from './replay-buffer';
 
 // Re-exported so the PTY layer stays the single import site for terminal argv,
@@ -27,7 +28,6 @@ function getPty(): typeof import('node-pty') {
 }
 
 const CLAUDE_BIN = process.env.CLAUDE_BIN || 'claude';
-const CODEX_BIN = process.env.CODEX_BIN || 'codex';
 
 // ---------- node-pty callback safety ----------
 // node-pty invokes our onData/onExit callbacks from a *native* N-API
@@ -440,6 +440,22 @@ export function ptyStats(): Record<string, number> {
   };
 }
 
+/** A Codex viewer that exits non-zero this soon after spawn failed to attach; nobody closed it. */
+const FAILED_ATTACH_MS = 5_000;
+
+/** Terminal output minus its escape sequences, for a message shown outside xterm. */
+function plainText(data: string): string {
+  return data.replace(/\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07]*\x07|\x1b[=>]/g, '').replace(/\r/g, '');
+}
+
+function failAttach(win: BrowserWindow, channelId: string, label: string, err: unknown): string {
+  const message = (err as Error)?.message ?? String(err);
+  console.error(`[agentsflow][pty] ${label} attach failed`, err);
+  safeSend(win, 'terminal:data', channelId, `\r\n\x1b[31m[${label} attach failed] ${message}\x1b[0m\r\n`);
+  safeSend(win, 'terminal:exit', channelId, message);
+  return '';
+}
+
 // Persistent, subscriber-based attach for `claude --resume` and for the Codex
 // TUI (`codex resume --remote`). Mirrors attachShell: spawn once per session id,
 // reuse on re-attach, and return a replay buffer so a re-mounted terminal can
@@ -468,7 +484,14 @@ async function attachResume(opts: {
   let sess = resumeSessions.get(opts.sessionId);
 
   if (!sess) {
-    const bin = isCodex ? CODEX_BIN : CLAUDE_BIN;
+    let bin = CLAUDE_BIN;
+    if (isCodex) {
+      // The CLI this thread's app-server was started with, not `codex` on PATH:
+      // a global update must not reach an open chat (codex-cli.ts). The record
+      // lives beside the socket.
+      try { bin = (await pinnedCodexCli(path.dirname(opts.codexSocket!))).bin; }
+      catch (err) { return failAttach(opts.win, opts.channelId, label, err); }
+    }
     const args = isCodex ? codexResumeArgs(opts.sessionId, opts.codexSocket!) : buildResumeArgs(opts);
     const cwd = opts.cwd || os.homedir();
     console.log(`[agentsflow][pty] spawning ${label}`, { bin, args: redactResumeArgs(args), cwd, cols: opts.cols, rows: opts.rows });
@@ -483,12 +506,10 @@ async function attachResume(opts: {
         env: isCodex ? codexEnv() : env(),
       });
     } catch (err) {
-      console.error(`[agentsflow][pty] ${label} spawn failed`, err);
-      safeSend(opts.win, 'terminal:data', opts.channelId, `\r\n\x1b[31m[pty spawn failed] ${(err as Error)?.message ?? err}\x1b[0m\r\n`);
-      safeSend(opts.win, 'terminal:exit', opts.channelId);
-      return '';
+      return failAttach(opts.win, opts.channelId, label, err);
     }
     console.log(`[agentsflow][pty] ${label} spawn ok`, { sessionId: opts.sessionId, pid: pty.pid });
+    const spawnedAt = Date.now();
 
     const newSess: ResumeSession = {
       sessionId: opts.sessionId,
@@ -522,8 +543,13 @@ async function attachResume(opts: {
       console.log(`[agentsflow][pty] ${label} onExit`, { sessionId: opts.sessionId, pid: pty.pid, exitCode: e.exitCode, signal: e.signal });
       const s = resumeSessions.get(opts.sessionId);
       if (!s || s.pty !== pty) return;
+      // A viewer that dies at once never attached: say so, with what it printed,
+      // instead of the pane's "closing only detaches the view".
+      const reason = isCodex && e.exitCode !== 0 && Date.now() - spawnedAt < FAILED_ATTACH_MS
+        ? `Codex could not attach (${bin} exited ${e.exitCode}).\n${plainText(replayText(s)).slice(-600)}`.trim()
+        : undefined;
       for (const sub of s.subscribers.values()) {
-        safeSend(sub.win, 'terminal:exit', sub.channelId);
+        safeSend(sub.win, 'terminal:exit', sub.channelId, reason);
         resumeChannelToSessionId.delete(sub.channelId);
       }
       resumeSessions.delete(opts.sessionId);
@@ -926,6 +952,12 @@ export function resize(channelId: string, cols: number, rows: number): void {
   } catch {
     // ignore
   }
+}
+
+/** True while a Codex chat pane is open: restarting the app-server would close it. */
+export function hasCodexViewers(): boolean {
+  for (const s of resumeSessions.values()) if (s.isCodex && s.subscribers.size > 0) return true;
+  return false;
 }
 
 export function detach(channelId: string): void {

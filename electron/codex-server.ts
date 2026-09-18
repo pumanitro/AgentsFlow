@@ -2,6 +2,8 @@ import { execFileSync, spawn } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { agentEnvironment } from './cli-environment';
+import { pinCodexCli, pinnedCodexCli } from './codex-cli';
+import { CODEX_DEFAULT_APPROVAL_POLICY, CODEX_DEFAULT_SANDBOX } from './codex-permissions';
 import { WsClient } from './ws-client';
 
 // Where the Codex app-server runs, and who owns it.
@@ -63,10 +65,6 @@ export interface CodexServerHandle {
 
 const delay = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
-function codexBin(): string {
-  return process.env.CODEX_BIN || 'codex';
-}
-
 export function readCodexPid(userData: string): number | null {
   try {
     const pid = Number.parseInt(fs.readFileSync(codexPidPath(userData), 'utf8').trim(), 10);
@@ -101,31 +99,46 @@ function alive(pid: number): boolean {
  * liveness is always "did it answer", never "is the file there".
  */
 export async function probeCodexServer(socketPath: string, timeoutMs = PROBE_TIMEOUT_MS): Promise<boolean> {
+  return (await probeCodexServerVersion(socketPath, timeoutMs)) !== null;
+}
+
+/**
+ * The same probe, returning which Codex answered: '' when it did not say, null
+ * when nothing answered. `initialize` replies with a user agent that leads with
+ * `<client name>/<codex version>`, and that — not a file this app wrote — is
+ * the ground truth for what a long-running server is.
+ */
+export async function probeCodexServerVersion(socketPath: string, timeoutMs = PROBE_TIMEOUT_MS): Promise<string | null> {
   let client: WsClient;
   try { client = await WsClient.connect({ path: socketPath, timeoutMs }); }
-  catch { return false; }
+  catch { return null; }
   try {
-    await new Promise<void>((resolve, reject) => {
+    const result = await new Promise<Record<string, unknown> | undefined>((resolve, reject) => {
       const timer = setTimeout(() => reject(new Error('initialize timed out')), timeoutMs);
       if (typeof timer.unref === 'function') timer.unref();
-      const settle = (error?: Error) => { clearTimeout(timer); error ? reject(error) : resolve(); };
+      const settle = (error?: Error, value?: Record<string, unknown>) => { clearTimeout(timer); error ? reject(error) : resolve(value); };
       client.on('error', (error: Error) => settle(error));
       client.on('close', () => settle(new Error('socket closed during initialize')));
       client.on('message', (text: string) => {
         try {
           const message = JSON.parse(text);
           if (message.id !== 1 || message.method) return;
-          settle(message.error ? new Error(String(message.error.message ?? 'initialize failed')) : undefined);
+          settle(message.error ? new Error(String(message.error.message ?? 'initialize failed')) : undefined, message.result);
         } catch { /* not our reply */ }
       });
       client.send(JSON.stringify({ id: 1, method: 'initialize', params: INITIALIZE_PARAMS }));
     });
-    return true;
+    return codexVersionOf(String(result?.userAgent ?? ''));
   } catch {
-    return false;
+    return null;
   } finally {
     try { client.close(); } catch { /* already gone */ }
   }
+}
+
+/** `peers_flow/0.154.0 (Mac OS …) …` → `0.154.0`; '' when the agent string has no version. */
+export function codexVersionOf(userAgent: string): string {
+  return /^[^/\s]+\/(\d+\.\d+\.\d+[^\s]*)/.exec(userAgent)?.[1] ?? '';
 }
 
 // Two callers racing to ensure the same socket must not spawn two servers.
@@ -151,6 +164,11 @@ async function ensure(options: EnsureCodexServerOptions, socketPath: string): Pr
   fs.mkdirSync(codexServerDir(userData), { recursive: true });
 
   if (await probeCodexServer(socketPath)) {
+    // A server from before CLI pinning has no record of what it runs. Adopt it
+    // now, while the install is known good, not at the first chat opened after
+    // an update has already replaced it.
+    void pinnedCodexCli(codexServerDir(userData)).catch((error: Error) =>
+      console.warn('[agentsflow][codex-cli] cannot pin a CLI for the running app-server', error.message));
     return { socketPath, pid: readCodexPid(userData) ?? 0, started: false };
   }
 
@@ -158,14 +176,19 @@ async function ensure(options: EnsureCodexServerOptions, socketPath: string): Pr
   // existing path fails with EADDRINUSE, so the server cannot start without this.
   try { fs.unlinkSync(socketPath); } catch { /* nothing to remove */ }
 
+  // Pinned, not `codex` on PATH: see codex-cli.ts. Throws a reinstall hint when
+  // neither the global install nor a kept snapshot runs.
+  const cli = await pinCodexCli(codexServerDir(userData));
   const logFd = fs.openSync(codexLogPath(userData), 'a');
   let spawnError: Error | null = null;
   let exitedWith: string | null = null;
   let pid = 0;
   try {
     const child = spawn(
-      codexBin(),
-      ['app-server', '--listen', `unix://${socketPath}`, '-c', 'sandbox_workspace_write.network_access=true'],
+      cli.bin,
+      ['app-server', '--listen', `unix://${socketPath}`,
+        '-c', `approval_policy="${CODEX_DEFAULT_APPROVAL_POLICY}"`,
+        '-c', `sandbox_mode="${CODEX_DEFAULT_SANDBOX}"`],
       {
         // detached + unref is the whole point: the server must outlive Electron.
         detached: true,
@@ -182,7 +205,7 @@ async function ensure(options: EnsureCodexServerOptions, socketPath: string): Pr
   }
 
   if (!pid) {
-    throw new Error(`Cannot start Codex app-server: ${codexBin()} did not produce a process. Check CODEX_BIN or your Codex CLI installation.`);
+    throw new Error(`Cannot start Codex app-server: ${cli.bin} did not produce a process. Check CODEX_BIN or your Codex CLI installation.`);
   }
   fs.writeFileSync(codexPidPath(userData), `${pid}\n`, 'utf8');
 
