@@ -551,7 +551,12 @@ export class CodexAgents {
       if (p.turn.status === 'failed') this.limit(id, s, completedTurn, p.turn.error?.message);
       this.state(id, status, p.turn.error?.message);
     }
-    if (method === 'thread/name/updated' && p.threadName) this.deps.update(id, { title: p.threadName });
+    // Codex renames its own thread as the work goes on, which used to rewrite
+    // the row's title on every turn. The title belongs to the user: it is
+    // seeded from the first message and changes only when they rename it, so a
+    // generated name is taken only for a row that has no title at all and
+    // never overwrites one that does.
+    if (method === 'thread/name/updated' && p.threadName && !this.deps.get(id)?.title) this.deps.update(id, { title: p.threadName });
     if (method === 'error' && !p.willRetry) {
       this.limit(id, s, s.turnId, p.error?.message || p.message);
       this.state(id, 'error', p.error?.message || 'Codex reported an error');

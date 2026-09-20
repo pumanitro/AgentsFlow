@@ -126,6 +126,26 @@ test('streamed results belong to their thread and an empty later turn cannot ret
   } finally { f.manager.close(); }
 });
 
+test('a Codex rename never rewrites a titled row, and only fills an empty one', async () => {
+  const f = fixture();
+  try {
+    await Promise.all([f.manager.send('one', 'first message'), f.manager.send('two', 'second message')]);
+    // 'one' carries the title it was created with; Codex's own name is ignored.
+    f.conversations.get('one')!.title = 'first message';
+    f.event('thread/name/updated', 'thread-1', { threadName: 'Refactor the parser' });
+    assert.equal(f.conversations.get('one')!.title, 'first message');
+    // A manual rename is just as final.
+    f.conversations.get('one')!.title = 'My own name';
+    f.event('thread/name/updated', 'thread-1', { threadName: 'Something else entirely' });
+    assert.equal(f.conversations.get('one')!.title, 'My own name');
+    // A row with no title at all still gets one, once.
+    f.event('thread/name/updated', 'thread-2', { threadName: 'Untitled work' });
+    assert.equal(f.conversations.get('two')!.title, 'Untitled work');
+    f.event('thread/name/updated', 'thread-2', { threadName: 'Renamed again' });
+    assert.equal(f.conversations.get('two')!.title, 'Untitled work');
+  } finally { f.manager.close(); }
+});
+
 test('approval requests require a response for the owning conversation', async () => {
   const f = fixture();
   try {
