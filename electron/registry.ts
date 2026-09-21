@@ -99,7 +99,7 @@ export const TOOL_DEFS = [
     name: 'open_file',
     title: 'Open a file in Peers Flow',
     description:
-      'Open a file in the Peers Flow desktop app so the user can see it: the app switches to its file view ("Preview" mode) and displays the file. Use this whenever the user asks you to open / show / pull up / display a file in Peers Flow. By default the file is opened in the peer this session is rooted in; pass `directory` to open it in a different peer. The path may be absolute or relative to that peer\'s directory. PDFs are handed to the system\'s default PDF application when one is available (and only previewed in-app as a fallback).',
+      'USER REQUEST REQUIRED: Call this tool ONLY when the user explicitly asks to open or display the specific file in the IDE or a viewer. Default file delivery is a clickable link/URL or an absolute path in chat. Creating, editing, reading, reviewing, or finishing work on a file does NOT authorize opening it. Never call this as an automatic final step or just to present a result; return the link/path without asking to open it. This tool switches the Peers Flow desktop app to its file view ("Preview" mode) and displays the file. By default the file is opened in the peer this session is rooted in; pass `directory` to open it in a different peer. The path may be absolute or relative to that peer\'s directory. PDFs are handed to the system\'s default PDF application when one is available (and only previewed in-app as a fallback).',
     usage: 'open_file({ file, directory?, line? })',
     inputSchema: {
       type: 'object',
@@ -258,6 +258,16 @@ export function renderBootstrapPrompt(reg: Registry): string {
   const lines: string[] = [];
   lines.push('# Peers Flow — your peers & delegation');
   lines.push('');
+  lines.push('## File delivery — links by default; opening requires an explicit user request');
+  lines.push('');
+  lines.push('- **Return a clickable file link/URL or an absolute file path in chat by default. Keep the user in chat.**');
+  lines.push(
+    `- **NEVER call \`${qualifiedToolName('open_file')}\` unless the user explicitly asks to open or display that specific file in the IDE or a viewer.** A request to create, edit, read, inspect, review, or deliver a file is not permission to open it on the user's screen. Reading files internally to do the work is fine.`,
+  );
+  lines.push('- Never open a file automatically when finishing a task, presenting an artifact, or reporting changes. A request for a link, URL, or path must be answered in chat.');
+  lines.push('- Without an explicit request to open the file, just provide the link/path; do not add a routine permission question. Do not bypass this rule with shell commands, another tool, or UI automation.');
+  lines.push('- This rule also applies to delegated peers. Pass along permission to open a file only when the user has explicitly given it for that file.');
+  lines.push('');
   lines.push(
     'This agent session runs inside **Peers Flow**, which tracks several project directories. In Peers Flow each tracked directory is a **peer**: a sibling agent rooted in its own directory, with its own skills and MCP connections (Slack, Gmail, …). A peer is NOT one of your subagents — it is a lateral collaborator you can delegate to and rely on.',
   );
@@ -287,7 +297,7 @@ export function renderBootstrapPrompt(reg: Registry): string {
   );
   lines.push("- Prefer delegating over reaching into another peer's files directly.");
   lines.push(
-    `- Call \`${qualifiedToolName('open_file')}\` when the user asks you to open / show / pull up / display a file — Peers Flow IS the IDE you are running inside, and this is how you open a file in it. It brings the file up in the app's file view. Defaults to the peer you're rooted in; pass \`directory\` to target another peer, and \`line\` to land on a specific line.`,
+    `- Only after an explicit user request to open / show / pull up / display a specific file in the IDE or a viewer, use \`${qualifiedToolName('open_file')}\`. Peers Flow is the IDE you are running inside; this tool brings the file up in its file view. Defaults to the peer you're rooted in; pass \`directory\` to target another peer, and \`line\` to land on a specific line.`,
   );
   lines.push(
     `- Never shell out to \`open -a "Peers Flow" <path>\` for this. That only raises the app window; it does not open the file. \`${qualifiedToolName('open_file')}\` is the only thing that does.`,
@@ -339,6 +349,8 @@ export function buildDelegatePrompt(goal: string, deliverable: string): string {
     'You are being delegated a task by another Peers Flow agent (a "peer"). You share none of its context, so treat this brief as complete and self-contained.',
     '',
     'Follow AGENTS.md in your directory. If it is absent, read CLAUDE.md before doing project work.',
+    '',
+    'Deliver files as clickable links/URLs or absolute paths in your response. Do not open files in the IDE or a viewer unless this brief relays an explicit user request to open that specific file. Creating, editing, or completing a file does not grant that permission; do not ask to open it as a routine final step.',
     '',
     '## Goal',
     goal,
