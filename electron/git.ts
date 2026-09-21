@@ -1,6 +1,7 @@
 import { spawn } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
+import * as perf from './perf';
 
 export type GitEntryStatus = 'untracked' | 'added' | 'modified' | 'deleted' | 'renamed' | 'unknown';
 
@@ -14,13 +15,16 @@ const REPO_CACHE_TTL_MS = 60_000;
 
 export function invalidateGitCache(cwd: string): void {
   repoCache.delete(cwd);
-  // The worktree cache is keyed on (dir, reference branch), so a single dir can
-  // hold several entries — drop every one of them, not just the default-ref key.
+  // Keep both the last result and any running scan. Deleting a pending entry
+  // lets the next watcher event launch a duplicate scan of the same worktrees.
   // `_publishCache` deliberately needs no invalidation: it is keyed on the two
   // commit shas it describes, so a moved ref simply produces a different key.
   const prefix = `${cwd}\u0000`;
-  for (const key of _worktreesCache.keys()) {
-    if (key.startsWith(prefix)) _worktreesCache.delete(key);
+  for (const [key, entry] of _worktreesCache) {
+    if (key.startsWith(prefix)) {
+      entry.generation++;
+      entry.invalidated = true;
+    }
   }
 }
 
@@ -158,14 +162,18 @@ const _statusInFlight = new Map<string, Promise<GitStatusResult>>();
 const _listInFlight = new Map<string, Promise<FileEntry[]>>();
 
 export function gitStatus(cwd: string): Promise<GitStatusResult> {
+  return sharedGitStatus(cwd, runGit);
+}
+
+function sharedGitStatus(cwd: string, run: typeof runGit): Promise<GitStatusResult> {
   const existing = _statusInFlight.get(cwd);
   if (existing) return existing;
-  const p = gitStatusImpl(cwd).finally(() => { _statusInFlight.delete(cwd); });
+  const p = gitStatusImpl(cwd, run).finally(() => { _statusInFlight.delete(cwd); });
   _statusInFlight.set(cwd, p);
   return p;
 }
 
-async function gitStatusImpl(cwd: string): Promise<GitStatusResult> {
+async function gitStatusImpl(cwd: string, run: typeof runGit): Promise<GitStatusResult> {
   try { fs.accessSync(cwd); } catch { return { isRepo: false, entries: [] }; }
   const meta = getRepoMeta(cwd);
   if (!meta.isRepo) return { isRepo: false, entries: [] };
@@ -173,7 +181,7 @@ async function gitStatusImpl(cwd: string): Promise<GitStatusResult> {
   // Single call: porcelain=v1 -z --branch gives the branch as a `## <name>`
   // record before the file entries, so we get branch + status in one spawn
   // instead of `rev-parse --abbrev-ref HEAD` + `status` separately.
-  const statusRes = await runGit(
+  const statusRes = await run(
     ['status', '--porcelain=v1', '--untracked-files=all', '--branch', '-z'],
     cwd,
   );
@@ -375,6 +383,28 @@ function realpathOrSelf(p: string): string {
  */
 const WORKTREE_SCAN_CONCURRENCY = 4;
 
+// One budget for every worktree refresh, including discovery/ref lookups.
+// A per-request pool alone multiplies the limit when several peers refresh.
+let worktreeGitActive = 0;
+const worktreeGitQueue: Array<() => void> = [];
+
+async function runWorktreeGit(args: string[], cwd: string): ReturnType<typeof runGit> {
+  if (worktreeGitActive >= WORKTREE_SCAN_CONCURRENCY) {
+    await new Promise<void>((resolve) => { worktreeGitQueue.push(resolve); });
+  } else {
+    worktreeGitActive++;
+  }
+  try {
+    return await runGit(args, cwd);
+  } finally {
+    // Transfer this slot directly to the next waiter so a new caller cannot
+    // take it before that waiter's continuation runs.
+    const next = worktreeGitQueue.shift();
+    if (next) next();
+    else worktreeGitActive--;
+  }
+}
+
 /** `Promise.all`-alike that keeps at most `limit` tasks in flight, preserving order. */
 async function mapPooled<T, R>(items: T[], limit: number, fn: (item: T, index: number) => Promise<R>): Promise<R[]> {
   const out = new Array<R>(items.length);
@@ -410,7 +440,7 @@ async function batchAheadBehind(
   cwd: string,
   ref: string,
 ): Promise<Map<string, { ahead: number; behind: number }> | null> {
-  const r = await runGit(
+  const r = await runWorktreeGit(
     ['for-each-ref', `--format=%(refname:short) %(ahead-behind:${ref})`, 'refs/heads/'],
     cwd,
   );
@@ -445,7 +475,7 @@ async function publishState(
   // an individual rev-list here.
   const counts = known
     ? { code: 0, stdout: `${known.behind}\t${known.ahead}` }
-    : await runGit(['rev-list', '--left-right', '--count', `${ref}...${rev}`], cwd);
+    : await runWorktreeGit(['rev-list', '--left-right', '--count', `${ref}...${rev}`], cwd);
   if (counts.code === 0) {
     const [behind, ahead] = counts.stdout.trim().split(/\s+/).map((n) => parseInt(n, 10) || 0);
     out = { ahead, behind, unpublished: ahead, published: ahead === 0 };
@@ -455,7 +485,7 @@ async function publishState(
       // the ref by cherry-pick or rebase carries a new sha but the same patch,
       // so a plain rev-list still calls it "not in the ref". `git cherry`
       // compares patch-ids and marks those already present with '-'.
-      const cherry = await runGit(['cherry', ref, rev], cwd);
+      const cherry = await runWorktreeGit(['cherry', ref, rev], cwd);
       if (cherry.code === 0) {
         const unpublished = cherry.stdout.split('\n').filter((l) => l.startsWith('+')).length;
         out = { ...out, unpublished, published: unpublished === 0 };
@@ -472,7 +502,7 @@ async function publishState(
         // reports conflicts on rebased branches, so it is not a substitute).
         // The consequence is conservative — a squash-merged branch reads as
         // unpublished, never the reverse.
-        const diff = await runGit(['diff', '--quiet', `${ref}...${rev}`], cwd);
+        const diff = await runWorktreeGit(['diff', '--quiet', `${ref}...${rev}`], cwd);
         if (diff.code === 0) out = { ...out, unpublished: 0, published: true };
       }
     }
@@ -526,43 +556,67 @@ export async function listBranches(cwd: string): Promise<BranchList> {
   return { local: localOrdered, remote };
 }
 
-// TTL + in-flight coalescing keyed on the requested dir *and* the reference
-// branch. The Changes sidebar refetches on every file-watcher burst; without
-// this a repo with several worktrees would fan a burst out into
-// (worktrees × git) spawns. The file-watcher clears this alongside the
-// repo-meta cache on ref/index changes.
-//
-// The TTL was 2 s, which on a repo being worked by a fleet of agents was
-// indistinguishable from no cache at all: measured 137 scans in 5 minutes — one
-// every 2.19 s, i.e. the TTL expired between every pair of requests, forever.
-// Each scan is ~25 git spawns on a 22-worktree repo (avg 425 ms, peak 1.5 s),
-// so the app was permanently running a git storm against the same repo its
-// agents were trying to work in. 15 s still refreshes the panel faster than a
-// human notices, and the *content* of a worktree row (its changed-file count)
-// comes from the git status the sidebar fetches separately on every burst.
-interface WorktreesCacheEntry { at: number; promise: Promise<WorktreeInfo[]> }
+// Completed results expire; running scans never do. A warm request returns
+// the last result immediately while one shared scan refreshes it in the
+// background. The generation preserves invalidations that arrive mid-scan.
+interface WorktreesCacheEntry {
+  value?: WorktreeInfo[];
+  completedAt: number;
+  generation: number;
+  invalidated: boolean;
+  inFlight?: Promise<WorktreeInfo[]>;
+}
 const _worktreesCache = new Map<string, WorktreesCacheEntry>();
 const WORKTREES_TTL_MS = Number(process.env.AGENTSFLOW_WORKTREES_TTL_MS) || 15_000;
+type WorktreesListener = (cwd: string, refBranch: string | undefined, rows: WorktreeInfo[]) => void;
+const worktreesListeners = new Set<WorktreesListener>();
+
+export function onWorktreesUpdated(listener: WorktreesListener): () => void {
+  worktreesListeners.add(listener);
+  return () => { worktreesListeners.delete(listener); };
+}
 
 export function listWorktrees(cwd: string, refBranch?: string): Promise<WorktreeInfo[]> {
   const key = `${cwd}\u0000${refBranch ?? ''}`;
-  const cached = _worktreesCache.get(key);
-  if (cached && Date.now() - cached.at < WORKTREES_TTL_MS) return cached.promise;
-  const promise = listWorktreesImpl(cwd, refBranch).catch((err) => {
-    // On failure don't poison the cache — let the next call retry.
-    _worktreesCache.delete(key);
-    throw err;
-  });
-  _worktreesCache.set(key, { at: Date.now(), promise });
-  return promise;
+  let entry = _worktreesCache.get(key);
+  if (!entry) {
+    entry = { completedAt: 0, generation: 0, invalidated: true };
+    _worktreesCache.set(key, entry);
+  }
+  const cached = entry;
+  if (cached.value && !cached.invalidated && Date.now() - cached.completedAt < WORKTREES_TTL_MS) {
+    return Promise.resolve(cached.value);
+  }
+  if (!cached.inFlight) {
+    const generation = cached.generation;
+    // IPC replies are fast on a warm cache; keep the actual background cost
+    // visible separately in the performance report.
+    cached.inFlight = perf.timed('git:worktreeScan', () => listWorktreesImpl(cwd, refBranch), () => path.basename(cwd)).then((rows) => {
+      cached.value = rows;
+      cached.completedAt = Date.now();
+      cached.invalidated = cached.generation !== generation;
+      for (const listener of worktreesListeners) {
+        try { listener(cwd, refBranch, rows); }
+        catch (err) { console.warn('[agentsflow] worktree update listener failed', err); }
+      }
+      return rows;
+    }).finally(() => { cached.inFlight = undefined; });
+  }
+  if (cached.value) {
+    // A failed background refresh must neither reject an unobserved promise
+    // nor replace a useful list with an empty result. The next request retries.
+    void cached.inFlight.catch(() => undefined);
+    return Promise.resolve(cached.value);
+  }
+  return cached.inFlight;
 }
 
 async function listWorktreesImpl(cwd: string, refBranch?: string): Promise<WorktreeInfo[]> {
   try { fs.accessSync(cwd); } catch { return []; }
   if (!getRepoMeta(cwd).isRepo) return [];
 
-  const res = await runGit(['worktree', 'list', '--porcelain'], cwd);
-  if (res.code !== 0) return [];
+  const res = await runWorktreeGit(['worktree', 'list', '--porcelain'], cwd);
+  if (res.code !== 0) throw new Error(res.stderr.trim() || 'git worktree list failed');
   const raws = parseWorktreePorcelain(res.stdout).filter((w) => !w.bare);
   if (raws.length === 0) return [];
 
@@ -579,10 +633,10 @@ async function listWorktreesImpl(cwd: string, refBranch?: string): Promise<Workt
     // (origin/v3.1.0) or tag — so the picker is not limited to local heads.
     // A ref that no longer resolves leaves `ref` at the repo default rather
     // than reporting every worktree as unpublished against nothing.
-    const ok = await runGit(['rev-parse', '--verify', '--quiet', `${refBranch}^{commit}`], cwd);
+    const ok = await runWorktreeGit(['rev-parse', '--verify', '--quiet', `${refBranch}^{commit}`], cwd);
     if (ok.code === 0) ref = refBranch;
   }
-  const refShaRes = ref ? await runGit(['rev-parse', ref], cwd) : null;
+  const refShaRes = ref ? await runWorktreeGit(['rev-parse', ref], cwd) : null;
   const refSha = refShaRes && refShaRes.code === 0 ? refShaRes.stdout.trim() : '';
   const realCwd = realpathOrSelf(cwd);
 
@@ -592,7 +646,7 @@ async function listWorktreesImpl(cwd: string, refBranch?: string): Promise<Workt
   const aheadBehind = ref && refSha ? await batchAheadBehind(cwd, ref) : null;
 
   const out = await mapPooled(raws, WORKTREE_SCAN_CONCURRENCY, async (w, idx): Promise<WorktreeInfo> => {
-    const status = await gitStatus(w.path);
+    const status = await sharedGitStatus(w.path, runWorktreeGit);
     const changedCount = status.entries.length;
 
     // Every tree is compared uniformly, the primary one included — when it sits
@@ -645,7 +699,7 @@ export async function removeWorktree(
   args.push(worktreePath);
   const res = await runGit(args, repoDir);
   if (res.code === 0) {
-    _worktreesCache.delete(repoDir);
+    invalidateGitCache(repoDir);
     return { ok: true };
   }
   const error = (res.stderr || res.stdout || 'git worktree remove failed').trim();

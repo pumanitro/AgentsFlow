@@ -249,12 +249,31 @@ export default function FileTreeSidebar({ dirPath, conversationId, worktreePath,
   // branch each tree is on, how far ahead it is — moves on human timescales and
   // refreshes at most this often from the watcher path. An explicit change (peer,
   // mode, reference branch) still refetches immediately, as does the 30 s
-  // heartbeat, so nothing is ever more than half a minute stale.
+  // heartbeat. Completed background scans push their results immediately.
   const WT_MIN_INTERVAL_MS = 15_000;
   const lastWtFetch = useRef(0);
+  const worktreeUpdateVersion = useRef(0);
+
+  useEffect(() => {
+    worktreeUpdateVersion.current++;
+    const a = api();
+    const off = typeof a.onWorktreesUpdated === 'function'
+      ? a.onWorktreesUpdated((updatedDir, updatedRef, rows) => {
+        if (mode !== 'changes' || updatedDir !== dirPath || (updatedRef ?? '') !== (refBranch ?? '')) return;
+        // A cached IPC reply already in transit must not overwrite this result.
+        worktreeUpdateVersion.current++;
+        setWorktrees((prev) => (worktreesEqual(prev, rows) ? prev : rows));
+      })
+      : undefined;
+    return () => {
+      worktreeUpdateVersion.current++;
+      off?.();
+    };
+  }, [dirPath, refBranch, mode]);
 
   const refresh = useMemo(
     () => async (opts: { worktrees?: 'auto' | 'force' } = {}) => {
+      const worktreeVersion = worktreeUpdateVersion.current;
       setLoading(true);
       try {
         const a = api();
@@ -273,7 +292,9 @@ export default function FileTreeSidebar({ dirPath, conversationId, worktreePath,
           lastWtFetch.current = Date.now();
           try {
             const wts = await a.listWorktrees(dirPath, refBranch ?? undefined);
-            setWorktrees((prev) => (worktreesEqual(prev, wts) ? prev : wts));
+            if (worktreeUpdateVersion.current === worktreeVersion) {
+              setWorktrees((prev) => (worktreesEqual(prev, wts) ? prev : wts));
+            }
           } catch { /* leave last-known list in place */ }
         }
         if (mode === 'files') {

@@ -740,6 +740,7 @@ export function createMockApi(): AgentsFlowApi {
     // said 'master' would look like the picker had failed.
     listWorktrees: async (_dirPath: string, refBranch?: string): Promise<WorktreeInfo[]> =>
       mockWorktrees.map((w) => ({ ...w, refBranch: refBranch ?? 'master' })),
+    onWorktreesUpdated: () => () => undefined,
     listBranches: async () => ({
       local: ['master', 'v3.1.0', 'worktree-dpd-complaint', 'worktree-nutrable-chat-script'],
       remote: ['origin/master', 'origin/v3.1.0'],

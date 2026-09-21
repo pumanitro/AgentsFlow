@@ -762,7 +762,9 @@ export interface AgentsFlowApi {
   // have landed in `refBranch`. `refBranch` defaults to the primary working
   // tree's branch; an unknown one falls back to that default.
   // Returns [] when `dirPath` is not a git repo.
+  // Warm calls may return cached rows; background results arrive via the event.
   listWorktrees: (dirPath: string, refBranch?: string) => Promise<WorktreeInfo[]>;
+  onWorktreesUpdated: (cb: (dirPath: string, refBranch: string | undefined, rows: WorktreeInfo[]) => void) => () => void;
   // Branches for the reference picker, most-recent-commit first, split into
   // local and remote-tracking. Remotes are not deduplicated against locals —
   // `v3.1.0` and `origin/v3.1.0` are different questions.

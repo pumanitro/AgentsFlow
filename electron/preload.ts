@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer, IpcRendererEvent } from 'electron';
-import type { AccountsSnapshot, AgentsFlowApi, Conversation, OpenFileNavPayload, PinnedDivider, PinnedItemRef, PinnedTodo, RotationStatus, SpawnRequest } from '../shared/types';
+import type { AccountsSnapshot, AgentsFlowApi, Conversation, OpenFileNavPayload, PinnedDivider, PinnedItemRef, PinnedTodo, RotationStatus, SpawnRequest, WorktreeInfo } from '../shared/types';
 
 const api: AgentsFlowApi = {
   codexSnapshot: (id, older) => ipcRenderer.invoke('codex:snapshot', id, older),
@@ -132,6 +132,11 @@ const api: AgentsFlowApi = {
 
   gitStatus: (dirPath) => ipcRenderer.invoke('git:status', dirPath),
   listWorktrees: (dirPath, refBranch) => ipcRenderer.invoke('git:worktrees', dirPath, refBranch),
+  onWorktreesUpdated: (cb) => {
+    const listener = (_e: IpcRendererEvent, dirPath: string, refBranch: string | undefined, rows: WorktreeInfo[]) => cb(dirPath, refBranch, rows);
+    ipcRenderer.on('git:worktreesUpdated', listener);
+    return () => ipcRenderer.removeListener('git:worktreesUpdated', listener);
+  },
   listBranches: (dirPath) => ipcRenderer.invoke('git:branches', dirPath),
   removeWorktree: (repoDir, worktreePath, force) =>
     ipcRenderer.invoke('git:removeWorktree', repoDir, worktreePath, force),
