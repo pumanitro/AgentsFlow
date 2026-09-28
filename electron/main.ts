@@ -13,6 +13,7 @@ import serve from 'electron-serve';
 import { getLogFilePath, getStallStats, installCrashLogging, notePowerResume, notePowerSuspend, registerHealthProbe } from './logger';
 import * as perf from './perf';
 import * as sysmon from './sysmon';
+import { revealInFinder } from './finder-reveal';
 import { buildPerfReport, reportBasename, serializeReportData } from './perf-report';
 
 const APP_NAME = 'Peers Flow';
@@ -2201,9 +2202,9 @@ ipcMain.handle('files:revealInFinder', async (_e, targetPath: string): Promise<{
   const pathMod = require('path') as typeof import('path');
   if (!pathMod.isAbsolute(targetPath)) return { ok: false, error: 'path must be absolute' };
   if (!fsMod.existsSync(targetPath)) return { ok: false, error: `path does not exist: ${targetPath}` };
-  // Selects the file/dir in the OS file browser (Finder on macOS, Explorer
-  // on Windows, the default file manager on Linux).
-  shell.showItemInFolder(targetPath);
+  // Selects the file/dir in the OS file browser, reusing the open Finder
+  // window on macOS instead of spawning a new one per click.
+  revealInFinder(targetPath);
   return { ok: true };
 });
 
