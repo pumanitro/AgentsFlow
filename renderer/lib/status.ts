@@ -24,7 +24,7 @@ export function statusDotClass(
   if (state === 'working' || status === 'working' || status === 'busy') return 'bg-info animate-pulse';
   if (state === 'needs-input' || state === 'blocked' || status === 'needs-input' || status === 'waiting') return 'bg-warn animate-pulse';
   if (state === 'done' || state === 'completed' || status === 'completed') return 'bg-ok';
-  if (state === 'failed' || status === 'failed') return 'bg-err';
+  if (state === 'failed' || state === 'error' || status === 'failed') return 'bg-err';
   if (state === 'starting') return 'bg-muted animate-pulse';
   return 'bg-muted';
 }

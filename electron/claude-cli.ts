@@ -333,7 +333,7 @@ export async function dispatchBackground(opts: {
   // Model alias/name for `claude --model` (e.g. 'fable', 'opus', 'sonnet').
   // Omitted ⇒ the CLI falls back to the user's configured default model.
   model?: string;
-}): Promise<{ daemonShort: string | null; raw: string }> {
+}): Promise<{ daemonShort: string | null; raw: string; code: number | null }> {
   // The prompt must stay the final positional argument.
   const args = ['--bg', '--permission-mode', 'bypassPermissions'];
   if (opts.model) args.push('--model', opts.model);
@@ -365,7 +365,7 @@ export async function dispatchBackground(opts: {
   if (!m) {
     console.error('[agentsflow][dispatch] could not parse daemonShort from output. raw:', combined);
   }
-  return { daemonShort: m ? m[1] : null, raw: combined };
+  return { daemonShort: m ? m[1] : null, raw: combined, code };
 }
 
 export async function resolveSessionByDaemonShort(daemonShort: string, maxWaitMs = 8000): Promise<ClaudeAgentJsonRow | null> {

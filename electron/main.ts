@@ -60,6 +60,7 @@ import {
   readJobState,
   hasLiveDaemon,
 } from './claude-cli';
+import { ensureWorkspaceTrusted } from './workspace-trust';
 import { getLastAgentRows, refreshNow, setPollerForeground, startPoller, stopPoller, syncWatchers, unwatchConversation, watchConversation, watcherStats } from './poller';
 import { bridgeSocketPath, buildBootstrapSystemPrompt, getMcpServerInfo, writeMcpConfigForConversation } from './mcp-bridge';
 import { buildDelegatePrompt } from './registry';
@@ -1091,6 +1092,12 @@ async function dispatchClaudeInto(
     }
   }
 
+  // A newly added peer has never had the CLI's trust prompt accepted, and
+  // `claude --bg` refuses such a directory outright (see workspace-trust.ts).
+  await ensureWorkspaceTrusted(cwd).catch((err) => {
+    console.error('[agentsflow][trust] could not record workspace trust', { cwd, err });
+  });
+
   const startedBefore = Date.now();
   const claimedSessionIds = new Set(store.getConversations().map((c) => c.sessionId).filter(Boolean));
   const dispatch = await dispatchBackground({ cwd, prompt, mcpConfigPath, appendSystemPrompt, model: opts.model });
@@ -1098,7 +1105,9 @@ async function dispatchClaudeInto(
   let resolved = daemonShortFromOut
     ? await resolveSessionByDaemonShort(daemonShortFromOut, 10000)
     : null;
-  if (!resolved) {
+  // A CLI that exited non-zero without backgrounding anything started no
+  // session, so there is nothing for the cwd fallback to find.
+  if (!resolved && (daemonShortFromOut || dispatch.code === 0)) {
     console.warn('[agentsflow] dispatch.daemonShort empty or unresolved — falling back to latest-session-in-cwd lookup');
     resolved = await resolveLatestSessionInCwd({
       cwd,
@@ -1111,6 +1120,15 @@ async function dispatchClaudeInto(
   const sessionId = resolved?.sessionId ?? '';
   const daemonShort = daemonShortFromOut || (sessionId ? sessionId.slice(0, 8) : '');
   console.log('[agentsflow] spawn resolved', { sessionId, daemonShort, daemonShortFromOut, delegated: Boolean(opts.delegated) });
+  if (!sessionId && !daemonShortFromOut) {
+    // Nothing started. Say why on the row rather than leaving it "starting…"
+    // forever — the CLI's own message is the actionable part.
+    const reason = dispatch.raw.split('\n').map((l) => l.trim()).find(Boolean)
+      || (fs.existsSync(cwd) ? `claude exited with code ${dispatch.code ?? 'unknown'}` : `Directory does not exist: ${cwd}`);
+    store.updateConversation(conversationId, { state: 'error', status: 'error', description: reason });
+    broadcastConversations();
+    throw new Error(reason);
+  }
   store.updateConversation(conversationId, { sessionId, daemonShort });
   syncWatchers();
 
