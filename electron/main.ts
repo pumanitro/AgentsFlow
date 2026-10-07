@@ -49,7 +49,7 @@ import * as handover from './handover';
 import * as rotation from './rotation';
 import * as limitWatch from './limit-watch';
 import { forkTitle } from '../shared/fork-title';
-import { transcriptExists as transcriptExistsUnder } from './transcript-path';
+import { latestContinuation, transcriptExists as transcriptExistsUnder } from './transcript-path';
 import { computeDisplayName, recomputeAllDisplayNames } from './naming';
 import {
   dispatchBackground,
@@ -71,6 +71,7 @@ import { gitStatus, listBranches, listFiles, listWorktrees, onWorktreesUpdated, 
 import { searchInFiles } from './search';
 import { deleteAttachmentFiles, pastedImagesRoot, prunePastedImages, sweepOrphanAttachments, todayDateSlug } from './attachments';
 import { noteDirForPath, sweepNoteDir, sweepNoteImages } from './note-images';
+import { disableLeftArrowAgents } from './attach-guard';
 import { Account, AccountsSnapshot, AddAccountResult, AgentProvider, BridgeHealth, CodexModel, Conversation, FileEntry, PerfReportResult, PinnedDivider, PinnedItemRef, PinnedTodo, ProbeAccountResult, ProbeCodexResult, RotationPolicy, SlashCommand, SpawnRequest, SwitchAccountResult, SwitchCodexResult, TrackedDirectory, UsageResult } from '../shared/types';
 
 const isDev = process.env.NODE_ENV === 'development';
@@ -425,6 +426,14 @@ app.whenReady().then(() => {
     } catch (err) {
       console.warn('[agentsflow] failed to set dock icon', err);
     }
+  }
+  // A chat pane shows a chat, never the CLI's agents list (← on an empty prompt).
+  try {
+    if (disableLeftArrowAgents(path.join(os.homedir(), '.claude.json'))) {
+      console.log('[agentsflow] turned off leftArrowOpensAgents in ~/.claude.json');
+    }
+  } catch (err) {
+    console.warn('[agentsflow] could not turn off leftArrowOpensAgents', err);
   }
   createWindow();
   startPoller(() => mainWindow);
@@ -1779,7 +1788,7 @@ function codexSocketPath(): string {
 
 ipcMain.handle('term:attach', async (_e, conversationId: string, cols: number, rows: number) => {
   console.log('[agentsflow] term:attach received', { conversationId, cols, rows });
-  const conv = store.getConversations().find((c) => c.id === conversationId);
+  let conv = store.getConversations().find((c) => c.id === conversationId);
   if (!conv) {
     console.error('[agentsflow] term:attach: conversation not found', { conversationId, all: store.getConversations().map((c) => c.id) });
     throw new Error(`conversation ${conversationId} not found`);
@@ -1808,6 +1817,17 @@ ipcMain.handle('term:attach', async (_e, conversationId: string, cols: number, r
       mode: 'codex', cwd, codexSocket: codexSocketPath(),
     });
     return { channelId, replay };
+  }
+
+  // The chat was parked into a background job (← / Ctrl+B in the pane): its
+  // later turns live under a new session id. Point the conversation there, or
+  // Reopen would show it frozen at "Backgrounding…".
+  if (!pty.hasResumeSession(conv.sessionId) && !conv.forkFromSessionId) {
+    const latest = latestContinuation(projectsRoot(), conv.directoryPath, conv.sessionId);
+    if (latest !== conv.sessionId) {
+      console.log('[agentsflow] following continued-in to the parked session', { from: conv.sessionId, to: latest, conversationId: conv.id });
+      conv = store.updateConversation(conv.id, { sessionId: latest, daemonShort: latest.slice(0, 8) }) ?? conv;
+    }
   }
 
   const attachId = conv.daemonShort || conv.sessionId.slice(0, 8);

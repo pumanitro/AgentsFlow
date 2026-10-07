@@ -55,3 +55,57 @@ export function findTranscript(root: string, cwd: string, sessionId: string): st
   }
   return null;
 }
+
+// A session that was backgrounded from an interactive chat (← to the agents
+// list, or Ctrl+B) "parks" its conversation in a new background job and ends
+// its own transcript with {"type":"continued-in","continuedInSessionId":…}.
+// Everything after that point lives in the new session, so resuming the old id
+// shows a conversation that stops at "Backgrounding…". The CLI reads the marker
+// the same way: scanning back from the end, a continued-in seen before any
+// user/assistant message wins.
+const TAIL_BYTES = 256 * 1024;
+
+export function continuedIn(file: string): string | null {
+  let text: string;
+  try {
+    const fd = fs.openSync(file, 'r');
+    try {
+      const size = fs.fstatSync(fd).size;
+      const len = Math.min(size, TAIL_BYTES);
+      const buf = Buffer.alloc(len);
+      fs.readSync(fd, buf, 0, len, size - len);
+      text = buf.toString('utf8');
+    } finally {
+      fs.closeSync(fd);
+    }
+  } catch {
+    return null;
+  }
+  if (!text.includes('"type":"continued-in"')) return null;
+  const lines = text.split('\n');
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i];
+    const marker = line.includes('"type":"continued-in"');
+    if (!marker && !line.includes('"type":"user"') && !line.includes('"type":"assistant"')) continue;
+    try {
+      const entry = JSON.parse(line);
+      if (marker) return typeof entry.continuedInSessionId === 'string' ? entry.continuedInSessionId : null;
+      if (entry.type === 'user' || entry.type === 'assistant') return null;
+    } catch {
+      // The first line of the tail window is usually cut mid-entry.
+    }
+  }
+  return null;
+}
+
+/** Follow continued-in markers to the session that holds the latest turns. */
+export function latestContinuation(root: string, cwd: string, sessionId: string): string {
+  let current = sessionId;
+  for (let hop = 0; hop < 5; hop++) {
+    const file = findTranscript(root, cwd, current);
+    const next = file ? continuedIn(file) : null;
+    if (!next || next === current || !findTranscript(root, cwd, next)) break;
+    current = next;
+  }
+  return current;
+}

@@ -10,6 +10,7 @@ import { buildResumeArgs, redactResumeArgs } from './resume-args';
 import { codexResumeArgs } from './codex-resume-args';
 import { pinnedCodexCli } from './codex-cli';
 import { appendBuffer, replayText, type ReplayBuffer } from './replay-buffer';
+import { allowReattach, findChatExit, LEFT_CHAT_GRACE_MS, type ScreenWatch } from './attach-guard';
 
 // Re-exported so the PTY layer stays the single import site for terminal argv,
 // while the builder itself lives in a module that pulls in neither `electron`
@@ -384,10 +385,20 @@ export async function attach(opts: {
   }
   if (mode === 'resume') return attachResume(opts);
 
+  if (!(await ensurePtyCapacity(opts.win, opts.channelId, 'pty'))) return '';
+  spawnAttachViewer(opts, []);
+  return '';
+}
+
+// One `claude attach` viewer on a chat channel. Respawned in place (same
+// channel, same xterm) when the viewer leaves the chat — see attach-guard.ts.
+function spawnAttachViewer(
+  opts: { channelId: string; sessionId: string; cols: number; rows: number; win: BrowserWindow },
+  reattaches: number[],
+): void {
   const args = ['attach', opts.sessionId];
   const cwd = os.homedir();
-  console.log('[agentsflow][pty] spawning', { bin: CLAUDE_BIN, args, cols: opts.cols, rows: opts.rows, cwd, mode });
-  if (!(await ensurePtyCapacity(opts.win, opts.channelId, 'pty'))) return '';
+  console.log('[agentsflow][pty] spawning', { bin: CLAUDE_BIN, args, cols: opts.cols, rows: opts.rows, cwd, mode: 'attach' });
   let pty: IPty;
   try {
     pty = getPty().spawn(CLAUDE_BIN, args, {
@@ -401,31 +412,68 @@ export async function attach(opts: {
     console.error('[agentsflow][pty] spawn failed', err);
     safeSend(opts.win, 'terminal:data', opts.channelId, `\r\n\x1b[31m[pty spawn failed] ${(err as Error)?.message ?? err}\x1b[0m\r\n`);
     safeSend(opts.win, 'terminal:exit', opts.channelId);
-    return '';
+    claudeChannels.delete(opts.channelId);
+    return;
   }
   console.log('[agentsflow][pty] spawn ok', { pid: pty.pid });
 
-  const ch: ClaudeChannel = { id: opts.channelId, pty, win: opts.win, sessionId: opts.sessionId };
+  const prev = claudeChannels.get(opts.channelId);
+  const ch: ClaudeChannel = prev ?? { id: opts.channelId, pty, win: opts.win, sessionId: opts.sessionId };
+  ch.pty = pty;
+  ch.win = opts.win;
   claudeChannels.set(opts.channelId, ch);
 
+  const watch: ScreenWatch = { inChat: false };
+  // Output after the viewer left the chat, held until we know why it left.
+  let held: string[] | null = null;
+  let exited = false;
+  // The pane moved on to a fresh viewer; this one's exit is not the pane's.
+  let replaced = false;
+  const current = () => claudeChannels.get(opts.channelId) === ch && ch.pty === pty;
+
   pty.onData(guardCb('attach onData', (data) => {
-    safeSend(ch.win, 'terminal:data', opts.channelId, data);
+    if (held) { held.push(data); return; }
+    const at = findChatExit(watch, data);
+    if (at === -1) { safeSend(ch.win, 'terminal:data', opts.channelId, data); return; }
+    if (at > 0) safeSend(ch.win, 'terminal:data', opts.channelId, data.slice(0, at));
+    held = [data.slice(at)];
+    setTimeout(guardCb('attach left-chat check', () => {
+      if (exited || !current()) return;
+      const now = Date.now();
+      if (!allowReattach(reattaches, now)) {
+        console.warn('[agentsflow][pty] attach viewer keeps leaving the chat; showing it as-is', { sessionId: opts.sessionId });
+        safeSend(ch.win, 'terminal:data', opts.channelId, held!.join(''));
+        held = null;
+        return;
+      }
+      reattaches.push(now);
+      console.log('[agentsflow][pty] attach viewer left the chat (agents list / Ctrl+Z); re-attaching', {
+        sessionId: opts.sessionId,
+        pid: pty.pid,
+      });
+      replaced = true;
+      try { pty.kill(); } catch { /* ignore */ }
+      spawnAttachViewer({ ...opts, win: ch.win, cols: pty.cols, rows: pty.rows }, reattaches);
+    }), LEFT_CHAT_GRACE_MS);
   }));
   // Logged like the shell/resume exits below. Without this, an attach PTY's
   // whole lifecycle was write-only in the log — every spawn recorded, no exit
   // ever — so "88 spawns, 0 exits" read as a leak when reconstructing an
   // incident, and a *real* leak would have looked identical.
   pty.onExit(guardCb('attach onExit', (e) => {
+    exited = true;
     console.log('[agentsflow][pty] attach onExit', {
       sessionId: opts.sessionId,
       pid: pty.pid,
       exitCode: e?.exitCode,
       signal: e?.signal,
+      replaced,
     });
+    if (replaced || !current()) return;
+    if (held) safeSend(ch.win, 'terminal:data', opts.channelId, held.join(''));
     safeSend(ch.win, 'terminal:exit', opts.channelId);
     claudeChannels.delete(opts.channelId);
   }));
-  return '';
 }
 
 /** Live PTY/subsystem counts for the heartbeat. Cheap: no subprocess, no fds. */
