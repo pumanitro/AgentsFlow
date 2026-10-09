@@ -173,6 +173,37 @@ export function createMockApi(): AgentsFlowApi {
       state.directories = state.directories.filter((d) => d.id !== id);
       save(state);
     },
+    // Remote peers need a real SSH host; the browser mock fakes one that is
+    // always reachable, so the add form, host badges and dots can be exercised.
+    probeRemoteDirectory: async (req) => ({
+      ok: true, hostname: req.host.split('.')[0], home: `/Users/${req.user}`,
+      claudeVersion: '2.1.295 (mock)', nodeVersion: 'v22.0.0', dirExists: true,
+    }),
+    addRemoteDirectory: async (req) => {
+      const { path, displayName, ...spec } = req;
+      const name = displayName || path.split('/').filter(Boolean).pop() || path;
+      const d: TrackedDirectory = { id: uuid(), path, displayName: name, addedAt: new Date().toISOString(), remote: spec };
+      state.directories = [...state.directories, d];
+      save(state);
+      fire(state);
+      return { ok: true as const, dir: d };
+    },
+    listRemoteHosts: async () => {
+      const byKey = new Map<string, string[]>();
+      for (const d of state.directories) {
+        if (!d.remote) continue;
+        const key = `${d.remote.user}@${d.remote.host}`;
+        byKey.set(key, [...(byKey.get(key) ?? []), d.id]);
+      }
+      return [...byKey].map(([hostKey, directoryIds]) => ({
+        hostKey, state: 'ready' as const, since: new Date().toISOString(),
+        hostname: hostKey.split('@')[1].split('.')[0], home: `/Users/${hostKey.split('@')[0]}`,
+        claudeVersion: '2.1.295 (mock)', nodeVersion: 'v22.0.0', bridgeForwarded: true, directoryIds,
+      }));
+    },
+    reconnectRemoteHost: async () => {},
+    onRemoteHostsUpdated: () => () => {},
+    onDirectoriesUpdated: () => () => {},
 
     getMcpServerInfo: async () => ({
       serverName: 'peersflow',

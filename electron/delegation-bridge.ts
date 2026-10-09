@@ -5,11 +5,14 @@
  * The MCP server runs as a plain Node child and cannot touch the store, poller,
  * or window broadcasts that live in main. So for anything that needs the app, it
  * connects to this unix-domain socket and asks main to do it, then waits for the
- * result. Two request types are routed by `type`:
+ * result. Four request types are routed by `type`:
  *
  *   • delegate  — spawn a *tracked, attachable* peer session and run a goal.
  *   • open_file — bring a file up in the app's file view ("Preview") so the user
  *                 can see it. Used by the `open_file` tool.
+ *   • list_peers — the registry markdown. A remote peer's MCP server has no
+ *                 store.json to read, so it asks over the forwarded socket.
+ *   • whoami    — the asking session's identity (machine, peer, ids).
  *
  * Protocol: newline-delimited JSON, one request per connection.
  *   → { type, id, rootConversationId, ... }
@@ -43,11 +46,41 @@ export interface OpenFileRequest {
   line?: number | null;
 }
 
+export interface ListPeersRequest { type: 'list_peers'; id: string; rootConversationId: string }
+export interface WhoamiRequest { type: 'whoami'; id: string; rootConversationId: string }
+// Track a directory on another machine — the MCP twin of the "Add remote peer"
+// form. Field names mirror the form (camelCase); the MCP tool maps snake_case.
+export interface AddRemotePeerRequest {
+  type: 'add_remote_peer';
+  id: string;
+  rootConversationId: string;
+  user: string;
+  host: string;
+  path: string;
+  sshArgs?: string[];
+  displayName?: string;
+  envFile?: string;
+  claudeBin?: string;
+  nodeBin?: string;
+  testOnly?: boolean;
+}
+
 export type BridgeEnvelope = Record<string, unknown>;
 
 export interface BridgeHandlers {
   onDelegate: (req: DelegateRequest) => Promise<BridgeEnvelope>;
   onOpenFile: (req: OpenFileRequest) => Promise<BridgeEnvelope>;
+  // Optional so an app build that does not serve them yet still type-checks;
+  // the router answers a clean failure instead of misrouting to delegate.
+  onListPeers?: (req: ListPeersRequest) => Promise<BridgeEnvelope>;
+  onWhoami?: (req: WhoamiRequest) => Promise<BridgeEnvelope>;
+  onAddRemotePeer?: (req: AddRemotePeerRequest) => Promise<BridgeEnvelope>;
+}
+
+type BridgeRequest = DelegateRequest | OpenFileRequest | ListPeersRequest | WhoamiRequest | AddRemotePeerRequest;
+
+function unsupported(type: string): Promise<BridgeEnvelope> {
+  return Promise.resolve({ status: 'failure', error: `${type} not supported by this Peers Flow` });
 }
 
 /** Handle to a running bridge: query its liveness or shut it down. */
@@ -83,9 +116,9 @@ export function startPeersBridge(
         if (nl < 0 || handled) return;
         handled = true;
         const line = buffer.slice(0, nl).trim();
-        let req: (DelegateRequest | OpenFileRequest) & { id?: string } | null = null;
+        let req: BridgeRequest & { id?: string } | null = null;
         try {
-          req = JSON.parse(line) as DelegateRequest | OpenFileRequest;
+          req = JSON.parse(line) as BridgeRequest;
         } catch {
           sock.end(`${JSON.stringify({ type: 'result', id: '', envelope: { status: 'failure', error: 'bad request json' } })}\n`);
           return;
@@ -95,9 +128,15 @@ export function startPeersBridge(
         };
         // Route by request type. Anything without an explicit type is a delegate
         // (the original, pre-open_file protocol).
-        const run = req.type === 'open_file'
-          ? handlers.onOpenFile(req as OpenFileRequest)
-          : handlers.onDelegate(req as DelegateRequest);
+        let run: Promise<BridgeEnvelope>;
+        if (req.type === 'open_file') run = handlers.onOpenFile(req as OpenFileRequest);
+        else if (req.type === 'list_peers') {
+          run = handlers.onListPeers ? handlers.onListPeers(req as ListPeersRequest) : unsupported('list_peers');
+        } else if (req.type === 'whoami') {
+          run = handlers.onWhoami ? handlers.onWhoami(req as WhoamiRequest) : unsupported('whoami');
+        } else if (req.type === 'add_remote_peer') {
+          run = handlers.onAddRemotePeer ? handlers.onAddRemotePeer(req as AddRemotePeerRequest) : unsupported('add_remote_peer');
+        } else run = handlers.onDelegate(req as DelegateRequest);
         run
           .then(reply)
           .catch((e) => reply({ status: 'failure', error: `bridge error: ${(e as Error).message}` }));

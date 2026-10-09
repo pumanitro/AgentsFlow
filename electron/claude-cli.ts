@@ -3,6 +3,8 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { withUtf8Locale } from './locale';
+import { getRemoteHosts } from './remote/remote-hosts';
+import type { AgentRow } from '../shared/remote';
 
 const CLAUDE_BIN = process.env.CLAUDE_BIN || 'claude';
 
@@ -140,7 +142,11 @@ function listAgentsFreshWindowMs(): number {
  * distinguish "no agents running" from "the CLI choked" — the poller uses this
  * to avoid mutating state on transient failures.
  */
-export function listAgentsResult(): Promise<ListAgentsResult> {
+//
+// `host` (a remote peer's hostKey) routes to that host's cached listing instead;
+// undefined keeps the local path exactly as it always was.
+export function listAgentsResult(host?: string): Promise<ListAgentsResult> {
+  if (host) return listRemoteAgentsResult(host);
   if (_inFlightListAgents) return _inFlightListAgents;
   const cached = _lastListAgents;
   if (cached && cached.result.ok && Date.now() - cached.at < listAgentsFreshWindowMs()) {
@@ -158,6 +164,57 @@ export function listAgentsResult(): Promise<ListAgentsResult> {
     })
     .finally(() => { _inFlightListAgents = null; });
   return _inFlightListAgents;
+}
+
+// ---------- Remote listing ----------
+// A remote host's `claude agents --json` is run by its agent script and pushed
+// (or answered) over the host's NDJSON channel; RemoteHosts keeps the latest
+// rows. Serving rows up to this old straight from that cache keeps a poll tick
+// from costing an ssh round-trip per host per tick — the agent script pushes
+// fresh rows on its own cadence, so the cache is normally far younger than this.
+const REMOTE_ROWS_FRESH_MS = 10_000;
+
+// Same fields, two declarations (shared/remote.ts must stay dependency-free);
+// copying field by field keeps a remote row from smuggling extra keys into
+// places that only ever saw the local shape.
+function fromAgentRow(r: AgentRow): ClaudeAgentJsonRow {
+  const row: ClaudeAgentJsonRow = { pid: r.pid, cwd: r.cwd, kind: r.kind, startedAt: r.startedAt, sessionId: r.sessionId };
+  if (r.name !== undefined) row.name = r.name;
+  if (r.state !== undefined) row.state = r.state;
+  if (r.status !== undefined) row.status = r.status;
+  if (r.waitingFor !== undefined) row.waitingFor = r.waitingFor;
+  return row;
+}
+
+// Every failure collapses to `exit`: the poller only needs to know the listing
+// is unknown (so it must not count misses or reap), not why. A host that is not
+// connected is exactly that — unknown, not empty.
+async function listRemoteAgentsResult(host: string): Promise<ListAgentsResult> {
+  const rh = getRemoteHosts();
+  if (!rh) return { ok: false, reason: 'exit' };
+  try {
+    const cached = rh.agentsRows(host);
+    if (cached && Date.now() - cached.at <= REMOTE_ROWS_FRESH_MS) {
+      return { ok: true, rows: cached.rows.map(fromAgentRow) };
+    }
+    const rows = await rh.refreshAgents(host);
+    return { ok: true, rows: rows.map(fromAgentRow) };
+  } catch {
+    return { ok: false, reason: 'exit' };
+  }
+}
+
+// Bypasses the freshness cache. The resolve loops below wait for a session that
+// was spawned a moment ago; a cached listing from before the spawn would hide it
+// for up to REMOTE_ROWS_FRESH_MS — longer than those loops wait.
+async function listRemoteAgentsFresh(host: string): Promise<ClaudeAgentJsonRow[]> {
+  const rh = getRemoteHosts();
+  if (!rh) return [];
+  try {
+    return (await rh.refreshAgents(host)).map(fromAgentRow);
+  } catch {
+    return [];
+  }
 }
 
 async function runListAgentsOnce(): Promise<ListAgentsResult> {
@@ -209,8 +266,8 @@ async function runListAgentsOnce(): Promise<ListAgentsResult> {
  * loops below) can use this. New callers that need to react to transient CLI
  * failures should call `listAgentsResult()` directly.
  */
-export async function listAgents(): Promise<ClaudeAgentJsonRow[]> {
-  const r = await listAgentsResult();
+export async function listAgents(host?: string): Promise<ClaudeAgentJsonRow[]> {
+  const r = await listAgentsResult(host);
   return r.ok ? r.rows : [];
 }
 
@@ -238,14 +295,31 @@ function runCmdToFile(args: string[], outPath: string, opts: { cwd?: string; tim
   });
 }
 
-export function readJobState(daemonShort: string): JobState | null {
+// Remote: answered from the host's cache, never over the wire — this runs on
+// the poller's per-conversation hot path and must stay synchronous. The agent
+// script pushes every watched job's state.json as it changes.
+export function readJobState(daemonShort: string, host?: string): JobState | null {
   if (!daemonShort) return null;
+  if (host) return getRemoteHosts()?.jobState(host, daemonShort)?.state ?? null;
   const p = path.join(os.homedir(), '.claude', 'jobs', daemonShort, 'state.json');
   try {
     const raw = fs.readFileSync(p, 'utf8');
     return JSON.parse(raw) as JobState;
   } catch {
     return null;
+  }
+}
+
+// When state.json last changed — the reaper's "quiet for how long" signal.
+// Exposed so a remote conversation can answer it from the host's cache instead
+// of a local stat. 0 = unknown.
+export function jobStateMtimeMs(daemonShort: string, host?: string): number {
+  if (!daemonShort) return 0;
+  if (host) return getRemoteHosts()?.jobState(host, daemonShort)?.mtimeMs ?? 0;
+  try {
+    return fs.statSync(path.join(os.homedir(), '.claude', 'jobs', daemonShort, 'state.json')).mtimeMs;
+  } catch {
+    return 0;
   }
 }
 
@@ -333,7 +407,10 @@ export async function dispatchBackground(opts: {
   // Model alias/name for `claude --model` (e.g. 'fable', 'opus', 'sonnet').
   // Omitted ⇒ the CLI falls back to the user's configured default model.
   model?: string;
+  // hostKey of a remote peer to spawn on; undefined = this machine.
+  host?: string;
 }): Promise<{ daemonShort: string | null; raw: string; code: number | null }> {
+  if (opts.host) return dispatchRemote({ ...opts, host: opts.host });
   // The prompt must stay the final positional argument.
   const args = ['--bg', '--permission-mode', 'bypassPermissions'];
   if (opts.model) args.push('--model', opts.model);
@@ -368,11 +445,46 @@ export async function dispatchBackground(opts: {
   return { daemonShort: m ? m[1] : null, raw: combined, code };
 }
 
-export async function resolveSessionByDaemonShort(daemonShort: string, maxWaitMs = 8000): Promise<ClaudeAgentJsonRow | null> {
+// The remote twin of the spawn above. The prompt travels inside the host's
+// NDJSON channel as data (never through a remote shell), and the agent script
+// runs `claude --bg <args...> <prompt>` — so `args` is the local argv minus
+// `--bg` and the prompt, in the same order.
+async function dispatchRemote(opts: {
+  cwd: string; prompt: string; mcpConfigPath?: string; appendSystemPrompt?: string; model?: string; host: string;
+}): Promise<{ daemonShort: string | null; raw: string; code: number | null }> {
+  const args = ['--permission-mode', 'bypassPermissions'];
+  if (opts.model) args.push('--model', opts.model);
+  if (opts.mcpConfigPath) args.push('--mcp-config', opts.mcpConfigPath);
+  if (opts.appendSystemPrompt) args.push('--append-system-prompt', opts.appendSystemPrompt);
+  // Same log-storm rule as the local path: prompt length, never the prompt.
+  // The system prompt is multi-KB registry text, so it is elided too.
+  console.log('[agentsflow][dispatch] invoking claude on remote host', {
+    host: opts.host,
+    cwd: opts.cwd,
+    args: args.map((a, i) => (args[i - 1] === '--append-system-prompt' ? `<${a.length} chars>` : a)),
+    promptChars: opts.prompt.length,
+  });
+  const rh = getRemoteHosts();
+  if (!rh) {
+    console.error('[agentsflow][dispatch] remote hosts not started', { host: opts.host });
+    return { daemonShort: null, raw: `remote hosts not started (host ${opts.host})`, code: -1 };
+  }
+  try {
+    const r = await rh.spawn(opts.host, { cwd: opts.cwd, prompt: opts.prompt, args });
+    console.log('[agentsflow][dispatch] remote result', { host: opts.host, code: r.code, daemonShort: r.daemonShort, rawLen: r.raw.length });
+    return { daemonShort: r.daemonShort, raw: r.raw, code: r.code };
+  } catch (e) {
+    const message = (e as Error)?.message ?? String(e);
+    console.error('[agentsflow][dispatch] remote spawn failed', { host: opts.host, error: message });
+    return { daemonShort: null, raw: message, code: -1 };
+  }
+}
+
+export async function resolveSessionByDaemonShort(daemonShort: string, maxWaitMs = 8000, host?: string): Promise<ClaudeAgentJsonRow | null> {
   if (!daemonShort) return null;
   const start = Date.now();
   while (Date.now() - start < maxWaitMs) {
-    const rows = await listAgents();
+    const rows = host ? await listRemoteAgentsFresh(host) : await listAgents();
     const match = rows.find((r) => r.sessionId.startsWith(daemonShort));
     if (match) return match;
     await new Promise((r) => setTimeout(r, 250));
@@ -390,11 +502,12 @@ export async function resolveLatestSessionInCwd(opts: {
   startedAfterMs: number;
   excludeSessionIds: Set<string>;
   maxWaitMs?: number;
+  host?: string;
 }): Promise<ClaudeAgentJsonRow | null> {
   const start = Date.now();
   const max = opts.maxWaitMs ?? 8000;
   while (Date.now() - start < max) {
-    const rows = await listAgents();
+    const rows = opts.host ? await listRemoteAgentsFresh(opts.host) : await listAgents();
     const candidates = rows
       .filter((r) => r.cwd === opts.cwd)
       .filter((r) => r.startedAt >= opts.startedAfterMs - 1000)
@@ -418,19 +531,44 @@ export async function resolveLatestSessionInCwd(opts: {
  * to a dead session merely fails fast with a visible CLI error — so when in
  * doubt, prefer attach.
  */
-export async function hasLiveDaemon(sessionIdOrShort: string): Promise<boolean> {
+export async function hasLiveDaemon(sessionIdOrShort: string, host?: string): Promise<boolean> {
   if (!sessionIdOrShort) return false;
-  const r = await listAgentsResult();
+  const matches = (rows: ClaudeAgentJsonRow[]) =>
+    rows.some((row) => row.sessionId === sessionIdOrShort || row.sessionId.startsWith(sessionIdOrShort));
+  const r = await listAgentsResult(host);
   if (!r.ok) return true;
-  return r.rows.some((row) => row.sessionId === sessionIdOrShort || row.sessionId.startsWith(sessionIdOrShort));
+  if (matches(r.rows)) return true;
+  if (!host) return false;
+  // A remote "no" may come from a cached listing up to 10 s old — older than a
+  // session that was just spawned. Answering "dead" sends attach down the
+  // --resume path, which can fork a live transcript, so confirm a miss against
+  // a fresh listing; a failed refresh fails open like any other failure.
+  const rh = getRemoteHosts();
+  if (!rh) return true;
+  try {
+    return matches((await rh.refreshAgents(host)).map(fromAgentRow));
+  } catch {
+    return true;
+  }
 }
 
-export async function stopAgent(daemonShort: string): Promise<void> {
+// Remote stop/rm go through the host's channel. Errors are swallowed exactly
+// like the local path ignores `claude stop`'s exit code: both are best-effort
+// and the reaper retries on its own backoff.
+export async function stopAgent(daemonShort: string, host?: string): Promise<void> {
   if (!daemonShort) return;
+  if (host) {
+    try { await getRemoteHosts()?.stopJob(host, daemonShort); } catch { /* best-effort */ }
+    return;
+  }
   await runCmd(['stop', daemonShort], { timeoutMs: 5000 });
 }
 
-export async function removeAgent(daemonShort: string): Promise<void> {
+export async function removeAgent(daemonShort: string, host?: string): Promise<void> {
   if (!daemonShort) return;
+  if (host) {
+    try { await getRemoteHosts()?.rmJob(host, daemonShort); } catch { /* best-effort */ }
+    return;
+  }
   await runCmd(['rm', daemonShort], { timeoutMs: 5000 });
 }

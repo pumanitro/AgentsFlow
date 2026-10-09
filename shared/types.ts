@@ -41,7 +41,49 @@ export interface TrackedDirectory {
   path: string;
   displayName: string;
   addedAt: string;
+  // Set when this peer lives on another machine reached over SSH. `path` is
+  // then a path on THAT machine and must never be stat-ed locally.
+  remote?: RemotePeerSpec;
+  // What we last learned about a remote peer (skills, CLAUDE.md, versions).
+  // Persisted so registry/bootstrap prompts work while the host is offline.
+  remoteCache?: RemotePeerCache;
 }
+
+// ---- Remote peers ----------------------------------------------------------
+// How to reach a remote peer's machine. Everything the app runs there goes
+// through `ssh` with these settings, so a peer is just "a directory over SSH".
+export interface RemotePeerSpec {
+  host: string;                 // ssh host name or IP
+  user: string;                 // ssh login
+  sshArgs: string[];            // extra argv for every ssh invocation (identity, ProxyCommand, …); [] allowed
+  claudeBin: string;            // 'claude' unless the user overrides; resolved on the remote PATH
+  nodeBin: string;              // 'node' unless overridden
+  envFile?: string;             // remote file sourced (`set -a; . f; set +a`) before every claude/node command; may start with '~'
+  extraPath: string[];          // prepended to PATH on the remote; default DEFAULT_EXTRA_PATH
+  permissionMode: 'bypassPermissions';
+}
+// A project-scope slash command / skill found in a remote peer's `.claude`.
+export interface RemotePeerSkill { name: string; description: string; kind: 'command' | 'skill' }
+// Snapshot of a remote peer directory, refreshed whenever its host connects.
+// It stands in for the local fs reads registry.buildPeerInfo does for local peers.
+export interface RemotePeerCache {
+  refreshedAt: string;
+  exists: boolean; hasClaudeMd: boolean; hasAgentsMd: boolean; hasProjectMcp: boolean; hasCodexConfig: boolean;
+  skills: RemotePeerSkill[];     // project scope only (same rules as registry.readProjectSkills), max 24
+  hostname: string; home: string; claudeVersion: string; nodeVersion: string;
+}
+// Connection lifecycle of one SSH host (shared by every remote peer on it).
+export type RemoteHostState = 'connecting' | 'ready' | 'unreachable';
+// What the sidebar shows about a host: state, versions, and which peers ride on it.
+export interface RemoteHostStatus {
+  hostKey: string; state: RemoteHostState; since: string; error?: string;
+  hostname?: string; home?: string; claudeVersion?: string; nodeVersion?: string; bundleHash?: string;
+  bridgeForwarded: boolean; agentPid?: number; directoryIds: string[];
+}
+// Answer of the "Test connection" button in the add-remote form.
+export interface RemoteProbeResult { ok: boolean; error?: string; hostname?: string; home?: string; claudeVersion?: string; nodeVersion?: string; dirExists?: boolean }
+// What the add-remote form submits: connection settings plus the remote path.
+export type AddRemoteRequest = RemotePeerSpec & { path: string; displayName?: string };
 
 // test
 export interface Conversation {
@@ -95,6 +137,9 @@ export interface Conversation {
   // Persisted so the association outlives the process that established it.
   // Undefined means "the peer's own working tree" — the default.
   worktreePath?: string;
+  // hostKey (`user@host`) of the remote peer this conversation runs on.
+  // Undefined = this machine. Every CLI/PTY/status call routes on it.
+  host?: string;
 }
 
 export interface PinnedDivider {
@@ -618,7 +663,25 @@ export interface AgentsFlowApi {
   // Lists the slash commands/skills available under `<dirPath>/.claude`
   // (project scope) merged with `~/.claude` (user scope). Pass null for the
   // user scope only. Project entries shadow user entries with the same name.
-  listSlashCommands: (dirPath: string | null) => Promise<SlashCommand[]>;
+  // `directoryId` lets a remote peer be resolved by id, since its path means
+  // nothing on this machine.
+  listSlashCommands: (dirPath: string | null, directoryId?: string) => Promise<SlashCommand[]>;
+
+  // Remote peers (directories on another machine over SSH).
+  // Dry-run the connection + directory before adding it ('dirs:probeRemote').
+  probeRemoteDirectory: (req: AddRemoteRequest) => Promise<RemoteProbeResult>;
+  // Track a remote directory; returns at once, the cache fills in the background ('dirs:addRemote').
+  addRemoteDirectory: (req: AddRemoteRequest) => Promise<{ ok: true; dir: TrackedDirectory } | { ok: false; error: string }>;
+  // Current status of every SSH host that owns a tracked remote peer ('remote:hosts').
+  listRemoteHosts: () => Promise<RemoteHostStatus[]>;
+  // Drop and re-establish one host's connection ('remote:reconnect').
+  reconnectRemoteHost: (hostKey: string) => Promise<void>;
+  // Push whenever any host's status changes ('remote:hostsUpdated'). Returns an unsubscribe.
+  onRemoteHostsUpdated: (cb: (hosts: RemoteHostStatus[]) => void) => () => void;
+  // Push when the tracked directories change outside the renderer's own calls,
+  // e.g. an agent added a remote peer over MCP ('dirs:updated'). Optional so a
+  // stale preload degrades to "visible after the next reload".
+  onDirectoriesUpdated?: (cb: (dirs: TrackedDirectory[]) => void) => () => void;
 
   // Connection info + tool catalogue + live peer registry for the MCP server
   // that powers peer awareness and delegation.
@@ -711,6 +774,12 @@ export interface AgentsFlowApi {
   attachShellTerminal: (shellId: string, cwd: string, cols: number, rows: number) => Promise<{ channelId: string; replay: string }>;
   killShell: (shellId: string) => Promise<void>;
   writeTerminal: (channelId: string, data: string) => Promise<void>;
+  // Paste into a chat that runs on ANOTHER machine. Claude Code there reads its
+  // own machine's clipboard, so an image copied on this Mac never arrives; main
+  // reads this Mac's clipboard instead: an image is uploaded next to the session
+  // and its path pasted, text is pasted as text, and a bare Ctrl+V with nothing
+  // to send is passed through unchanged ('term:pasteRemote').
+  pasteIntoRemoteChat?: (conversationId: string, channelId: string, key: 'cmd' | 'ctrl') => Promise<{ kind: 'image' | 'text' | 'none'; path?: string; error?: string }>;
   resizeTerminal: (channelId: string, cols: number, rows: number) => Promise<void>;
   detachTerminal: (channelId: string) => Promise<void>;
   onTerminalData: (cb: (channelId: string, data: string) => void) => () => void;

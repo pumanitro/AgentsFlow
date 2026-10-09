@@ -4,12 +4,22 @@
  * `claude` spawns this as a plain Node child (via the generated mcp config),
  * NOT inside Electron — so it must only use Node built-ins and the
  * dependency-free `registry`/`locale` modules. It speaks newline-delimited
- * JSON-RPC 2.0 (the MCP stdio transport) and exposes two tools:
+ * JSON-RPC 2.0 (the MCP stdio transport) and exposes these tools:
  *
- *   • list_peers — the live Peers Flow registry (read fresh from store.json)
+ *   • list_peers — the live Peers Flow registry (read fresh from store.json, or
+ *                  asked of the app over the bridge when there is no store —
+ *                  the case for a session on a remote peer's machine)
  *   • delegate   — ask Peers Flow (over the bridge socket) to spawn a tracked,
  *                  watchable peer session; falls back to a headless `claude -p`
  *                  when run outside the app (no bridge socket).
+ *   • open_file  — bring a file up in the app's file view (bridge only).
+ *   • whoami     — this session's identity: machine, peer, conversation/session ids.
+ *   • add_remote_peer — track a directory on another machine (ssh), like the app's form.
+ *
+ * The same compiled file also runs on a REMOTE peer's host (shipped there with
+ * registry.js + locale.js and started by that host's `node`). There it has no
+ * store.json and reaches the laptop's bridge through a reverse-forwarded unix
+ * socket, so everything that needs the app goes over `bridgeRequest`.
  *
  * IMPORTANT: stdout is the JSON-RPC channel. Never write anything but protocol
  * frames to it — all logging goes to stderr.
@@ -79,10 +89,95 @@ function textContent(text: string, isError = false): Record<string, unknown> {
 // ---------------------------------------------------------------------------
 // Tools
 // ---------------------------------------------------------------------------
-function toolListPeers(): Record<string, unknown> {
+async function toolListPeers(): Promise<Record<string, unknown>> {
+  // No store but a bridge: we are on a remote peer's machine (the laptop's
+  // store.json is not here), so the app renders the registry for us. Reading
+  // an empty STORE_PATH would silently report "no peers", which is worse than
+  // an honest failure.
+  if (!STORE_PATH && BRIDGE_SOCK) {
+    const envelope = await bridgeRequest(
+      { type: 'list_peers', id: `${Date.now()}-${process.pid}`, rootConversationId: ROOT_CONVERSATION_ID },
+      20_000,
+    );
+    if (!envelope) return textContent('Peers Flow did not respond (bridge unavailable or timed out).', true);
+    if (typeof envelope.markdown !== 'string') return textContent(JSON.stringify(envelope, null, 2), true);
+    return textContent(envelope.markdown);
+  }
   const dirs = readDirectoriesFromStore(STORE_PATH);
   const reg = buildRegistry(dirs);
   return textContent(renderRegistryMarkdown(reg));
+}
+
+interface AddRemotePeerArgs {
+  user?: unknown; host?: unknown; path?: unknown; ssh_args?: unknown; display_name?: unknown;
+  env_file?: unknown; claude_bin?: unknown; node_bin?: unknown; test_only?: unknown;
+}
+
+/**
+ * Add a remote peer through the app. Only the app can do it (it owns the store,
+ * the ssh connections and the sidebar), so without a bridge this is a clean
+ * failure. The app probes, saves, connects and waits for the host to be ready,
+ * which can take a while on a first connect (it ships its helper script).
+ */
+async function toolAddRemotePeer(raw: AddRemotePeerArgs): Promise<Record<string, unknown>> {
+  const str = (v: unknown) => (typeof v === 'string' && v.trim() ? v.trim() : undefined);
+  const user = str(raw.user), host = str(raw.host), dirPath = str(raw.path);
+  if (!user || !host || !dirPath) {
+    return textContent(JSON.stringify({ status: 'failure', error: '`user`, `host` and `path` are required.' }, null, 2), true);
+  }
+  if (raw.ssh_args !== undefined && !(Array.isArray(raw.ssh_args) && raw.ssh_args.every((a) => typeof a === 'string'))) {
+    return textContent(JSON.stringify({ status: 'failure', error: '`ssh_args` must be an array of strings, one ssh argument each.' }, null, 2), true);
+  }
+  if (!BRIDGE_SOCK) {
+    return textContent(JSON.stringify({ status: 'failure', error: 'Adding a peer requires the Peers Flow app (this session has no app bridge).' }, null, 2), true);
+  }
+  const envelope = await bridgeRequest(
+    {
+      type: 'add_remote_peer',
+      id: `${Date.now()}-${process.pid}`,
+      rootConversationId: ROOT_CONVERSATION_ID,
+      user,
+      host,
+      path: dirPath,
+      sshArgs: raw.ssh_args as string[] | undefined,
+      displayName: str(raw.display_name),
+      envFile: str(raw.env_file),
+      claudeBin: str(raw.claude_bin),
+      nodeBin: str(raw.node_bin),
+      testOnly: raw.test_only === true,
+    },
+    180_000,
+  );
+  if (!envelope) return textContent('Peers Flow did not respond (bridge unavailable or timed out).', true);
+  return textContent(JSON.stringify(envelope, null, 2), envelope.status === 'failure');
+}
+
+/**
+ * Who and where this session is. The app knows the full picture (session id,
+ * job id, which host) so it answers when reachable; without a bridge (headless
+ * run) we report what this process can see for itself.
+ */
+async function toolWhoami(): Promise<Record<string, unknown>> {
+  if (BRIDGE_SOCK) {
+    const envelope = await bridgeRequest(
+      { type: 'whoami', id: `${Date.now()}-${process.pid}`, rootConversationId: ROOT_CONVERSATION_ID },
+      20_000,
+    );
+    if (!envelope) return textContent('Peers Flow did not respond (bridge unavailable or timed out).', true);
+    return textContent(JSON.stringify(envelope, null, 2), envelope.status === 'failure');
+  }
+  return textContent(
+    JSON.stringify(
+      {
+        host: os.hostname(),
+        rootDir: ROOT_DIR,
+        conversationId: ROOT_CONVERSATION_ID,
+        remote: process.env.PEERSFLOW_REMOTE === '1',
+      },
+      null,
+      2,
+    ),
+  );
 }
 
 interface OpenFileArgs {
@@ -490,7 +585,15 @@ async function handleToolsCall(id: JsonRpcId, params: Record<string, unknown>): 
   const args = (params.arguments as Record<string, unknown>) || {};
   try {
     if (name === 'list_peers') {
-      sendResult(id, toolListPeers());
+      sendResult(id, await toolListPeers());
+      return;
+    }
+    if (name === 'whoami') {
+      sendResult(id, await toolWhoami());
+      return;
+    }
+    if (name === 'add_remote_peer') {
+      sendResult(id, await toolAddRemotePeer(args as AddRemotePeerArgs));
       return;
     }
     if (name === 'delegate') {
@@ -579,4 +682,4 @@ process.stdin.on('end', shutdown);
 process.on('SIGTERM', shutdown);
 process.on('SIGINT', shutdown);
 
-log(`started · store=${STORE_PATH || '(none)'} · depth=${DEPTH}`);
+log(`started · store=${STORE_PATH || '(none)'} · bridge=${BRIDGE_SOCK ? 'yes' : 'no'} · remote=${process.env.PEERSFLOW_REMOTE === '1'} · depth=${DEPTH}`);

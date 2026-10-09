@@ -46,7 +46,14 @@ export interface PeerInfo {
   hasProjectMcp: boolean;
   // The slash commands / skills this peer exposes under its own `.claude`.
   skills: PeerSkill[];
+  // Set for a peer on another machine. Everything above then comes from the
+  // persisted remoteCache, because its path means nothing on this machine.
+  remote?: { hostKey: string; hostname: string };
 }
+
+// Who the receiving session itself is, so a prompt can tell it which machine
+// and peer it runs on (a remote session otherwise assumes it is on the laptop).
+export interface SelfInfo { hostKey: string; hostname: string; dir: string; displayName: string }
 
 export interface Registry {
   generatedAt: string;
@@ -118,6 +125,41 @@ export const TOOL_DEFS = [
         },
       },
       required: ['file'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'whoami',
+    title: 'Who and where am I',
+    description:
+      'Return this session\'s identity as Peers Flow sees it: the machine it runs on (hostname / ssh host key or "local"), the peer directory, the conversation id, the Claude session id and background job id. Call it when asked where or what you are running as, or before reporting a path so the user knows which machine it is on.',
+    usage: 'No arguments.',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+  },
+  {
+    name: 'add_remote_peer',
+    title: 'Add a remote peer',
+    description:
+      'Track a directory on ANOTHER machine (reached over ssh) as a Peers Flow peer, exactly like the app\'s "Add remote peer" form. Peers Flow first tests the connection (hostname, claude and node versions, whether the directory exists), then saves the peer, connects to the host and waits until it is ready. Sessions there run with bypassPermissions and use THAT machine\'s own Claude login. Only call this when the user asks to add/connect a remote peer. Pass `test_only: true` to just test the connection without saving anything.',
+    usage: 'add_remote_peer({ user, host, path, ssh_args?, display_name?, env_file?, claude_bin?, node_bin?, test_only? })',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        user: { type: 'string', description: 'ssh login on the remote machine, e.g. "patryk".' },
+        host: { type: 'string', description: 'ssh host name or IP, e.g. "theos-mac-studio.tail4a0f3d.ts.net".' },
+        path: { type: 'string', description: 'Absolute path of the directory on the remote machine.' },
+        ssh_args: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Extra ssh arguments, one per array item, e.g. ["-o","IdentitiesOnly=yes","-i","/Users/demo/.ssh/id_ed25519","-o","ProxyCommand=/opt/homebrew/bin/tailscale --socket=… nc %h %p"]. Binaries inside ProxyCommand need absolute paths.',
+        },
+        display_name: { type: 'string', description: 'Optional name for the peer card.' },
+        env_file: { type: 'string', description: 'Optional file on the remote sourced before every command (e.g. "~/.config/peersflow/env" holding CLAUDE_CODE_OAUTH_TOKEN).' },
+        claude_bin: { type: 'string', description: 'claude binary on the remote. Default "claude".' },
+        node_bin: { type: 'string', description: 'node binary on the remote. Default "node".' },
+        test_only: { type: 'boolean', description: 'Only test the connection; save nothing.' },
+      },
+      required: ['user', 'host', 'path'],
       additionalProperties: false,
     },
   },
@@ -205,6 +247,25 @@ export function readProjectSkills(dirPath: string): PeerSkill[] {
 }
 
 export function buildPeerInfo(dir: TrackedDirectory): PeerInfo {
+  if (dir.remote) {
+    // Never stat a remote path locally: a same-named local dir would lie.
+    // No cache yet (host never connected) reads as "missing, no skills".
+    // hostKey is spelled out rather than imported so this module stays
+    // shippable to the remote host as a single file.
+    const c = dir.remoteCache;
+    return {
+      id: dir.id,
+      displayName: dir.displayName,
+      path: dir.path,
+      exists: c?.exists ?? false,
+      hasClaudeMd: c?.hasClaudeMd ?? false,
+      hasAgentsMd: c?.hasAgentsMd ?? false,
+      hasCodexConfig: c?.hasCodexConfig ?? false,
+      hasProjectMcp: c?.hasProjectMcp ?? false,
+      skills: c ? c.skills.slice(0, MAX_SKILLS_PER_PEER) : [],
+      remote: { hostKey: `${dir.remote.user}@${dir.remote.host}`, hostname: c?.hostname ?? dir.remote.host },
+    };
+  }
   let exists = false;
   try {
     exists = fs.statSync(dir.path).isDirectory();
@@ -254,7 +315,10 @@ function skillLine(p: PeerInfo): string {
  * The block injected into every spawned session's system prompt so it boots up
  * aware of its peers and knows it can delegate. Kept compact on purpose.
  */
-export function renderBootstrapPrompt(reg: Registry): string {
+// `self` is set only for a session running on a remote peer's machine: without
+// it that session assumes it shares the laptop's filesystem and hands back
+// paths nobody on the laptop can open.
+export function renderBootstrapPrompt(reg: Registry, self?: SelfInfo): string {
   const lines: string[] = [];
   lines.push('# Peers Flow — your peers & delegation');
   lines.push('');
@@ -279,10 +343,20 @@ export function renderBootstrapPrompt(reg: Registry): string {
     for (const p of reg.peers) {
       const mcp = p.hasProjectMcp ? ' · has its own MCP connections' : '';
       const missing = p.exists ? '' : ' · ⚠️ path missing';
-      lines.push(`- **${p.displayName}** — \`${p.path}\`${skillLine(p)}${mcp}${missing}`);
+      // A remote peer's path lives on another machine; say which, or the
+      // reader treats it as a local path and goes looking for it.
+      const where = p.remote ? ` on ${p.remote.hostname} (remote peer, ssh \`${p.remote.hostKey}\`)` : '';
+      lines.push(`- **${p.displayName}** — \`${p.path}\`${where}${skillLine(p)}${mcp}${missing}`);
     }
   }
   lines.push('');
+  if (self) {
+    lines.push('## Where you are running');
+    lines.push(
+      `You are running on **${self.hostname}** (ssh \`${self.hostKey}\`), inside the remote peer **${self.displayName}** at \`${self.dir}\`. Your working tree, your \`~/.claude\` skills and every path you print are on THAT machine. The Peers Flow app, the delegation bridge and every peer not marked "remote" live on the user's laptop; paths you receive from them are laptop paths. Call \`${qualifiedToolName('whoami')}\` for your exact ids when you need to report where you are.`,
+    );
+    lines.push('');
+  }
   lines.push('## How to collaborate');
   lines.push('Before project work, follow AGENTS.md. If the directory has only CLAUDE.md, read and follow that file as the repository guidance. Each provider uses its own configured connections; a configuration file is not proof of authentication.');
   lines.push('Directory instructions and user approvals still apply. Connections do not grant permission to send messages or change external state. Tool prefixes differ between hosts; use the peersflow tools as exposed by your runtime.');
@@ -296,6 +370,9 @@ export function renderBootstrapPrompt(reg: Registry): string {
     '- The peer shares **none** of your context: make the `goal` self-contained and state the exact `deliverable` you need back.',
   );
   lines.push("- Prefer delegating over reaching into another peer's files directly.");
+  lines.push(
+    `- When the user asks to connect or add a directory on another machine, call \`${qualifiedToolName('add_remote_peer')}\` (user, host, absolute path, ssh options). It tests the connection first and returns the new peer's name to delegate to.`,
+  );
   lines.push(
     `- Only after an explicit user request to open / show / pull up / display a specific file in the IDE or a viewer, use \`${qualifiedToolName('open_file')}\`. Peers Flow is the IDE you are running inside; this tool brings the file up in its file view. Defaults to the peer you're rooted in; pass \`directory\` to target another peer, and \`line\` to land on a specific line.`,
   );
@@ -321,6 +398,7 @@ export function renderRegistryMarkdown(reg: Registry): string {
   for (const p of reg.peers) {
     lines.push(`## ${p.displayName}`);
     lines.push(`- path: \`${p.path}\`${p.exists ? '' : ' (⚠️ missing)'}`);
+    if (p.remote) lines.push(`- host: ${p.remote.hostname} (remote peer, ssh \`${p.remote.hostKey}\`)`);
     lines.push(`- delegate with: \`directory: "${p.displayName}"\``);
     if (p.hasProjectMcp) lines.push('- has its own MCP connections (`.mcp.json`)');
     if (p.hasClaudeMd) lines.push('- Claude instructions: `CLAUDE.md`');

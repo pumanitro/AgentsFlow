@@ -11,6 +11,7 @@ import { codexResumeArgs } from './codex-resume-args';
 import { pinnedCodexCli } from './codex-cli';
 import { appendBuffer, replayText, type ReplayBuffer } from './replay-buffer';
 import { allowReattach, findChatExit, LEFT_CHAT_GRACE_MS, type ScreenWatch } from './attach-guard';
+import { getRemoteHosts } from './remote/remote-hosts';
 
 // Re-exported so the PTY layer stays the single import site for terminal argv,
 // while the builder itself lives in a module that pulls in neither `electron`
@@ -29,6 +30,13 @@ function getPty(): typeof import('node-pty') {
 }
 
 const CLAUDE_BIN = process.env.CLAUDE_BIN || 'claude';
+
+// The claude binary to name in a remote command line. Resolved on the remote
+// PATH (RemoteHosts prepends the peer's extraPath), so it is the peer's own
+// setting — never this machine's CLAUDE_BIN override.
+function claudeBinFor(host: string): string {
+  return getRemoteHosts()?.specFor(host)?.claudeBin ?? 'claude';
+}
 
 // ---------- node-pty callback safety ----------
 // node-pty invokes our onData/onExit callbacks from a *native* N-API
@@ -376,6 +384,11 @@ export async function attach(opts: {
   // mode, where the daemon already carries what it was spawned with.
   mcpConfigPath?: string;
   appendSystemPrompt?: string;
+  // Remote peer: hostKey to run the CLI on over `ssh -tt`, and the cwd on that
+  // machine for resume mode. The local PTY is then the ssh client; everything
+  // above it (attach-guard, replay buffers, subscribers) is unchanged.
+  host?: string;
+  remoteCwd?: string;
 }): Promise<string> {
   startPtyReaper();
   const mode = opts.mode ?? 'attach';
@@ -392,16 +405,33 @@ export async function attach(opts: {
 
 // One `claude attach` viewer on a chat channel. Respawned in place (same
 // channel, same xterm) when the viewer leaves the chat — see attach-guard.ts.
+// Remote (`host`): the viewer is `ssh -tt … exec claude attach <id>`; a
+// re-attach asks RemoteHosts for a fresh command line, so a host that dropped
+// in between fails visibly instead of spawning a dead ssh.
 function spawnAttachViewer(
-  opts: { channelId: string; sessionId: string; cols: number; rows: number; win: BrowserWindow },
+  opts: { channelId: string; sessionId: string; cols: number; rows: number; win: BrowserWindow; host?: string },
   reattaches: number[],
 ): void {
-  const args = ['attach', opts.sessionId];
+  let bin = CLAUDE_BIN;
+  let args = ['attach', opts.sessionId];
   const cwd = os.homedir();
-  console.log('[agentsflow][pty] spawning', { bin: CLAUDE_BIN, args, cols: opts.cols, rows: opts.rows, cwd, mode: 'attach' });
+  if (opts.host) {
+    const spec = getRemoteHosts()?.ptyCommand(opts.host, [claudeBinFor(opts.host), 'attach', opts.sessionId]);
+    if (!spec) {
+      claudeChannels.delete(opts.channelId);
+      failAttach(opts.win, opts.channelId, 'remote', new Error(`host ${opts.host} is not ready`));
+      return;
+    }
+    bin = spec.bin;
+    args = spec.args;
+    // The ssh argv is mostly connection options; the remote argv is what matters.
+    console.log('[agentsflow][pty] spawning', { bin, host: opts.host, remoteArgs: ['attach', opts.sessionId], cols: opts.cols, rows: opts.rows, cwd, mode: 'attach' });
+  } else {
+    console.log('[agentsflow][pty] spawning', { bin: CLAUDE_BIN, args, cols: opts.cols, rows: opts.rows, cwd, mode: 'attach' });
+  }
   let pty: IPty;
   try {
-    pty = getPty().spawn(CLAUDE_BIN, args, {
+    pty = getPty().spawn(bin, args, {
       name: 'xterm-256color',
       cols: Math.max(opts.cols, 20),
       rows: Math.max(opts.rows, 5),
@@ -526,6 +556,10 @@ async function attachResume(opts: {
   // Present ⇒ this is a Codex attach: `sessionId` is a thread id, and the PTY
   // is a viewer of a thread that runs in the app-server at this socket.
   codexSocket?: string;
+  // Remote peer (Claude only): run `claude --resume …` on that host over
+  // `ssh -tt`, in `remoteCwd` there.
+  host?: string;
+  remoteCwd?: string;
 }): Promise<string> {
   const isCodex = Boolean(opts.codexSocket);
   const label = isCodex ? 'codex' : 'resume';
@@ -540,9 +574,23 @@ async function attachResume(opts: {
       try { bin = (await pinnedCodexCli(path.dirname(opts.codexSocket!))).bin; }
       catch (err) { return failAttach(opts.win, opts.channelId, label, err); }
     }
-    const args = isCodex ? codexResumeArgs(opts.sessionId, opts.codexSocket!) : buildResumeArgs(opts);
-    const cwd = opts.cwd || os.homedir();
-    console.log(`[agentsflow][pty] spawning ${label}`, { bin, args: redactResumeArgs(args), cwd, cols: opts.cols, rows: opts.rows });
+    let args = isCodex ? codexResumeArgs(opts.sessionId, opts.codexSocket!) : buildResumeArgs(opts);
+    let cwd = opts.cwd || os.homedir();
+    if (opts.host && !isCodex) {
+      const remoteArgs = args;
+      const spec = getRemoteHosts()?.ptyCommand(opts.host, [claudeBinFor(opts.host), ...remoteArgs], { cwd: opts.remoteCwd });
+      if (!spec) return failAttach(opts.win, opts.channelId, 'remote', new Error(`host ${opts.host} is not ready`));
+      bin = spec.bin;
+      args = spec.args;
+      // The local end is just the ssh client; the remote cwd is set by the
+      // remote command line itself.
+      cwd = os.homedir();
+      // Log the remote argv redacted: the ssh argv embeds the whole remote
+      // command, system prompt included (see the log-storm freeze).
+      console.log(`[agentsflow][pty] spawning ${label}`, { bin, host: opts.host, remoteArgs: redactResumeArgs(remoteArgs), remoteCwd: opts.remoteCwd, cols: opts.cols, rows: opts.rows });
+    } else {
+      console.log(`[agentsflow][pty] spawning ${label}`, { bin, args: redactResumeArgs(args), cwd, cols: opts.cols, rows: opts.rows });
+    }
     if (!(await ensurePtyCapacity(opts.win, opts.channelId, label))) return '';
     let pty: IPty;
     try {
@@ -667,21 +715,41 @@ export async function attachShell(opts: {
   cols: number;
   rows: number;
   win: BrowserWindow;
+  // Remote peer: open a login zsh on that host (in `cwd` there) over `ssh -tt`.
+  host?: string;
 }): Promise<string> {
   startPtyReaper();
   let shell = shells.get(opts.shellId);
 
   if (!shell) {
-    const shellBin = process.env.SHELL || '/bin/zsh';
-    console.log('[agentsflow][pty] spawning shell', { shellId: opts.shellId, shell: shellBin, cwd: opts.cwd, cols: opts.cols, rows: opts.rows });
+    let shellBin = process.env.SHELL || '/bin/zsh';
+    let shellArgs = ['-l'];
+    let spawnCwd = opts.cwd;
+    if (opts.host) {
+      const spec = getRemoteHosts()?.ptyCommand(opts.host, ['/bin/zsh', '-l'], { cwd: opts.cwd });
+      if (!spec) {
+        const message = `host ${opts.host} is not ready`;
+        console.error('[agentsflow][pty] remote shell unavailable', { shellId: opts.shellId, host: opts.host });
+        safeSend(opts.win, 'terminal:data', opts.channelId, `\r\n\x1b[31m[shell spawn failed] ${message}\x1b[0m\r\n`);
+        safeSend(opts.win, 'terminal:exit', opts.channelId);
+        return '';
+      }
+      shellBin = spec.bin;
+      shellArgs = spec.args;
+      // `opts.cwd` is a path on the remote host; the ssh client runs from home.
+      spawnCwd = os.homedir();
+      console.log('[agentsflow][pty] spawning shell', { shellId: opts.shellId, host: opts.host, shell: '/bin/zsh', remoteCwd: opts.cwd, cols: opts.cols, rows: opts.rows });
+    } else {
+      console.log('[agentsflow][pty] spawning shell', { shellId: opts.shellId, shell: shellBin, cwd: opts.cwd, cols: opts.cols, rows: opts.rows });
+    }
     if (!(await ensurePtyCapacity(opts.win, opts.channelId, 'shell'))) return '';
     let pty: IPty;
     try {
-      pty = getPty().spawn(shellBin, ['-l'], {
+      pty = getPty().spawn(shellBin, shellArgs, {
         name: 'xterm-256color',
         cols: Math.max(opts.cols, 20),
         rows: Math.max(opts.rows, 5),
-        cwd: opts.cwd,
+        cwd: spawnCwd,
         env: env(),
       });
     } catch (err) {

@@ -14,6 +14,7 @@ import {
 import { attachmentPromptLines, imageFilesFromPaste, savePastedImages, type PastedImage } from '../lib/paste-image';
 import ImagePreviewModal from './ImagePreviewModal';
 import ProviderIcon, { providerName } from './ProviderIcon';
+import { shortHost } from '../lib/remote';
 
 interface Props {
   targetDir: TrackedDirectory | null;
@@ -92,15 +93,17 @@ export default function SpawnBar({ targetDir, onSend }: Props) {
 
   // (Re)load the available commands whenever the spawn target changes. Project
   // (.claude in the target dir) shadows user-level (~/.claude) entries.
+  // A remote peer is resolved by id in main (its path lives on another machine),
+  // so the id rides along; the list then comes from that host.
   useEffect(() => {
     if (provider === 'codex') { setSlashCommands([]); return; }
     let alive = true;
     api()
-      .listSlashCommands(targetDir?.path ?? null)
+      .listSlashCommands(targetDir?.path ?? null, targetDir?.id)
       .then((cmds) => { if (alive) setSlashCommands(cmds); })
       .catch(() => { if (alive) setSlashCommands([]); });
     return () => { alive = false; };
-  }, [targetDir?.path, provider]);
+  }, [targetDir?.path, targetDir?.id, provider]);
 
   // Find a "/token" at the caret: the word being typed just before the cursor
   // that starts with "/". This works ANYWHERE in the prompt, so a command/skill
@@ -254,7 +257,7 @@ export default function SpawnBar({ targetDir, onSend }: Props) {
         {menuOpen && (
           <div className="absolute bottom-full left-4 right-4 mb-2 z-30 rounded-lg border border-accent/60 bg-bg shadow-xl shadow-black/40 overflow-hidden">
             <div className="px-3 py-1.5 text-[10px] uppercase tracking-wide text-muted border-b border-border bg-panel2/60">
-              Slash commands{slashQuery ? ` · /${slashQuery}` : ''}
+              Slash commands{targetDir?.remote ? ` · on ${shortHost(targetDir.remote.host)}` : ''}{slashQuery ? ` · /${slashQuery}` : ''}
             </div>
             <ul className="max-h-64 overflow-y-auto py-1">
               {filtered.map((cmd, i) => {
@@ -279,7 +282,7 @@ export default function SpawnBar({ targetDir, onSend }: Props) {
                               : 'bg-panel2 text-muted'
                         }`}
                       >
-                        {cmd.kind === 'skill' ? 'skill' : cmd.scope}
+                        {cmd.kind === 'skill' ? 'skill' : cmd.scope === 'user' && targetDir?.remote ? 'remote user' : cmd.scope}
                       </span>
                       <span className={`text-xs truncate ${selected ? 'text-bg/80' : 'text-muted'}`}>
                         {cmd.description}

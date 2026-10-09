@@ -13,11 +13,14 @@ import HistoryTimeline from '../components/HistoryTimeline';
 import HelpModal from '../components/HelpModal';
 import McpModal from '../components/McpModal';
 import SettingsModal from '../components/SettingsModal';
+import AddRemoteModal from '../components/AddRemoteModal';
+import AddPeerMenu from '../components/AddPeerMenu';
 import StatsView from '../components/StatsView';
 import DockedPanes, { TOP_REGION_MIN } from '../components/DockedPanes';
 import { api } from '../lib/ipc';
 import { useUIState } from '../lib/ui-state';
-import { BridgeHealth, Conversation, PinnedDivider, PinnedItemRef, PinnedTodo, TrackedDirectory } from '../../shared/types';
+import { BridgeHealth, Conversation, PinnedDivider, PinnedItemRef, PinnedTodo, RemoteHostStatus, TrackedDirectory } from '../../shared/types';
+import { hostKeyOf } from '../../shared/remote';
 import { blockStepDropIndex, marqueeHits, moveRefsTo, refKey } from '../../shared/pinned-selection';
 
 /**
@@ -60,6 +63,10 @@ export default function Home() {
   const [helpOpen, setHelpOpen] = useState(false);
   const [mcpOpen, setMcpOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  // Remote peers: the "+ Add remote peer" form, and the live status of every
+  // SSH host, keyed by hostKey (`user@host`) for the DirectoryCard dots.
+  const [addRemoteOpen, setAddRemoteOpen] = useState(false);
+  const [hostsByKey, setHostsByKey] = useState<Map<string, RemoteHostStatus>>(() => new Map());
   // Live delegation-bridge liveness, polled for the header health dot. When this
   // goes down, delegations silently degrade to unwatchable headless runs, so we
   // surface it at a glance rather than leaving it invisible.
@@ -102,8 +109,10 @@ export default function Home() {
   const peerHeadingRef = useRef<HTMLHeadingElement | null>(null);
   const peerSearchRef = useRef<HTMLInputElement | null>(null);
   const peerAddRef = useRef<HTMLButtonElement | null>(null);
+  // The `+` (peerAddRef) now lives INSIDE the heading, so it is not an inset of
+  // its own — measuring it too would count its height twice.
   const peerInsetRefs = useMemo(
-    () => [peerHeadingRef, peerSearchRef, peerAddRef],
+    () => [peerHeadingRef, peerSearchRef],
     [],
   );
   // The band being dragged right now, in coordinates relative to the list box.
@@ -158,6 +167,26 @@ export default function Home() {
     poll();
     const t = setInterval(poll, 5000);
     return () => { alive = false; clearInterval(t); };
+  }, []);
+
+  // A peer added outside this window's own buttons (an agent calling the
+  // add_remote_peer MCP tool) arrives as a push; take the list as-is.
+  useEffect(() => {
+    const off = api().onDirectoriesUpdated?.((all) => setDirs(all));
+    return () => { off?.(); };
+  }, []);
+
+  // Remote host status: one fetch on mount, then main's pushes. Optional-
+  // chained like getBridgeHealth — a stale preload may predate these IPCs.
+  useEffect(() => {
+    const a = api();
+    let alive = true;
+    const apply = (hosts: RemoteHostStatus[]) => {
+      if (alive) setHostsByKey(new Map(hosts.map((h) => [h.hostKey, h])));
+    };
+    a.listRemoteHosts?.().then(apply).catch(() => undefined);
+    const off = a.onRemoteHostsUpdated?.(apply);
+    return () => { alive = false; off?.(); };
   }, []);
 
   // Resolve the shared global-notes root once, so the preview modal can show a
@@ -578,6 +607,16 @@ export default function Home() {
     return () => window.removeEventListener('mousemove', onMove);
   }, [keyboardNavActive]);
 
+  // The remote form already created the directory in main; just reload and select it.
+  const handleRemoteAdded = async (dir: TrackedDirectory) => {
+    setAddRemoteOpen(false);
+    setDirs(await api().listDirectories());
+    setSelectedDirId(dir.id);
+    // Main pushes host updates, but a fresh fetch covers a host that was
+    // already 'ready' before this dir joined it (no state change → no push).
+    api().listRemoteHosts?.().then((hosts) => setHostsByKey(new Map(hosts.map((h) => [h.hostKey, h])))).catch(() => undefined);
+  };
+
   const handleAddDirectory = async () => {
     const dir = await api().addDirectory();
     if (dir) {
@@ -951,6 +990,8 @@ export default function Home() {
           <h2 ref={peerHeadingRef} className="sticky top-0 z-10 -mx-3 px-3 py-2.5 mb-1 bg-bg/95 backdrop-blur-sm border-b border-border/40 flex items-center gap-2 text-xs uppercase tracking-wider text-muted">
             <span className="w-1 h-4 rounded-full bg-accent shrink-0" aria-hidden="true" />
             Tracked Peers
+            {/* One `+` opens a small menu: local folder or remote peer (ssh). */}
+            <AddPeerMenu ref={peerAddRef} onAddDirectory={handleAddDirectory} onAddRemote={() => setAddRemoteOpen(true)} />
           </h2>
           <input
             ref={peerSearchRef}
@@ -967,14 +1008,6 @@ export default function Home() {
             aria-label="Search tracked peers by folder name"
             className="w-full mb-2 bg-panel border border-border rounded-md px-2.5 py-1.5 text-sm text-text outline-none focus:border-accent placeholder:text-muted/70"
           />
-          <button
-            ref={peerAddRef}
-            onClick={handleAddDirectory}
-            className="w-full rounded-md border-2 border-dashed border-border bg-transparent hover:border-accent hover:bg-panel/40 transition-colors px-2.5 py-1.5 text-left mb-2"
-          >
-            <div className="text-sm font-medium text-text">+ Add directory</div>
-            <div className="text-[11px] text-muted">track a new peer</div>
-          </button>
           <div className="flex flex-col gap-1.5">
             {filteredDirs.length === 0 && peerQuery.trim() !== '' && (
               <div className="text-xs text-muted px-1 py-1.5">No peers match “{peerQuery.trim()}”.</div>
@@ -990,6 +1023,8 @@ export default function Home() {
                 onViewHistory={() => setHistoryDirId(d.id)}
                 onPreview={() => router.push({ pathname: '/preview', query: { dir: d.id } })}
                 onRemove={() => handleRemoveDirectory(d)}
+                remoteStatus={d.remote ? hostsByKey.get(hostKeyOf(d.remote)) : undefined}
+                onReconnect={d.remote ? () => { api().reconnectRemoteHost(hostKeyOf(d.remote!)).catch(() => undefined); } : undefined}
               />
             ))}
           </div>
@@ -1249,6 +1284,7 @@ export default function Home() {
       {mcpOpen && <McpModal onClose={() => setMcpOpen(false)} />}
 
       {settingsOpen && <SettingsModal onClose={() => setSettingsOpen(false)} />}
+      {addRemoteOpen && <AddRemoteModal onClose={() => setAddRemoteOpen(false)} onAdded={handleRemoteAdded} />}
 
       {historyDir && (
         <HistoryModal

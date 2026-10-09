@@ -528,7 +528,7 @@ export default function SessionPage() {
                 // that is the CLI's own TUI attached to the live thread, the
                 // same thing the user would see in a shell, approvals included.
                 <PaneErrorBoundary key={chatGen} label="Terminal">
-                  <Terminal key={chatGen} conversationId={String(id)} baseDir={conv.provider === 'codex' ? (conv.worktreePath || conv.directoryPath) : conv.directoryPath} onExit={(reason) => { setChatExitReason(reason ?? null); setChatExited(true); }} autoFocus={rightPane === 'chat'} followOnOpen={conv.provider === 'codex'} />
+                  <Terminal key={chatGen} conversationId={String(id)} remote={Boolean(conv.host)} remoteHostLabel={conv.host ? conv.host.replace(/^[^@]*@/, '').split('.')[0] : undefined} baseDir={conv.provider === 'codex' ? (conv.worktreePath || conv.directoryPath) : conv.directoryPath} onExit={(reason) => { setChatExitReason(reason ?? null); setChatExited(true); }} autoFocus={rightPane === 'chat'} followOnOpen={conv.provider === 'codex'} />
                 </PaneErrorBoundary>
               )
             ) : conv && conv.provider === 'codex' ? (

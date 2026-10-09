@@ -3,6 +3,7 @@ import { Conversation } from '../../shared/types';
 import { statusDotClass } from '../lib/status';
 import { useUIState } from '../lib/ui-state';
 import ProviderIcon, { providerName } from './ProviderIcon';
+import { shortHost } from '../lib/remote';
 
 interface Props {
   conv: Conversation;
@@ -121,7 +122,14 @@ export default function PinnedRow({ conv, onAttach, onSaveTitle, onMarkDone, onA
         {/* The provider mark belongs to the name, not to the dot: extra air on
             its left, the normal gap on its right. */}
         {showProviderIcon && <ProviderIcon provider={provider} size={12} className="text-muted ml-1.5" title={providerName(provider)} />}
-        <div className="truncate text-text font-medium">{conv.displayName}</div>
+        {/* Name on top; for a remote peer conversation, the machine it runs on
+            sits on a second line underneath so the name keeps its full width. */}
+        <div className="min-w-0 flex flex-col leading-tight">
+          <div className="truncate text-text font-medium">{conv.displayName}</div>
+          {conv.host && (
+            <span className="truncate text-[10px] text-muted font-mono" title={conv.host}>⇅ {shortHost(conv.host)}</span>
+          )}
+        </div>
       </div>
 
       <div className="min-w-0 flex items-center gap-2">

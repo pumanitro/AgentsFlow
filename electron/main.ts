@@ -49,8 +49,8 @@ import * as handover from './handover';
 import * as rotation from './rotation';
 import * as limitWatch from './limit-watch';
 import { forkTitle } from '../shared/fork-title';
-import { latestContinuation, transcriptExists as transcriptExistsUnder } from './transcript-path';
-import { computeDisplayName, recomputeAllDisplayNames } from './naming';
+import { findTranscript, latestContinuation, mungeCwd, transcriptExists as transcriptExistsUnder } from './transcript-path';
+import { computeDisplayName } from './naming';
 import {
   dispatchBackground,
   resolveSessionByDaemonShort,
@@ -61,24 +61,51 @@ import {
   hasLiveDaemon,
 } from './claude-cli';
 import { ensureWorkspaceTrusted } from './workspace-trust';
-import { getLastAgentRows, refreshNow, setPollerForeground, startPoller, stopPoller, syncWatchers, unwatchConversation, watchConversation, watcherStats } from './poller';
-import { bridgeSocketPath, buildBootstrapSystemPrompt, getMcpServerInfo, writeMcpConfigForConversation } from './mcp-bridge';
-import { buildDelegatePrompt } from './registry';
-import { startPeersBridge, type DelegateRequest, type OpenFileRequest, type PeersBridge } from './delegation-bridge';
+import { applyRemoteJobState, getLastAgentRows, refreshNow, setPollerForeground, startPoller, stopPoller, syncWatchers, unwatchConversation, watchConversation, watcherStats } from './poller';
+import { bridgeSocketPath, buildBootstrapSystemPrompt, getMcpServerInfo, writeMcpConfigForConversation, writeRemoteMcpConfig } from './mcp-bridge';
+import { buildDelegatePrompt, buildRegistry, renderRegistryMarkdown } from './registry';
+import { startPeersBridge, type AddRemotePeerRequest, type DelegateRequest, type ListPeersRequest, type OpenFileRequest, type PeersBridge, type WhoamiRequest } from './delegation-bridge';
+import { RemoteHosts, setRemoteHosts } from './remote/remote-hosts';
+import { remoteCommand, runRemote } from './remote/remote-exec';
+import { hostKeyOf } from '../shared/remote';
+import {
+  buildProbeScript,
+  delegationLooksFinished,
+  lastAssistantText,
+  localAttachmentPaths,
+  parseProbeOutput,
+  recomputeDisplayNamesKeepingRemote,
+  remoteDisplayName,
+  remoteSelfInfo,
+  resolveSkillsDir,
+  rewriteAttachmentPaths,
+  validateAddRemoteRequest,
+  whoamiEnvelope,
+} from './main-remote';
 import * as pty from './pty-manager';
 import * as fileWatcher from './file-watcher';
 import { gitStatus, listBranches, listFiles, listWorktrees, onWorktreesUpdated, removeWorktree } from './git';
 import { searchInFiles } from './search';
+import * as remoteFs from './remote/remote-fs';
 import { deleteAttachmentFiles, pastedImagesRoot, prunePastedImages, sweepOrphanAttachments, todayDateSlug } from './attachments';
 import { noteDirForPath, sweepNoteDir, sweepNoteImages } from './note-images';
 import { disableLeftArrowAgents } from './attach-guard';
-import { Account, AccountsSnapshot, AddAccountResult, AgentProvider, BridgeHealth, CodexModel, Conversation, FileEntry, PerfReportResult, PinnedDivider, PinnedItemRef, PinnedTodo, ProbeAccountResult, ProbeCodexResult, RotationPolicy, SlashCommand, SpawnRequest, SwitchAccountResult, SwitchCodexResult, TrackedDirectory, UsageResult } from '../shared/types';
+import { Account, AccountsSnapshot, AddAccountResult, AddRemoteRequest, AgentProvider, BridgeHealth, CodexModel, Conversation, FileEntry, PerfReportResult, PinnedDivider, PinnedItemRef, PinnedTodo, ProbeAccountResult, ProbeCodexResult, RemoteHostStatus, RemoteProbeResult, RotationPolicy, SlashCommand, SpawnRequest, SwitchAccountResult, SwitchCodexResult, TrackedDirectory, UsageResult } from '../shared/types';
 
 const isDev = process.env.NODE_ENV === 'development';
 const loadURL = isDev ? null : serve({ directory: path.join(__dirname, '..', '..', '..', 'renderer', 'out') });
 
 let mainWindow: BrowserWindow | null = null;
 let peersBridge: PeersBridge | null = null;
+// Remote peers' SSH hosts. Created in whenReady (it needs userData and the
+// bridge socket), so every IPC handler below reads it through `?.` — a call
+// that lands before startup finishes just sees "no remote hosts yet".
+let remoteHosts: RemoteHosts | null = null;
+
+/** hostKey of the machine a tracked dir runs on; undefined = this one. */
+function remoteHostKeyForDir(dir: TrackedDirectory): string | undefined {
+  return (remoteHosts ? remoteHosts.hostKeyForDir(dir) : dir.remote ? hostKeyOf(dir.remote) : null) ?? undefined;
+}
 // Built as a value rather than inline so the seed and limit hooks below can be
 // added before the Codex runtime declares them — the alternative is an
 // excess-property error on a literal passed straight to the constructor.
@@ -486,9 +513,47 @@ app.whenReady().then(() => {
     peersBridge = startPeersBridge(bridgeSocketPath(), {
       onDelegate: handleDelegate,
       onOpenFile: handleOpenFile,
+      onListPeers: handleListPeers,
+      onWhoami: handleWhoami,
+      onAddRemotePeer: handleAddRemotePeer,
     });
   } catch (err) {
     console.error('[agentsflow] failed to start peers bridge', err);
+  }
+
+  // Remote peers: one SSH connection per host that owns a tracked remote dir.
+  // Started after the bridge because each host reverse-forwards that socket so
+  // its sessions can delegate back. A failure here costs remote peers only.
+  try {
+    remoteHosts = new RemoteHosts({
+      instanceId: app.getPath('userData'),
+      // The dir that contains `electron/remote/remote-agent-script.js`. At
+      // runtime __dirname is dist/electron/electron (see mcpServerScriptPath),
+      // so one level up is dist/electron.
+      bundleRoot: path.join(__dirname, '..'),
+      localBridgeSock: bridgeSocketPath(),
+      getDirectories: () => store.getDirectories(),
+      updateDirectory: (id, patch) => {
+        store.setDirectories(store.getDirectories().map((d) => (d.id === id ? { ...d, ...patch } : d)));
+      },
+      onHostsChanged: (hosts: RemoteHostStatus[]) => {
+        if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.webContents.isDestroyed()) {
+          mainWindow.webContents.send('remote:hostsUpdated', hosts);
+        }
+      },
+      onJobState: (hostKey, short, state, mtimeMs) => applyRemoteJobState(hostKey, short, state, mtimeMs),
+      // The poller reads rows from RemoteHosts' cache on its own tick.
+      onAgentsRows: () => {},
+      onFsEvent: (_hostKey, dir) => {
+        if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.webContents.isDestroyed()) {
+          mainWindow.webContents.send('files:updated', dir);
+        }
+      },
+    });
+    setRemoteHosts(remoteHosts);
+    remoteHosts.start();
+  } catch (err) {
+    console.error('[agentsflow][remote] failed to start remote hosts', err);
   }
 
   try {
@@ -572,6 +637,8 @@ app.on('window-all-closed', () => {
 app.on('before-quit', () => {
   codex.close();
   try { peersBridge?.stop(); } catch { /* ignore */ }
+  // Best effort and not awaited: quitting must not wait on a dead ssh master.
+  try { void remoteHosts?.stop().catch(() => undefined); } catch { /* ignore */ }
   // Flush any debounced store changes synchronously so a quit never loses the
   // last few mutations (the async debounce window would otherwise drop them).
   try { store.flushSync(); } catch { /* ignore */ }
@@ -579,6 +646,13 @@ app.on('before-quit', () => {
 
 // ----- IPC -----
 
+// Directories changed outside the renderer's own add/remove calls (an agent
+// added a peer over MCP): push the list so the sidebar shows it without a reload.
+function broadcastDirectories(): void {
+  if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.webContents.isDestroyed()) {
+    mainWindow.webContents.send('dirs:updated', store.getDirectories());
+  }
+}
 function broadcastConversations(): void {
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.webContents.send('conversations:updated', store.getConversations());
@@ -612,16 +686,17 @@ ipcMain.handle('dirs:add', async (): Promise<TrackedDirectory | null> => {
   try { fs.accessSync(absPath, fs.constants.R_OK); } catch { return null; }
 
   const existing = store.getDirectories();
-  if (existing.some((d) => d.path === absPath)) {
-    return existing.find((d) => d.path === absPath) ?? null;
-  }
+  // Local dirs only: a remote peer may carry the same path on another machine.
+  const same = existing.find((d) => !d.remote && d.path === absPath);
+  if (same) return same;
   const newDir: TrackedDirectory = {
     id: uuid(),
     path: absPath,
     displayName: computeDisplayName(absPath, existing),
     addedAt: new Date().toISOString(),
   };
-  const next = recomputeAllDisplayNames([...existing, newDir]);
+  // Remote peers keep their own names (see recomputeDisplayNamesKeepingRemote).
+  const next = recomputeDisplayNamesKeepingRemote([...existing, newDir]);
   store.setDirectories(next);
   const persisted = next.find((d) => d.id === newDir.id) ?? newDir;
 
@@ -640,7 +715,135 @@ ipcMain.handle('dirs:add', async (): Promise<TrackedDirectory | null> => {
 
 ipcMain.handle('dirs:remove', (_e, id: string) => {
   const dirs = store.getDirectories().filter((d) => d.id !== id);
-  store.setDirectories(recomputeAllDisplayNames(dirs));
+  store.setDirectories(recomputeDisplayNamesKeepingRemote(dirs));
+  // A host that owned only this dir is disconnected.
+  remoteHosts?.syncFromDirectories();
+});
+
+// ---- Remote peers ----------------------------------------------------------
+
+// The add-remote form's "Test connection": one ssh round trip that reports what
+// the form needs before anything is saved — the machine's name, its home, the
+// node/claude it would use, and whether the directory exists. Runs through the
+// same bootstrap (PATH + env file) every real remote command gets, so a probe
+// that passes means the peer will actually start.
+async function probeRemoteDirectory(req: AddRemoteRequest): Promise<RemoteProbeResult> {
+  const v = validateAddRemoteRequest(req);
+  if (!v.ok) return { ok: false, error: v.error };
+  try {
+    const cmd = remoteCommand(v.spec, ['sh', '-c', buildProbeScript(v.spec, v.path)]);
+    const res = await runRemote(v.spec, app.getPath('userData'), cmd, { timeoutMs: 25_000 });
+    const out = parseProbeOutput(res);
+    console.log('[agentsflow][remote] probe', { hostKey: hostKeyOf(v.spec), ok: out.ok, error: out.error, dirExists: out.dirExists });
+    return out;
+  } catch (err) {
+    return { ok: false, error: (err as Error)?.message ?? String(err) };
+  }
+}
+ipcMain.handle('dirs:probeRemote', (_e, req: AddRemoteRequest) => probeRemoteDirectory(req));
+
+// Track a directory on another machine. Saved at once; the host connects and
+// fills `remoteCache` (skills, versions, CLAUDE.md…) in the background, so the
+// card appears immediately and lights up when the host is ready.
+async function addRemoteDirectory(req: AddRemoteRequest): Promise<{ ok: true; dir: TrackedDirectory } | { ok: false; error: string }> {
+  const v = validateAddRemoteRequest(req);
+  if (!v.ok) return { ok: false, error: v.error };
+  const hostKey = hostKeyOf(v.spec);
+  const existing = store.getDirectories();
+  const same = existing.find((d) => d.remote && hostKeyOf(d.remote) === hostKey && d.path === v.path);
+  if (same) return { ok: true, dir: same };
+
+  // Disambiguated by path only against the same host's dirs; a clash with a
+  // peer on another machine (a local checkout of the same repo, typically)
+  // gets ` @<host>` instead, which says more than a longer path would.
+  const sameHost = existing.filter((d) => d.remote && hostKeyOf(d.remote) === hostKey);
+  const base = v.displayName || computeDisplayName(v.path, sameHost);
+  const newDir: TrackedDirectory = {
+    id: uuid(),
+    path: v.path,
+    displayName: remoteDisplayName(base, v.spec.host, existing),
+    addedAt: new Date().toISOString(),
+    remote: v.spec,
+  };
+  const next = recomputeDisplayNamesKeepingRemote([...existing, newDir]);
+  store.setDirectories(next);
+  const persisted = next.find((d) => d.id === newDir.id) ?? newDir;
+  remoteHosts?.syncFromDirectories();
+
+  // Same "remove + re-add restores the history" rule as dirs:add, but matched
+  // on host too: a local conversation with the same path is not this peer's.
+  let relinked = 0;
+  for (const c of store.getConversations()) {
+    if (c.host !== hostKey || c.directoryPath !== persisted.path) continue;
+    if (c.directoryId === persisted.id && c.displayName === persisted.displayName) continue;
+    store.updateConversation(c.id, { directoryId: persisted.id, displayName: persisted.displayName });
+    relinked += 1;
+  }
+  if (relinked > 0) {
+    console.log('[agentsflow][remote] re-linked', relinked, 'conversations to', hostKey, persisted.path);
+    broadcastConversations();
+  }
+  console.log('[agentsflow][remote] added remote peer', { id: persisted.id, hostKey, path: persisted.path });
+  broadcastDirectories();
+  return { ok: true, dir: persisted };
+}
+ipcMain.handle('dirs:addRemote', (_e, req: AddRemoteRequest) => addRemoteDirectory(req));
+
+/**
+ * `add_remote_peer` (MCP): the form's two buttons in one call. Probe first, so a
+ * typo in the host or a missing folder comes back as an explanation instead of
+ * a red card; then save, connect, and wait (bounded) for the host to be ready,
+ * so the calling agent can delegate to the new peer right away.
+ */
+const ADD_REMOTE_READY_WAIT_MS = 90_000;
+async function handleAddRemotePeer(req: AddRemotePeerRequest): Promise<Record<string, unknown>> {
+  const form: AddRemoteRequest = {
+    user: req.user,
+    host: req.host,
+    path: req.path,
+    sshArgs: Array.isArray(req.sshArgs) ? req.sshArgs : [],
+    claudeBin: req.claudeBin || 'claude',
+    nodeBin: req.nodeBin || 'node',
+    ...(req.envFile ? { envFile: req.envFile } : {}),
+    extraPath: [],
+    permissionMode: 'bypassPermissions',
+    ...(req.displayName ? { displayName: req.displayName } : {}),
+  };
+  const probe = await probeRemoteDirectory(form);
+  if (!probe.ok) return { status: 'failure', stage: 'test connection', error: probe.error ?? 'connection test failed', probe };
+  if (probe.dirExists === false) {
+    return { status: 'failure', stage: 'test connection', error: `Directory does not exist on ${probe.hostname ?? req.host}: ${req.path}`, probe };
+  }
+  if (req.testOnly) return { status: 'success', testOnly: true, probe };
+
+  const added = await addRemoteDirectory(form);
+  if (!added.ok) return { status: 'failure', stage: 'add', error: added.error, probe };
+  const dir = added.dir;
+  const hostKey = hostKeyOf(dir.remote!);
+  const started = Date.now();
+  let host = remoteHosts?.status(hostKey) ?? null;
+  while (host?.state !== 'ready' && Date.now() - started < ADD_REMOTE_READY_WAIT_MS) {
+    await new Promise((r) => setTimeout(r, 1000));
+    host = remoteHosts?.status(hostKey) ?? null;
+  }
+  const ready = host?.state === 'ready';
+  return {
+    status: ready ? 'success' : 'partial',
+    peer: { id: dir.id, displayName: dir.displayName, path: dir.path, host: hostKey },
+    delegateWith: `directory: "${dir.displayName}"`,
+    hostStatus: host ? { state: host.state, hostname: host.hostname, claudeVersion: host.claudeVersion, bridgeForwarded: host.bridgeForwarded, error: host.error } : null,
+    probe,
+    note: ready
+      ? 'The peer is saved and its host is connected; it appears in the Peers Flow sidebar and can be delegated to now.'
+      : `The peer is saved but its host is not ready after ${Math.round(ADD_REMOTE_READY_WAIT_MS / 1000)} s (state: ${host?.state ?? 'unknown'}). It keeps retrying in the background; see the card's dot in the sidebar.`,
+  };
+}
+
+ipcMain.handle('remote:hosts', (): RemoteHostStatus[] => remoteHosts?.statuses() ?? []);
+
+ipcMain.handle('remote:reconnect', async (_e, hostKey: string): Promise<void> => {
+  if (!remoteHosts || typeof hostKey !== 'string' || !hostKey) return;
+  await remoteHosts.reconnect(hostKey);
 });
 
 ipcMain.handle('mcp:info', () => ({
@@ -1088,31 +1291,58 @@ async function dispatchClaudeInto(
   conversationId: string,
   cwd: string,
   prompt: string,
-  opts: { peerAware: boolean; model?: string; delegated?: boolean },
+  opts: { peerAware: boolean; model?: string; delegated?: boolean; dir: TrackedDirectory },
 ): Promise<{ sessionId: string; daemonShort: string }> {
+  // Remote peer: everything below runs on that machine — the MCP config and the
+  // trust record are written THERE, and the CLI is driven through RemoteHosts.
+  const host = remoteHostKeyForDir(opts.dir);
   let mcpConfigPath: string | undefined;
   let appendSystemPrompt: string | undefined;
-  if (opts.peerAware) {
-    try {
-      mcpConfigPath = writeMcpConfigForConversation(conversationId, cwd);
-      appendSystemPrompt = buildBootstrapSystemPrompt(store.getDirectories());
-    } catch (err) {
-      console.error('[agentsflow] MCP bootstrap failed — spawning without peer awareness', err);
+  if (host) {
+    if (!remoteHosts) {
+      const reason = 'Remote peers are not ready yet — try again in a moment';
+      store.updateConversation(conversationId, { state: 'error', status: 'error', description: reason });
+      broadcastConversations();
+      throw new Error(reason);
     }
-  }
+    if (opts.peerAware) {
+      try {
+        mcpConfigPath = await writeRemoteMcpConfig(host, conversationId, cwd);
+        appendSystemPrompt = buildBootstrapSystemPrompt(store.getDirectories(), remoteSelfInfo(host, opts.dir, cwd, opts.dir.displayName));
+      } catch (err) {
+        mcpConfigPath = undefined;
+        appendSystemPrompt = undefined;
+        console.error('[agentsflow][remote] MCP bootstrap failed — spawning without peer awareness', { host, error: (err as Error)?.message ?? err });
+      }
+    }
+    // Same reason as ensureWorkspaceTrusted below, but in the REMOTE ~/.claude.json.
+    await remoteHosts.trust(host, cwd).catch((err) => {
+      console.error('[agentsflow][remote][trust] could not record workspace trust', { host, cwd, error: (err as Error)?.message ?? err });
+    });
+    prompt = await copyAttachmentsToRemote(remoteHosts, host, conversationId, prompt);
+  } else {
+    if (opts.peerAware) {
+      try {
+        mcpConfigPath = writeMcpConfigForConversation(conversationId, cwd);
+        appendSystemPrompt = buildBootstrapSystemPrompt(store.getDirectories());
+      } catch (err) {
+        console.error('[agentsflow] MCP bootstrap failed — spawning without peer awareness', err);
+      }
+    }
 
-  // A newly added peer has never had the CLI's trust prompt accepted, and
-  // `claude --bg` refuses such a directory outright (see workspace-trust.ts).
-  await ensureWorkspaceTrusted(cwd).catch((err) => {
-    console.error('[agentsflow][trust] could not record workspace trust', { cwd, err });
-  });
+    // A newly added peer has never had the CLI's trust prompt accepted, and
+    // `claude --bg` refuses such a directory outright (see workspace-trust.ts).
+    await ensureWorkspaceTrusted(cwd).catch((err) => {
+      console.error('[agentsflow][trust] could not record workspace trust', { cwd, err });
+    });
+  }
 
   const startedBefore = Date.now();
   const claimedSessionIds = new Set(store.getConversations().map((c) => c.sessionId).filter(Boolean));
-  const dispatch = await dispatchBackground({ cwd, prompt, mcpConfigPath, appendSystemPrompt, model: opts.model });
+  const dispatch = await dispatchBackground({ cwd, prompt, mcpConfigPath, appendSystemPrompt, model: opts.model, host });
   const daemonShortFromOut = dispatch.daemonShort ?? '';
   let resolved = daemonShortFromOut
-    ? await resolveSessionByDaemonShort(daemonShortFromOut, 10000)
+    ? await resolveSessionByDaemonShort(daemonShortFromOut, 10000, host)
     : null;
   // A CLI that exited non-zero without backgrounding anything started no
   // session, so there is nothing for the cwd fallback to find.
@@ -1123,6 +1353,7 @@ async function dispatchClaudeInto(
       startedAfterMs: startedBefore,
       excludeSessionIds: claimedSessionIds,
       maxWaitMs: 10000,
+      host,
     });
   }
 
@@ -1133,7 +1364,8 @@ async function dispatchClaudeInto(
     // Nothing started. Say why on the row rather than leaving it "starting…"
     // forever — the CLI's own message is the actionable part.
     const reason = dispatch.raw.split('\n').map((l) => l.trim()).find(Boolean)
-      || (fs.existsSync(cwd) ? `claude exited with code ${dispatch.code ?? 'unknown'}` : `Directory does not exist: ${cwd}`);
+      // A remote cwd cannot be checked from here; the CLI's own message covers it.
+      || ((host ? true : fs.existsSync(cwd)) ? `claude exited with code ${dispatch.code ?? 'unknown'}` : `Directory does not exist: ${cwd}`);
     store.updateConversation(conversationId, { state: 'error', status: 'error', description: reason });
     broadcastConversations();
     throw new Error(reason);
@@ -1141,7 +1373,7 @@ async function dispatchClaudeInto(
   store.updateConversation(conversationId, { sessionId, daemonShort });
   syncWatchers();
 
-  const job = readJobState(daemonShort);
+  const job = readJobState(daemonShort, host);
   if (job) {
     store.updateConversation(conversationId, {
       state: job.state ?? 'idle',
@@ -1159,6 +1391,40 @@ async function dispatchClaudeInto(
   void refreshNow().catch(() => undefined);
   broadcastConversations();
   return { sessionId, daemonShort };
+}
+
+/**
+ * A prompt names its attachments by local absolute path, which a session on
+ * another machine cannot open. Copy each one to that machine (0600, under the
+ * conversation's own attachments dir) and point the prompt at the copies. A
+ * file that fails to copy keeps its local path: the session then reports it
+ * missing, which is clearer than a silently dropped attachment.
+ */
+async function copyAttachmentsToRemote(rh: RemoteHosts, host: string, conversationId: string, prompt: string): Promise<string> {
+  const local = localAttachmentPaths(store.getConversation(conversationId)?.attachments);
+  if (local.length === 0) return prompt;
+  const remoteDir = rh.attachmentsDir(host, conversationId);
+  if (!remoteDir) {
+    console.warn('[agentsflow][remote] no attachments dir yet — sending local paths', { host, count: local.length });
+    return prompt;
+  }
+  const map = new Map<string, string>();
+  const used = new Set<string>();
+  for (const [i, file] of local.entries()) {
+    const base = path.basename(file);
+    // Two attachments can share a basename (pasted-image folders differ by day).
+    const name = used.has(base) ? `${i}-${base}` : base;
+    used.add(name);
+    const remotePath = `${remoteDir}/${name}`;
+    try {
+      const bytes = await fs.promises.readFile(file);
+      await rh.writeFile(host, remotePath, bytes, 0o600);
+      map.set(file, remotePath);
+    } catch (err) {
+      console.warn('[agentsflow][remote] could not copy attachment', { host, file: base, error: (err as Error)?.message ?? err });
+    }
+  }
+  return rewriteAttachmentPaths(prompt, map);
 }
 
 /**
@@ -1226,6 +1492,8 @@ async function spawnConversation(opts: {
     createdAt: new Date().toISOString(),
     lastPrompt: prompt,
     delegatedByConversationId: opts.delegatedByConversationId,
+    // Set once, here: which machine this conversation runs on for its whole life.
+    ...(remoteHostKeyForDir(dir) ? { host: remoteHostKeyForDir(dir) } : {}),
     ...opts.row,
   };
   store.addConversation(optimistic, opts.afterConversationId ? { afterConversationId: opts.afterConversationId } : undefined);
@@ -1233,6 +1501,13 @@ async function spawnConversation(opts: {
   broadcastPinnedOrder();
 
   if (provider === 'codex') {
+    // The Codex app-server runs on this machine only; a remote peer has none.
+    if (dir.remote) {
+      const error = new Error('Codex is not available on remote peers yet');
+      store.updateConversation(conversationId, { state: 'error', status: 'error', description: error.message });
+      broadcastConversations();
+      throw error;
+    }
     try {
       await codex.send(conversationId, prompt, opts.attachments);
       return { conversationId, sessionId: store.getConversation(conversationId)?.sessionId || '', daemonShort: '' };
@@ -1247,6 +1522,7 @@ async function spawnConversation(opts: {
     peerAware: opts.peerAware,
     model: opts.model,
     delegated: Boolean(opts.delegatedByConversationId),
+    dir,
   });
   return { conversationId, sessionId, daemonShort };
 }
@@ -1285,6 +1561,8 @@ async function forkConversation(conversationId: string): Promise<{ conversationI
   const src = store.getConversations().find((c) => c.id === conversationId);
   if (!src) throw new Error(`conversation ${conversationId} not found`);
   if (!src.sessionId) throw new Error('source session has no sessionId yet — nothing to fork');
+  // A fork materializes from the transcript on THIS machine; v1 has no remote fork.
+  if (src.host) throw new Error('Forking is not available on remote peers yet');
 
   if (src.provider === 'codex') {
     const fork: Conversation = { ...src, id: uuid(), sessionId: '', provider: 'codex', daemonShort: '',
@@ -1376,6 +1654,7 @@ ipcMain.handle('convs:forkTo', async (_e, conversationId: string, provider: Agen
   if (provider !== 'claude' && provider !== 'codex') throw new Error('Unknown agent provider');
   const src = store.getConversation(conversationId);
   if (!src) throw new Error(`conversation ${conversationId} not found`);
+  if (src.host) throw new Error('Forking is not available on remote peers yet');
   const from: AgentProvider = src.provider === 'codex' ? 'codex' : 'claude';
   // Asking for the agent it is already on is an ordinary fork of the session.
   if (from === provider) return forkConversation(conversationId);
@@ -1442,6 +1721,9 @@ async function waitForDelegationCompletion(
   const minRunMs = 2500; // don't declare "done" on a momentary startup blip
   let lastResult = '';
   let lastSessionId = '';
+  // Consecutive polls on which the child looked finished without saying so
+  // (see the transcript fallback below).
+  let quietPolls = 0;
   while (Date.now() - start < timeoutMs) {
     await new Promise((r) => setTimeout(r, 1200));
     if (store.getConversation(conversationId)?.provider !== 'codex') {
@@ -1450,7 +1732,7 @@ async function waitForDelegationCompletion(
     const conv = store.getConversations().find((c) => c.id === conversationId);
     if (!conv) return { status: 'failure', result: lastResult, sessionId: lastSessionId, error: 'delegated conversation was removed' };
     if (conv.sessionId) lastSessionId = conv.sessionId;
-    const job = conv.provider === 'codex' ? null : readJobState(conv.daemonShort);
+    const job = conv.provider === 'codex' ? null : readJobState(conv.daemonShort, conv.host);
     const r = (conv.provider === 'codex' ? conv.lastResult || '' : job?.output?.result || '').trim();
     if (r) lastResult = r;
     const st = (conv.state || '').toLowerCase();
@@ -1464,8 +1746,59 @@ async function waitForDelegationCompletion(
         error: failed ? (result || 'peer reported an error') : undefined,
       };
     }
+
+    // Fallback. A `--bg` daemon can answer its brief and then never write a
+    // terminal state: state.json stays `working` with tempo `idle`, nothing in
+    // flight and no output, and `claude agents` agrees — seen live on
+    // 2026-10-09 with a 6 s answer that the caller waited 300 s for. When the
+    // child has looked quiet on 3 consecutive polls (≥ 3.6 s), take its answer
+    // from the transcript instead. The transcript belongs to this freshly
+    // spawned session, so any assistant text in it came after the delegate
+    // prompt — no clock comparison needed (a remote host's clock may differ).
+    if (conv.provider !== 'codex' && conv.sessionId && Date.now() - start > minRunMs && delegationLooksFinished(conv, job)) {
+      quietPolls += 1;
+      if (quietPolls >= 3) {
+        quietPolls = 0; // a miss retries after another quiet stretch, not every poll
+        let harvested: { text: string; at: string } | null = null;
+        try {
+          const jsonl = await readDelegateTranscript(conv);
+          harvested = jsonl ? lastAssistantText(jsonl) : null;
+        } catch (err) {
+          console.warn('[agentsflow][delegate] transcript fallback could not read the transcript', { conversationId, host: conv.host, error: (err as Error)?.message ?? err });
+        }
+        if (harvested) {
+          const result = lastResult || harvested.text;
+          const firstLine = result.split(/\r?\n/).map((l) => l.trim()).find(Boolean) ?? 'done';
+          console.log('[agentsflow][delegate] settled from the transcript — daemon never wrote a terminal state', { conversationId, host: conv.host, chars: result.length });
+          // Stop the row pulsing; the poller has nothing terminal to apply.
+          store.updateConversation(conversationId, { state: 'done', description: firstLine.slice(0, 200) });
+          broadcastConversations();
+          return { status: 'success', result, sessionId: lastSessionId };
+        }
+      }
+    } else {
+      quietPolls = 0;
+    }
   }
   return { status: 'failure', result: lastResult, sessionId: lastSessionId, error: `peer timed out after ${timeoutMs}ms` };
+}
+
+/**
+ * The child's transcript, for the delegation fallback. Local: wherever the
+ * session actually wrote it (findTranscript follows worktree moves). Remote:
+ * the direct path on that machine only — a miss gives up rather than scanning
+ * the remote projects dir.
+ */
+async function readDelegateTranscript(conv: Conversation): Promise<string | null> {
+  if (conv.host) {
+    const home = remoteHosts?.home(conv.host);
+    if (!remoteHosts || !home) return null;
+    const file = `${home}/.claude/projects/${mungeCwd(conv.directoryPath)}/${conv.sessionId}.jsonl`;
+    const read = await remoteHosts.readFile(conv.host, file, 4 * 1024 * 1024);
+    return read.content.toString('utf8');
+  }
+  const file = findTranscript(projectsRoot(), conv.directoryPath, conv.sessionId);
+  return file ? fs.promises.readFile(file, 'utf8') : null;
 }
 
 async function handleDelegate(req: DelegateRequest): Promise<Record<string, unknown>> {
@@ -1481,7 +1814,10 @@ async function handleDelegate(req: DelegateRequest): Promise<Record<string, unkn
   if (!dir) {
     return { status: 'failure', error: `Unknown peer "${token}". Call list_peers to see valid peers.`, known: dirs.map((d) => d.displayName) };
   }
-  if (!fs.existsSync(dir.path)) {
+  // A remote path cannot be stat-ed from here: trust the last peerinfo, and
+  // assume it exists until the host has reported otherwise.
+  const exists = dir.remote ? (dir.remoteCache?.exists ?? true) : fs.existsSync(dir.path);
+  if (!exists) {
     return { status: 'failure', directory: dir.displayName, error: `Path does not exist: ${dir.path}` };
   }
 
@@ -1543,31 +1879,49 @@ async function handleOpenFile(req: OpenFileRequest): Promise<Record<string, unkn
   if (!dir) {
     return { status: 'failure', error: `Unknown peer "${token}". Call list_peers to see valid peers.`, known: dirs.map((d) => d.displayName) };
   }
-
   const rawFile = (req.file || '').trim();
   if (!rawFile) {
     return { status: 'failure', directory: dir.displayName, error: '`file` is required.' };
   }
-  const abs = path.isAbsolute(rawFile) ? path.normalize(rawFile) : path.join(dir.path, rawFile);
+  // A remote peer's paths are paths on that host: resolve them with POSIX rules
+  // and stat them through its agent instead of the laptop's disk.
+  const remoteHost = dir.remote ? (remoteHosts?.hostKeyForDir(dir) ?? hostKeyOf(dir.remote)) : null;
+  const P = remoteHost ? path.posix : path;
+  const abs = P.isAbsolute(rawFile) ? P.normalize(rawFile) : P.join(dir.path, rawFile);
+  const inside = abs === dir.path || abs.startsWith(dir.path + P.sep);
   // A relative path must stay inside the peer's directory — no `../` escapes.
-  if (!path.isAbsolute(rawFile) && abs !== dir.path && !abs.startsWith(dir.path + path.sep)) {
+  // On a remote peer an absolute path must too: the editor reads files through
+  // files:readText, which only routes paths inside a remote peer to its host.
+  if (!inside && (!P.isAbsolute(rawFile) || remoteHost)) {
     return { status: 'failure', directory: dir.displayName, error: `Refusing to open a path outside the peer: ${rawFile}` };
   }
-  let stat: fs.Stats;
-  try {
-    stat = fs.statSync(abs);
-  } catch {
-    return { status: 'failure', directory: dir.displayName, error: `File not found: ${abs}` };
+  let isFile: boolean;
+  if (remoteHost) {
+    let st;
+    try {
+      st = await remoteFs.statPath(remoteHost, abs);
+    } catch (err) {
+      return { status: 'failure', directory: dir.displayName, error: `Could not reach ${remoteHost}: ${(err as Error)?.message ?? String(err)}` };
+    }
+    if (!st.exists) return { status: 'failure', directory: dir.displayName, error: `File not found: ${abs}` };
+    isFile = st.isFile;
+  } else {
+    try {
+      isFile = fs.statSync(abs).isFile();
+    } catch {
+      return { status: 'failure', directory: dir.displayName, error: `File not found: ${abs}` };
+    }
   }
-  if (!stat.isFile()) {
+  if (!isFile) {
     return { status: 'failure', directory: dir.displayName, error: `Not a file: ${abs}` };
   }
 
   // PDFs render better in a native viewer, so prefer handing them to the OS
   // default application. shell.openPath returns '' on success and an error
   // string when there's no associated app (or it failed to launch) — in that
-  // case we fall through to our own in-app PDF preview.
-  if (path.extname(abs).toLowerCase() === '.pdf') {
+  // case we fall through to our own in-app PDF preview. A remote PDF is not on
+  // this disk, so it always goes in-app (files:readBinary is routed).
+  if (!remoteHost && path.extname(abs).toLowerCase() === '.pdf') {
     const openErr = await shell.openPath(abs);
     if (!openErr) {
       return {
@@ -1614,6 +1968,22 @@ async function handleOpenFile(req: OpenFileRequest): Promise<Record<string, unkn
   };
 }
 
+/**
+ * `list_peers` for a session that cannot read the store file — a remote one.
+ * Same registry, same rendering as the local MCP server builds for itself.
+ */
+async function handleListPeers(_req: ListPeersRequest): Promise<Record<string, unknown>> {
+  return { status: 'success', markdown: renderRegistryMarkdown(buildRegistry(store.getDirectories())) };
+}
+
+/** `whoami`: which machine, peer, conversation and session the caller is. */
+async function handleWhoami(req: WhoamiRequest): Promise<Record<string, unknown>> {
+  const conv = store.getConversation(req.rootConversationId);
+  if (!conv) return { status: 'failure', error: 'unknown conversation' };
+  const dir = store.getDirectories().find((d) => d.id === conv.directoryId);
+  return whoamiEnvelope(conv, dir, os.hostname());
+}
+
 ipcMain.handle('convs:updateTitle', (_e, id: string, title: string) => {
   store.updateConversation(id, { title });
   broadcastConversations();
@@ -1631,7 +2001,7 @@ ipcMain.handle('convs:stop', async (_e, id: string) => {
   if (conv.provider === 'codex') await codex.stop(conv.id);
   // A chat that has not started yet has no daemon — stopping the empty id
   // would address whatever the CLI makes of an empty string.
-  else if (conv.daemonShort) await cliStop(conv.daemonShort);
+  else if (conv.daemonShort) await cliStop(conv.daemonShort, conv.host);
 });
 
 ipcMain.handle('convs:remove', async (_e, id: string) => {
@@ -1639,8 +2009,8 @@ ipcMain.handle('convs:remove', async (_e, id: string) => {
   if (!conv) return;
   if (conv.provider === 'codex') await codex.forget(conv.id);
   else if (conv.daemonShort) {
-    await cliStop(conv.daemonShort).catch(() => undefined);
-    await cliRemove(conv.daemonShort).catch(() => undefined);
+    await cliStop(conv.daemonShort, conv.host).catch(() => undefined);
+    await cliRemove(conv.daemonShort, conv.host).catch(() => undefined);
   }
   unwatchConversation(id);
   deleteAttachmentFiles(conv.attachments);
@@ -1658,15 +2028,16 @@ ipcMain.handle('dirs:removeWithHistory', async (_e, id: string): Promise<{ remov
   for (const c of targets) {
     if (c.provider === 'codex') await codex.forget(c.id);
     else if (c.daemonShort) {
-      await cliStop(c.daemonShort).catch(() => undefined);
-      await cliRemove(c.daemonShort).catch(() => undefined);
+      await cliStop(c.daemonShort, c.host).catch(() => undefined);
+      await cliRemove(c.daemonShort, c.host).catch(() => undefined);
     }
     unwatchConversation(c.id);
     deleteAttachmentFiles(c.attachments);
     store.removeConversation(c.id);
   }
   const dirs = store.getDirectories().filter((d) => d.id !== id);
-  store.setDirectories(recomputeAllDisplayNames(dirs));
+  store.setDirectories(recomputeDisplayNamesKeepingRemote(dirs));
+  remoteHosts?.syncFromDirectories();
   broadcastConversations();
   // Their nested tasks went with them.
   broadcastTodos();
@@ -1781,9 +2152,53 @@ function resumePeerAwareness(conv: Conversation): { mcpConfigPath?: string; appe
   }
 }
 
+/**
+ * resumePeerAwareness for a conversation on a remote peer: the MCP config is
+ * written on THAT machine (it points at the bundle and the forwarded bridge
+ * socket there), and the bootstrap prompt says where the session is running.
+ */
+async function remoteResumePeerAwareness(conv: Conversation & { host: string }): Promise<{ mcpConfigPath?: string; appendSystemPrompt?: string }> {
+  try {
+    const dirs = store.getDirectories();
+    const dir = dirs.find((d) => d.id === conv.directoryId);
+    return {
+      mcpConfigPath: await writeRemoteMcpConfig(conv.host, conv.id, conv.directoryPath),
+      appendSystemPrompt: buildBootstrapSystemPrompt(dirs, remoteSelfInfo(conv.host, dir, conv.directoryPath, conv.displayName)),
+    };
+  } catch (err) {
+    console.error('[agentsflow][remote] MCP bootstrap failed — resuming without peer awareness', { host: conv.host, error: (err as Error)?.message ?? err });
+    return {};
+  }
+}
+
 // The socket the detached Codex server listens on (see codex-server.ts).
 function codexSocketPath(): string {
   return codexServer.codexSocketPath(app.getPath('userData'));
+}
+
+/**
+ * Opening a remote chat or shell right after launch (or after the Mac slept)
+ * finds its host still connecting: ssh up, helper shipped, bridge forwarded.
+ * Failing at once showed "host … is not ready" for something that would have
+ * worked two seconds later, so wait for it (the pane shows "Connecting…"),
+ * nudge a host that gave up into retrying now, and only then report a real
+ * failure with the host's own error.
+ */
+const REMOTE_ATTACH_WAIT_MS = 60_000;
+async function waitForRemoteHost(host: string): Promise<void> {
+  if (!remoteHosts) throw new Error('remote peers are not available in this build');
+  const started = Date.now();
+  let nudged = false;
+  for (;;) {
+    const st = remoteHosts.status(host);
+    if (st?.state === 'ready') return;
+    if (st?.state === 'unreachable' && !nudged) { nudged = true; void remoteHosts.reconnect(host).catch(() => undefined); }
+    if (Date.now() - started > REMOTE_ATTACH_WAIT_MS) {
+      const name = host.replace(/^[^@]*@/, '').split('.')[0];
+      throw new Error(`Could not connect to ${name} within ${REMOTE_ATTACH_WAIT_MS / 1000} s${st?.error ? `: ${st.error}` : ` (state: ${st?.state ?? 'unknown'})`}`);
+    }
+    await new Promise((r) => setTimeout(r, 400));
+  }
 }
 
 ipcMain.handle('term:attach', async (_e, conversationId: string, cols: number, rows: number) => {
@@ -1799,6 +2214,7 @@ ipcMain.handle('term:attach', async (_e, conversationId: string, cols: number, r
     console.error('[agentsflow] term:attach: no sessionId yet', conv);
     throw new Error('session not ready (sessionId is empty)');
   }
+  if (conv.host) await waitForRemoteHost(conv.host);
   const win = mainWindow ?? BrowserWindow.fromWebContents(_e.sender);
   if (!win) throw new Error('no window');
   const channelId = uuid();
@@ -1822,7 +2238,9 @@ ipcMain.handle('term:attach', async (_e, conversationId: string, cols: number, r
   // The chat was parked into a background job (← / Ctrl+B in the pane): its
   // later turns live under a new session id. Point the conversation there, or
   // Reopen would show it frozen at "Backgrounding…".
-  if (!pty.hasResumeSession(conv.sessionId) && !conv.forkFromSessionId) {
+  // Remote: the transcripts live on the other machine, so there is nothing
+  // here to follow.
+  if (!conv.host && !pty.hasResumeSession(conv.sessionId) && !conv.forkFromSessionId) {
     const latest = latestContinuation(projectsRoot(), conv.directoryPath, conv.sessionId);
     if (latest !== conv.sessionId) {
       console.log('[agentsflow] following continued-in to the parked session', { from: conv.sessionId, to: latest, conversationId: conv.id });
@@ -1839,7 +2257,31 @@ ipcMain.handle('term:attach', async (_e, conversationId: string, cols: number, r
   // viewer of our own child instead of the PTY we already hold.
   if (pty.hasResumeSession(conv.sessionId)) {
     console.log('[agentsflow] re-attaching live in-app resume pty', { sessionId: conv.sessionId, channelId });
-    const replay = await pty.attach({ channelId, sessionId: conv.sessionId, cols, rows, win, mode: 'resume', cwd: conv.directoryPath });
+    const replay = await pty.attach({
+      channelId, sessionId: conv.sessionId, cols, rows, win, mode: 'resume', cwd: conv.directoryPath,
+      ...(conv.host ? { host: conv.host, remoteCwd: conv.directoryPath } : {}),
+    });
+    return { channelId, replay };
+  }
+
+  // Remote peer: the same attach-vs-resume rule as below, asked of that
+  // machine's `claude agents`, and both PTYs run there over `ssh -tt`. No
+  // pending-fork branch — forking is refused for remote conversations.
+  if (conv.host) {
+    const host = conv.host;
+    const live = await hasLiveDaemon(attachId, host);
+    let replay = '';
+    if (live) {
+      console.log('[agentsflow][remote] spawning pty for claude attach', { host, attachId, sessionId: conv.sessionId, channelId });
+      replay = await pty.attach({ channelId, sessionId: attachId, cols, rows, win, mode: 'attach', host });
+    } else {
+      console.log('[agentsflow][remote] using --resume', { host, sessionId: conv.sessionId, cwd: conv.directoryPath, channelId });
+      replay = await pty.attach({
+        channelId, sessionId: conv.sessionId, cols, rows, win,
+        mode: 'resume', cwd: conv.directoryPath, host, remoteCwd: conv.directoryPath,
+        ...(await remoteResumePeerAwareness({ ...conv, host })),
+      });
+    }
     return { channelId, replay };
   }
 
@@ -1908,11 +2350,14 @@ ipcMain.handle('term:attachShell', async (_e, shellId: string, cwd: string, cols
   console.log('[agentsflow] term:attachShell received', { shellId, cwd, cols, rows });
   if (!shellId || typeof shellId !== 'string') throw new Error('shellId required');
   if (!cwd || typeof cwd !== 'string') throw new Error('cwd required');
-  if (!fs.existsSync(cwd)) throw new Error(`cwd does not exist: ${cwd}`);
+  // A path inside a remote peer opens the shell on that machine instead.
+  const host = remoteHosts?.hostKeyForPath(cwd) ?? undefined;
+  if (!host && !fs.existsSync(cwd)) throw new Error(`cwd does not exist: ${cwd}`);
+  if (host) await waitForRemoteHost(host);
   const win = mainWindow ?? BrowserWindow.fromWebContents(_e.sender);
   if (!win) throw new Error('no window');
   const channelId = uuid();
-  const replay = await pty.attachShell({ shellId, channelId, cwd, cols, rows, win });
+  const replay = await pty.attachShell({ shellId, channelId, cwd, cols, rows, win, host });
   return { channelId, replay };
 });
 
@@ -1923,6 +2368,36 @@ ipcMain.handle('term:killShell', (_e, shellId: string) => {
 
 ipcMain.handle('term:write', (_e, channelId: string, data: string) => {
   pty.write(channelId, data);
+});
+
+// Paste into a remote chat (see AgentsFlowApi.pasteIntoRemoteChat). Everything
+// goes in as a bracketed paste, which is how Claude Code tells a paste from
+// typing — and a pasted path to an image file is what it turns into an image
+// attachment. Uploaded images live in the session's attachments dir on the host.
+ipcMain.handle('term:pasteRemote', async (_e, conversationId: string, channelId: string, key: 'cmd' | 'ctrl') => {
+  const conv = store.getConversation(conversationId);
+  const host = conv?.host;
+  const paste = (text: string) => pty.write(channelId, `\x1b[200~${text}\x1b[201~`);
+  const img = clipboard.readImage();
+  if (host && remoteHosts && !img.isEmpty()) {
+    const dir = remoteHosts.attachmentsDir(host, conversationId);
+    if (!dir) return { kind: 'none' as const, error: `host ${host} is not ready` };
+    const remotePath = `${dir}/pasted-${Date.now()}.png`;
+    try {
+      await remoteHosts.writeFile(host, remotePath, img.toPNG(), 0o600);
+    } catch (err) {
+      const error = (err as Error)?.message ?? String(err);
+      console.error('[agentsflow][remote] image paste upload failed', { host, error });
+      return { kind: 'none' as const, error };
+    }
+    paste(remotePath);
+    console.log('[agentsflow][remote] pasted image', { host, remotePath });
+    return { kind: 'image' as const, path: remotePath };
+  }
+  if (key === 'ctrl') { pty.write(channelId, '\x16'); return { kind: 'none' as const }; }
+  const text = clipboard.readText();
+  if (text) { paste(text); return { kind: 'text' as const }; }
+  return { kind: 'none' as const };
 });
 
 ipcMain.handle('term:resize', (_e, channelId: string, cols: number, rows: number) => {
@@ -2025,7 +2500,20 @@ function readClaudeScope(claudeDir: string, scope: 'project' | 'user'): SlashCom
   return out;
 }
 
-ipcMain.handle('skills:list', async (_e, dirPath: string | null): Promise<SlashCommand[]> => {
+ipcMain.handle('skills:list', async (_e, dirPath: string | null, directoryId?: string): Promise<SlashCommand[]> => {
+  // A remote peer's commands are the ones on ITS machine (user + project
+  // scope there), listed by the agent script. Resolved by id first, since a
+  // remote peer may share its path with a local checkout.
+  const dir = resolveSkillsDir(store.getDirectories(), dirPath, directoryId);
+  if (dir?.remote) {
+    if (!remoteHosts) return [];
+    try {
+      return await remoteHosts.skills(hostKeyOf(dir.remote), dirPath ?? dir.path);
+    } catch (err) {
+      console.warn('[agentsflow][remote] skills unavailable', { hostKey: hostKeyOf(dir.remote), error: (err as Error)?.message ?? err });
+      return [];
+    }
+  }
   const byName = new Map<string, SlashCommand>();
   // User scope first so project entries overwrite (shadow) same-named ones.
   const userClaude = path.join(app.getPath('home'), '.claude');
@@ -2037,18 +2525,40 @@ ipcMain.handle('skills:list', async (_e, dirPath: string | null): Promise<SlashC
   return Array.from(byName.values()).sort((a, b) => a.name.localeCompare(b.name));
 });
 
-ipcMain.handle('git:status', async (_e, dirPath: string) => gitStatus(dirPath));
-ipcMain.handle('git:worktrees', async (_e, dirPath: string, refBranch?: string) => listWorktrees(dirPath, refBranch));
+// Every files:* / git:* handler below routes a path that belongs to a remote
+// peer to remote-fs (same return shapes), so the renderer never needs to know
+// which machine a file lives on.
+ipcMain.handle('git:status', async (_e, dirPath: string) => {
+  const r = remoteFs.resolveRemotePath(dirPath);
+  if (r) return remoteFs.gitStatus(r.hostKey, dirPath);
+  return gitStatus(dirPath);
+});
+// The worktree panel is not offered for remote repos in v1.
+ipcMain.handle('git:worktrees', async (_e, dirPath: string, refBranch?: string) => {
+  if (remoteFs.resolveRemotePath(dirPath)) return [];
+  return listWorktrees(dirPath, refBranch);
+});
 onWorktreesUpdated((dirPath, refBranch, rows) => {
   if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.webContents.isDestroyed()) {
     mainWindow.webContents.send('git:worktreesUpdated', dirPath, refBranch, rows);
   }
 });
-ipcMain.handle('git:branches', async (_e, dirPath: string) => listBranches(dirPath));
-ipcMain.handle('git:removeWorktree', async (_e, repoDir: string, worktreePath: string, force?: boolean) =>
-  removeWorktree(repoDir, worktreePath, force));
-ipcMain.handle('files:list', async (_e, dirPath: string) => listFiles(dirPath));
+ipcMain.handle('git:branches', async (_e, dirPath: string) => {
+  if (remoteFs.resolveRemotePath(dirPath)) return { local: [], remote: [] };
+  return listBranches(dirPath);
+});
+ipcMain.handle('git:removeWorktree', async (_e, repoDir: string, worktreePath: string, force?: boolean) => {
+  if (remoteFs.resolveRemotePath(repoDir)) return { ok: false as const, error: 'not available for remote peers' };
+  return removeWorktree(repoDir, worktreePath, force);
+});
+ipcMain.handle('files:list', async (_e, dirPath: string) => {
+  const r = remoteFs.resolveRemotePath(dirPath);
+  if (r) return remoteFs.listFiles(r.hostKey, dirPath);
+  return listFiles(dirPath);
+});
 ipcMain.handle('files:search', async (_e, dirPath: string, query: string, opts) => {
+  const r = remoteFs.resolveRemotePath(dirPath);
+  if (r) return remoteFs.search(r.hostKey, dirPath, query, opts);
   try {
     return await searchInFiles(dirPath, query, opts);
   } catch (err) {
@@ -2113,16 +2623,22 @@ ipcMain.handle('notes:list', async (_e, root: string): Promise<FileEntry[]> => {
 ipcMain.handle('files:watch', async (e, dirPath: string) => {
   const win = BrowserWindow.fromWebContents(e.sender) ?? mainWindow;
   if (!win) return;
+  const r = remoteFs.resolveRemotePath(dirPath);
+  if (r) return remoteFs.watch(r.hostKey, dirPath, win);
   await fileWatcher.watch(dirPath, win);
 });
 
 ipcMain.handle('files:unwatch', async (e, dirPath: string) => {
   const win = BrowserWindow.fromWebContents(e.sender) ?? mainWindow;
   if (!win) return;
+  const r = remoteFs.resolveRemotePath(dirPath);
+  if (r) return remoteFs.unwatch(r.hostKey, dirPath, win);
   await fileWatcher.unwatch(dirPath, win);
 });
 
 ipcMain.handle('files:readText', async (_e, filePath: string) => {
+  const r = remoteFs.resolveRemotePath(filePath);
+  if (r) return remoteFs.readText(r.hostKey, filePath);
   const fsMod = require('fs') as typeof import('fs');
   try {
     const stat = fsMod.statSync(filePath);
@@ -2144,6 +2660,8 @@ ipcMain.handle('files:readText', async (_e, filePath: string) => {
 });
 
 ipcMain.handle('files:writeText', async (_e, filePath: string, content: string) => {
+  const r = remoteFs.resolveRemotePath(filePath);
+  if (r) return remoteFs.writeText(r.hostKey, filePath, content);
   const fsMod = require('fs') as typeof import('fs');
   // Write to a temp sibling and rename into place — writeFileSync truncates
   // before writing, so a crash mid-write would leave the file empty.
@@ -2159,6 +2677,8 @@ ipcMain.handle('files:writeText', async (_e, filePath: string, content: string) 
 });
 
 ipcMain.handle('files:readBinary', async (_e, filePath: string) => {
+  const r = remoteFs.resolveRemotePath(filePath);
+  if (r) return remoteFs.readBinary(r.hostKey, filePath);
   const fsMod = require('fs') as typeof import('fs');
   const pathMod = require('path') as typeof import('path');
   const MIME: Record<string, string> = {
@@ -2189,6 +2709,8 @@ ipcMain.handle('files:readBinary', async (_e, filePath: string) => {
 });
 
 ipcMain.handle('files:create', async (_e, filePath: string) => {
+  const r = remoteFs.resolveRemotePath(filePath);
+  if (r) return remoteFs.createFile(r.hostKey, filePath);
   const fsMod = require('fs') as typeof import('fs');
   const pathMod = require('path') as typeof import('path');
   if (!pathMod.isAbsolute(filePath)) {
@@ -2201,6 +2723,14 @@ ipcMain.handle('files:create', async (_e, filePath: string) => {
 });
 
 ipcMain.handle('files:rename', async (_e, oldPath: string, newPath: string) => {
+  // Routed by the source path; a rename never crosses machines.
+  const r = remoteFs.resolveRemotePath(oldPath);
+  if (r) {
+    if (remoteFs.resolveRemotePath(newPath)?.hostKey !== r.hostKey) {
+      throw new Error('rename: cannot move a file between machines');
+    }
+    return remoteFs.renamePath(r.hostKey, oldPath, newPath);
+  }
   const fsMod = require('fs') as typeof import('fs');
   const pathMod = require('path') as typeof import('path');
   if (!pathMod.isAbsolute(oldPath) || !pathMod.isAbsolute(newPath)) {
@@ -2215,6 +2745,8 @@ ipcMain.handle('files:rename', async (_e, oldPath: string, newPath: string) => {
 });
 
 ipcMain.handle('files:remove', async (_e, targetPath: string) => {
+  const r = remoteFs.resolveRemotePath(targetPath);
+  if (r) return remoteFs.removePath(r.hostKey, targetPath);
   const fsMod = require('fs') as typeof import('fs');
   const pathMod = require('path') as typeof import('path');
   if (!pathMod.isAbsolute(targetPath)) {
@@ -2236,6 +2768,7 @@ ipcMain.handle('files:remove', async (_e, targetPath: string) => {
 });
 
 ipcMain.handle('files:revealInFinder', async (_e, targetPath: string): Promise<{ ok: true } | { ok: false; error: string }> => {
+  if (remoteFs.resolveRemotePath(targetPath)) return { ok: false, error: 'not available for remote peers' };
   const fsMod = require('fs') as typeof import('fs');
   const pathMod = require('path') as typeof import('path');
   if (!pathMod.isAbsolute(targetPath)) return { ok: false, error: 'path must be absolute' };
@@ -2256,6 +2789,9 @@ ipcMain.handle(
   'files:probePath',
   async (_e, baseDir: string | null, token: string): Promise<{ exists: boolean; absPath: string } | null> => {
     if (typeof token !== 'string' || !token || token.length > 4096) return null;
+    // A terminal rooted in a remote peer resolves its tokens on that host.
+    const r = baseDir ? remoteFs.resolveRemotePath(baseDir) : null;
+    if (r) return remoteFs.probePath(r.hostKey, baseDir, token);
     let candidate = token;
     if (candidate === '~' || candidate.startsWith('~/')) {
       candidate = path.join(app.getPath('home'), candidate.slice(1));
@@ -2280,6 +2816,8 @@ ipcMain.handle(
 );
 
 ipcMain.handle('files:startDrag', async (e, filePath: string): Promise<void> => {
+  // Dragging needs a file on this disk; remote files are not draggable in v1.
+  if (remoteFs.resolveRemotePath(filePath)) return;
   if (!path.isAbsolute(filePath)) return;
   if (!fs.existsSync(filePath)) return;
   // Prefer the OS-rendered file icon (Finder-style). Fall back to a 1x1
@@ -2338,6 +2876,9 @@ ipcMain.handle('images:saveFromPaste', async (_e, dataBase64: string, mimeType: 
 ipcMain.handle('images:saveToDir', async (_e, targetDir: string, dataBase64: string, mimeType: string): Promise<{ savedPath: string }> => {
   const fsMod = require('fs') as typeof import('fs');
   const pathMod = require('path') as typeof import('path');
+  if (remoteFs.resolveRemotePath(targetDir)) {
+    throw new Error('pasting images into remote files is not available yet');
+  }
   if (!pathMod.isAbsolute(targetDir)) {
     throw new Error('saveToDir: targetDir must be absolute');
   }

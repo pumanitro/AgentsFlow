@@ -8,12 +8,14 @@
  * identity (so a delegation can be nested under the session that asked for it)
  * and the path of the delegation bridge socket the server calls back on. The
  * registry the peer sees is fresh two ways — the system-prompt snapshot is
- * rebuilt at every spawn, and the `list_peers` tool reads store.json live.
+ * rebuilt at every spawn, and the `list_peers` tool reads store.json live
+ * (or, for a session on a remote peer's machine, asks the bridge).
  */
 import * as fs from 'fs';
 import * as path from 'path';
 import { app } from 'electron';
-import { buildRegistry, renderBootstrapPrompt, SERVER_ID, TOOL_DEFS } from './registry';
+import { buildRegistry, renderBootstrapPrompt, SERVER_ID, TOOL_DEFS, type SelfInfo } from './registry';
+import { getRemoteHosts } from './remote/remote-hosts';
 import type { McpServerInfo, TrackedDirectory } from '../shared/types';
 
 const SERVER_NAME = SERVER_ID;
@@ -75,8 +77,55 @@ export function writeMcpConfigForConversation(conversationId: string, rootDir: s
 }
 
 /** The registry block appended to every spawned session's system prompt. */
-export function buildBootstrapSystemPrompt(dirs: TrackedDirectory[]): string {
-  return renderBootstrapPrompt(buildRegistry(dirs));
+export function buildBootstrapSystemPrompt(dirs: TrackedDirectory[], self?: SelfInfo): string {
+  return renderBootstrapPrompt(buildRegistry(dirs), self);
+}
+
+/**
+ * The remote twin of writeMcpConfigForConversation: writes the config onto the
+ * remote peer's machine (its MCP server reaches us through the forwarded
+ * bridge socket) and returns the REMOTE path to pass as `--mcp-config`.
+ *
+ * Differences from the local config, each deliberate:
+ *  - `command` is the host's own `node`: Electron-as-Node does not exist there.
+ *  - The script is the copy RemoteHosts shipped into the host's bundle dir.
+ *  - NO `PEERSFLOW_STORE_PATH`: the laptop's store.json is not on that
+ *    machine, and its absence is what makes the server ask the bridge for
+ *    `list_peers` instead of reporting an empty registry.
+ *  - `PEERSFLOW_BRIDGE_SOCK` is the reverse-forwarded socket on the host, which
+ *    ssh connects back to this process's bridge.
+ *  - `PEERSFLOW_REMOTE=1` so the headless `whoami` fallback can say so.
+ * Every path comes from the host's `hello` (its $HOME), never from this
+ * machine's, so a missing piece means "not connected yet" and we refuse
+ * rather than write a config that points at laptop paths.
+ */
+export async function writeRemoteMcpConfig(hostKey: string, conversationId: string, rootDir: string): Promise<string> {
+  const r = getRemoteHosts();
+  const spec = r?.specFor(hostKey);
+  const bundle = r?.bundlePath(hostKey);
+  const sock = r?.remoteBridgeSock(hostKey);
+  const dir = r?.mcpConfigDir(hostKey);
+  const home = r?.home(hostKey);
+  if (!r || !spec || !bundle || !sock || !dir || !home) throw new Error(`remote host ${hostKey} is not ready`);
+  const cfg = {
+    mcpServers: {
+      [SERVER_NAME]: {
+        command: spec.nodeBin,
+        args: [`${bundle}/electron/mcp/agentsflow-mcp-server.js`],
+        env: {
+          PEERSFLOW_BRIDGE_SOCK: sock,
+          PEERSFLOW_DELEGATIONS_DIR: `${home}/.peersflow/delegations`,
+          PEERSFLOW_ROOT_CONVERSATION_ID: conversationId,
+          PEERSFLOW_ROOT_DIR: rootDir,
+          PEERSFLOW_REMOTE: '1',
+          CLAUDE_BIN: spec.claudeBin,
+        },
+      },
+    },
+  };
+  const remotePath = `${dir}/${conversationId}.json`;
+  await r.writeFile(hostKey, remotePath, JSON.stringify(cfg, null, 2), 0o600);
+  return remotePath;
 }
 
 /** Descriptor for the in-app MCP help/preview modal. */

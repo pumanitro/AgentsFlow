@@ -2,12 +2,15 @@ import { BrowserWindow } from 'electron';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { listAgentsResult, readJobState, readSessionCwdFromTranscript, stopAgent, type ClaudeAgentJsonRow } from './claude-cli';
+import { jobStateMtimeMs, listAgentsResult, readJobState, readSessionCwdFromTranscript, stopAgent, type ClaudeAgentJsonRow, type JobState, type ListAgentsResult } from './claude-cli';
 import { hasLiveViewer } from './pty-manager';
 import { linkedWorktreeRoot } from './git';
 import { store } from './store';
 import { Conversation } from '../shared/types';
-import { effectiveState, deriveDescription, reconcileLiveState, deriveLiveDescription, findLiveRow } from './derive-state';
+import type { JobStateJson } from '../shared/remote';
+import { effectiveState, deriveDescription, reconcileLiveState, deriveLiveDescription } from './derive-state';
+import { getRemoteHosts } from './remote/remote-hosts';
+import { buildHostRowIndexes, droppedWatchHosts, hostOf, LOCAL_HOST, lookupRow, parseReapKey, planRemoteWatch, reapKey, remoteHostsOf, type HostRows } from './poller-remote';
 import * as perf from './perf';
 import { nextReapDelayMs } from './reap-backoff';
 
@@ -52,7 +55,7 @@ function markTerminalIfMissing(c: Conversation): Conversation | null {
   if (TERMINAL_STATES.has((c.state || '').toLowerCase())) return null;
   // Prefer a terminal state recorded by the daemon's own state.json if the
   // daemon happened to write one before dying.
-  const job = readJobState(c.daemonShort);
+  const job = readJobState(c.daemonShort, c.host);
   const recorded = (job?.state || '').toLowerCase();
   const nextState = TERMINAL_STATES.has(recorded) ? recorded : 'done';
   return { ...c, state: nextState };
@@ -100,25 +103,39 @@ let reapInFlight = false;
 // A daemon that survives `claude stop` is retried on a backoff, not every tick:
 // one that shrugged off the first stop will shrug off the next thirty, and each
 // attempt is a `claude` launch against the shared login (see reap-backoff.ts).
+// Keyed by reapKey(host, short): a bare short for this machine, host-qualified
+// for a remote peer (two machines can mint the same short).
 const reapAttempts = new Map<string, { attempts: number; notBefore: number }>();
 
-async function reapStaleDaemons(convs: Conversation[], liveRows: ClaudeAgentJsonRow[]): Promise<void> {
-  if (reapInFlight || liveRows.length === 0) return;
+// `rowsByHost` holds only hosts whose listing succeeded this tick. A remote
+// conversation is reaped strictly against its own host's rows: a host we could
+// not list is unknown, and a daemon on it is never stopped on a guess.
+async function reapStaleDaemons(convs: Conversation[], rowsByHost: Map<string, ClaudeAgentJsonRow[]>): Promise<void> {
+  if (reapInFlight) return;
+  if (!Array.from(rowsByHost.values()).some((rows) => rows.length > 0)) return;
   reapInFlight = true;
   try {
     const now = Date.now();
     // A daemon that is gone has been reaped (or died) — its backoff goes with it.
-    for (const short of Array.from(reapAttempts.keys())) {
-      if (!liveRows.some((r) => r.sessionId.startsWith(short))) reapAttempts.delete(short);
+    // Only judged against a host listed this tick with at least one row (the
+    // same "empty listing proves nothing" rule the old single-host guard had).
+    for (const key of Array.from(reapAttempts.keys())) {
+      const { host, short } = parseReapKey(key);
+      const hostRows = rowsByHost.get(host);
+      if (!hostRows || hostRows.length === 0) continue;
+      if (!hostRows.some((r) => r.sessionId.startsWith(short))) reapAttempts.delete(key);
     }
     let reaped = 0;
     for (const c of convs) {
       if (reaped >= MAX_REAPS_PER_TICK) break;
       if (!c.daemonShort || c.pinned) continue;
+      const liveRows = rowsByHost.get(hostOf(c));
+      if (!liveRows || liveRows.length === 0) continue;
       // Only a daemon that's actually still running is worth (and possible) to reap.
       const row = liveRows.find((r) => r.sessionId.startsWith(c.daemonShort));
       if (!row) continue;
-      const pending = reapAttempts.get(c.daemonShort);
+      const key = reapKey(hostOf(c), c.daemonShort);
+      const pending = reapAttempts.get(key);
       if (pending && now < pending.notBefore) continue;
       if (hasLiveViewer(c.sessionId || row.sessionId)) continue;
       // Never interrupt an in-progress turn or a session still booting.
@@ -133,18 +150,18 @@ async function reapStaleDaemons(convs: Conversation[], liveRows: ClaudeAgentJson
       // state.json mtime is when the daemon last did anything; fall back to the
       // process start time if the file is missing. A daemon that just blocked /
       // went idle has a fresh mtime and is kept until the grace elapses.
-      let quietAt = 0;
-      try { quietAt = fs.statSync(jobStatePath(c.daemonShort)).mtimeMs; } catch { /* no file */ }
+      // (Remote: the mtime the host's agent script reported with the job state.)
+      let quietAt = jobStateMtimeMs(c.daemonShort, c.host);
       if (!quietAt && row.startedAt) quietAt = row.startedAt;
       if (quietAt && now - quietAt < grace) continue;
       reaped++;
       const attempt = (pending?.attempts ?? 0) + 1;
-      reapAttempts.set(c.daemonShort, { attempts: attempt, notBefore: now + nextReapDelayMs(attempt) });
+      reapAttempts.set(key, { attempts: attempt, notBefore: now + nextReapDelayMs(attempt) });
       console.log('[agentsflow][reaper] stopping lingering daemon', {
         short: c.daemonShort, reason: terminal ? 'terminal' : 'abandoned', state, status, title: c.title,
-        attempt, retryInMs: nextReapDelayMs(attempt),
+        attempt, retryInMs: nextReapDelayMs(attempt), ...(c.host ? { host: c.host } : {}),
       });
-      try { await stopAgent(c.daemonShort); } catch { /* best-effort; retried on the backoff */ }
+      try { await stopAgent(c.daemonShort, c.host); } catch { /* best-effort; retried on the backoff */ }
     }
   } finally {
     reapInFlight = false;
@@ -202,7 +219,17 @@ function applyJobToConversation(
   c: Conversation,
   liveRow?: ClaudeAgentJsonRow,
 ): { next: Conversation; changed: boolean } {
-  const job = readJobState(c.daemonShort);
+  // Remote: a synchronous read of the host's cached state.json (no I/O).
+  return applyJob(c, readJobState(c.daemonShort, c.host), liveRow);
+}
+
+// The job-in-hand half of applyJobToConversation, shared with the remote push
+// path, which already HAS the state and must not go looking for a file.
+function applyJob(
+  c: Conversation,
+  job: JobState | null,
+  liveRow?: ClaudeAgentJsonRow,
+): { next: Conversation; changed: boolean } {
   if (!job && !liveRow) return { next: c, changed: false };
 
   let changed = false;
@@ -222,7 +249,14 @@ function refreshOneFromFile(conversationId: string): void {
   // the app (see the conversation index in store.ts).
   const conv = store.getConversation(conversationId);
   if (!conv) return;
-  let { next, changed } = applyJobToConversation(conv);
+  const saved = refreshOneFromJob(conv, readJobState(conv.daemonShort, conv.host));
+  if (saved) schedulePush(saved);
+}
+
+// Apply one state.json snapshot to one conversation and persist it. Returns the
+// saved row when anything changed (the caller pushes), null otherwise.
+function refreshOneFromJob(conv: Conversation, job: JobState | null): Conversation | null {
+  let { next, changed } = applyJob(conv, job);
   // state.json just settled this conversation into a terminal state, but the live
   // `status` (last written by the poll) may still read "busy"/"waiting" — and the
   // dot checks `status` BEFORE `state`, so a stale "busy" would keep a finished
@@ -233,10 +267,9 @@ function refreshOneFromFile(conversationId: string): void {
     next = { ...next, status: '' };
     changed = true;
   }
-  if (changed) {
-    const saved = store.updateConversation(conversationId, next);
-    schedulePush(saved ?? next);
-  }
+  if (!changed) return null;
+  const saved = store.updateConversation(conv.id, next);
+  return saved ?? next;
 }
 
 // ---------- Which conversations are worth watching ----------
@@ -275,6 +308,9 @@ const WATCH_RETRY_MS = 60_000;
 export function watchConversation(c: Conversation): void {
   if (c.provider === 'codex') return;
   if (!c.daemonShort) return;
+  // A remote job's state.json lives on its host; that host's agent script
+  // watches it (see syncRemoteWatches) and pushes into applyRemoteJobState.
+  if (c.host) return;
   if (watchers.has(c.id)) return;
   const failedAt = watchFailedAt.get(c.id);
   if (failedAt && Date.now() - failedAt < WATCH_RETRY_MS) return;
@@ -335,6 +371,46 @@ export function syncWatchers(): void {
   for (const id of Array.from(watchFailedAt.keys())) {
     if (!wanted.has(id)) watchFailedAt.delete(id);
   }
+  syncRemoteWatches(convs);
+}
+
+// ---------- Remote peers ----------
+// Hosts that were handed a non-empty watch set last time, so a host whose
+// conversations all settled (or were deleted) gets an explicit empty set
+// rather than pushing forever (see droppedWatchHosts).
+let remoteWatchedHosts = new Set<string>();
+
+function syncRemoteWatches(convs: Conversation[]): void {
+  const rh = getRemoteHosts();
+  if (!rh) return;
+  const plan = planRemoteWatch(convs, shouldWatch);
+  // setWatched is idempotent on the RemoteHosts side, so re-sending an
+  // unchanged plan every tick costs nothing on the wire.
+  for (const [host, shorts] of plan) rh.setWatched(host, shorts);
+  for (const host of droppedWatchHosts(remoteWatchedHosts, plan)) rh.setWatched(host, []);
+  remoteWatchedHosts = new Set(plan.keys());
+}
+
+// The remote twin of refreshOneFromFile: a host's agent script pushes job
+// state.json changes, and every conversation with (host, daemonShort) takes
+// the same state/description/status update a local fs.watch would give it.
+// It reads nothing — the pushed state IS the file. (`mtimeMs` is already in
+// the RemoteHosts cache, where the reaper reads it via jobStateMtimeMs.)
+export function applyRemoteJobState(hostKey: string, short: string, state: JobStateJson | null, _mtimeMs: number): void {
+  if (!hostKey || !short) return;
+  const saved: Conversation[] = [];
+  for (const c of store.getConversations()) {
+    if (c.provider === 'codex' || c.host !== hostKey || c.daemonShort !== short) continue;
+    const s = refreshOneFromJob(c, state);
+    if (s) saved.push(s);
+  }
+  if (saved.length > 0) schedulePush(saved);
+}
+
+// hostKey → daemonShorts that should be watched; remote conversations are
+// watched by the host's agent script, never by a local fs.watch.
+export function remoteWatchPlan(): Map<string, string[]> {
+  return planRemoteWatch(store.getConversations(), shouldWatch);
 }
 
 /** Live watcher count, for the health heartbeat. */
@@ -342,38 +418,8 @@ export function watcherStats(): Record<string, number> {
   return { convWatchers: watchers.size };
 }
 
-// Index the live `claude agents --json` rows once per tick so the per-conversation
-// lookup is O(1) instead of an O(rows) scan for each of the (potentially hundreds
-// of) conversations. Matching precedence mirrors findLiveRow: name → daemonShort
-// (an 8-char sessionId prefix) → full sessionId.
-interface RowIndex {
-  byName: Map<string, ClaudeAgentJsonRow>;
-  byId: Map<string, ClaudeAgentJsonRow>;
-  byShort: Map<string, ClaudeAgentJsonRow>;
-}
-function buildRowIndex(rows: ClaudeAgentJsonRow[]): RowIndex {
-  const byName = new Map<string, ClaudeAgentJsonRow>();
-  const byId = new Map<string, ClaudeAgentJsonRow>();
-  const byShort = new Map<string, ClaudeAgentJsonRow>();
-  for (const r of rows) {
-    if (r.name) byName.set(r.name, r);
-    if (r.sessionId) {
-      byId.set(r.sessionId, r);
-      const short = r.sessionId.slice(0, 8);
-      if (!byShort.has(short)) byShort.set(short, r);
-    }
-  }
-  return { byName, byId, byShort };
-}
-function lookupRow(index: RowIndex, rows: ClaudeAgentJsonRow[], c: Conversation): ClaudeAgentJsonRow | undefined {
-  if (c.sessionName) { const r = index.byName.get(c.sessionName); if (r) return r; }
-  if (c.daemonShort) {
-    if (c.daemonShort.length === 8) { const r = index.byShort.get(c.daemonShort); if (r) return r; }
-    else { const r = findLiveRow(c, rows); if (r) return r; } // rare: non-8-char short
-  }
-  if (c.sessionId) { const r = index.byId.get(c.sessionId); if (r) return r; }
-  return undefined;
-}
+// Row indexing (buildRowIndex / lookupRow) lives in poller-remote.ts, built
+// once per host per tick.
 
 // ---------- Worktree attribution ----------
 // Normalize a session cwd into a `worktreePath`. Note this is NOT "cwd differs
@@ -384,6 +430,10 @@ function lookupRow(index: RowIndex, rows: ClaudeAgentJsonRow[], c: Conversation)
 // peer's repo; anything else leaves the chat on the peer's own tree.
 function worktreeOf(c: Conversation, cwd: string | undefined): string | undefined {
   if (!cwd) return undefined;
+  // A remote session's cwd is a path on another machine; resolving it against
+  // this machine's git (and realpath) would be meaningless or, worse, match a
+  // same-named local repo.
+  if (c.host) return undefined;
   const wt = linkedWorktreeRoot(cwd);
   if (!wt) return undefined;
   // realpath both sides: the peer may be tracked through a symlink while git
@@ -415,18 +465,33 @@ async function fallbackTickImpl(): Promise<void> {
   // Nothing on the Claude side means nothing for `claude agents --json` to say.
   if (!store.getConversations().some((c) => c.provider !== 'codex')) return;
 
+  // One listing per host: this machine always, plus every remote host that owns
+  // a (non-codex) conversation. Remote listings are normally served from the
+  // RemoteHosts cache, so they run alongside the local CLI call at no real cost.
+  const remoteHosts = remoteHostsOf(store.getConversations());
   const listStart = Date.now();
-  const result = await perf.timed('poll:listAgents', () => listAgentsResult());
-  noteListAgentsDuration(Date.now() - listStart);
+  const [result, ...remoteResults] = await Promise.all([
+    perf.timed('poll:listAgents', () => listAgentsResult()).then((r) => {
+      // The adaptive cadence tracks the LOCAL CLI's cost only.
+      noteListAgentsDuration(Date.now() - listStart);
+      return r;
+    }),
+    ...remoteHosts.map((h) => listAgentsResult(h)),
+  ]);
+  const results = new Map<string, ListAgentsResult>([[LOCAL_HOST, result]]);
+  remoteHosts.forEach((h, i) => results.set(h, remoteResults[i]));
+  const hostRows: Map<string, HostRows> = buildHostRowIndexes(results);
   // On transient CLI failure: don't touch state, don't advance miss counters.
   // The next tick will re-attempt; meanwhile the UI keeps the last good state
-  // rather than oscillating to "done" on every flaky list call.
-  if (!result.ok) {
+  // rather than oscillating to "done" on every flaky list call. Per host: a
+  // conversation whose host failed to list is left untouched below; when no
+  // host listed at all there is nothing to reconcile.
+  if (hostRows.size === 0) {
     return;
   }
-  const rows: ClaudeAgentJsonRow[] = result.rows;
-  lastAgentRows = rows;
-  const rowIndex = buildRowIndex(rows);
+  // The perf panel ties LOCAL pids to sessions; remote rows' pids live on
+  // another machine and would mislabel local processes.
+  if (result.ok) lastAgentRows = result.rows;
   // Spawns and Codex events may mutate the store while the CLI list is in flight.
   // Reconcile the current array so a stale poll cannot erase a new conversation.
   const convs = store.getConversations();
@@ -454,7 +519,10 @@ async function fallbackTickImpl(): Promise<void> {
     // daemon to react to. Steady-state work stays proportional to ACTIVE +
     // re-opened conversations, never total history, yet a re-activated dot is
     // never frozen.
-    const row = lookupRow(rowIndex, rows, c);
+    // Unknown (its host's listing failed) is not absent: leave it exactly as is.
+    const hr = hostRows.get(hostOf(c));
+    if (!hr) return c;
+    const row = lookupRow(hr.index, hr.rows, c);
     if (TERMINAL_STATES.has((c.state || '').toLowerCase()) && !row) {
       // Confirmed dead: no live process, so the real-time `status` is meaningless
       // — clear any stale one (a lingering "busy" would otherwise keep the dot
@@ -526,7 +594,8 @@ async function fallbackTickImpl(): Promise<void> {
     // conversation still lacking one — including chats that predate this being
     // tracked at all, which is what makes existing history light up rather than
     // only newly-created worktrees.
-    if (!row && !next.worktreePath && !worktreeBackfilled.has(c.id) && backfillsLeft > 0) {
+    // Remote transcripts are on the remote host; nothing local to read.
+    if (!row && !c.host && !next.worktreePath && !worktreeBackfilled.has(c.id) && backfillsLeft > 0) {
       worktreeBackfilled.add(c.id);
       backfillsLeft--;
       const wt = worktreeOf(next, readSessionCwdFromTranscript(next.sessionId) ?? undefined);
@@ -544,7 +613,9 @@ async function fallbackTickImpl(): Promise<void> {
   // Reap finished-but-still-running daemons (and their mcp-server children).
   // Fire-and-forget so it never delays state reconciliation; it self-guards
   // against overlapping runs and caps how many it stops per tick.
-  void reapStaleDaemons(updated, rows);
+  const rowsByHost = new Map<string, ClaudeAgentJsonRow[]>();
+  for (const [host, hr] of hostRows) rowsByHost.set(host, hr.rows);
+  void reapStaleDaemons(updated, rowsByHost);
 }
 
 // The file-watcher already delivers per-conversation state.json changes in real

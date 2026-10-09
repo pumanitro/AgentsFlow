@@ -1,9 +1,16 @@
 import { useEffect, useRef, useState } from 'react';
 import { api } from '../lib/ipc';
 import { createPathLinkProvider } from '../lib/path-links';
+import { cleanTerminalCopy, type CopyRow } from '../../shared/terminal-copy';
 
 interface Props {
   conversationId?: string;
+  // The chat runs on another machine: ⌘V / Ctrl+V paste goes through main so an
+  // image on THIS Mac's clipboard reaches the remote Claude (see pasteIntoRemoteChat).
+  remote?: boolean;
+  // Short machine name for the "Connecting to …" overlay shown while a remote
+  // chat waits for its host.
+  remoteHostLabel?: string;
   shellId?: string;
   shellCwd?: string;
   // Directory that relative paths in the terminal output are resolved against
@@ -34,16 +41,20 @@ interface XtermViewport {
   syncScrollArea: (immediate?: boolean) => void;
 }
 
-export default function Terminal({ conversationId, shellId, shellCwd, baseDir, onExit, autoFocus = true, followOnOpen = false }: Props) {
+export default function Terminal({ conversationId, remote = false, remoteHostLabel, shellId, shellCwd, baseDir, onExit, autoFocus = true, followOnOpen = false }: Props) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   // Read fresh inside the link provider so a later prop change is picked up
   // without rebuilding the xterm instance.
   const baseDirRef = useRef<string | undefined>(baseDir);
+  const remoteRef = useRef(remote);
+  remoteRef.current = remote;
   baseDirRef.current = baseDir ?? shellCwd;
   const cleanupRef = useRef<(() => void) | null>(null);
   const scrollToLineRef = useRef<((line: number) => void) | null>(null);
   const termFocusRef = useRef<() => void>(() => {});
   const [termGen, setTermGen] = useState(0);
+  // True while a remote chat's attach is waiting for its host to connect.
+  const [connecting, setConnecting] = useState(false);
   const onExitRef = useRef<typeof onExit>(onExit);
   onExitRef.current = onExit;
   const followOnOpenRef = useRef(followOnOpen);
@@ -262,8 +273,38 @@ export default function Terminal({ conversationId, shellId, shellCwd, baseDir, o
       containerRef.current.addEventListener('focusin', onFocusIn);
       containerRef.current.addEventListener('focusout', onFocusOut);
 
+      // xterm copies raw cells, so a selection over Claude Code's output carries
+      // its quote gutter (▎), the reply's indent and the TUI's own hard wraps.
+      // Capture phase runs before xterm's copy handler on its child element.
+      const onCopy = (e: ClipboardEvent) => {
+        const sel = term.getSelectionPosition();
+        if (!sel || !e.clipboardData) return;
+        const buf = term.buffer.active;
+        const rows: CopyRow[] = [];
+        for (let y = sel.start.y; y <= sel.end.y; y++) {
+          const line = buf.getLine(y);
+          if (!line) continue;
+          let width = line.length;
+          while (width > 0 && /^\s?$/.test(line.getCell(width - 1)?.getChars() ?? '')) width--;
+          rows.push({
+            selected: line.translateToString(
+              true,
+              y === sel.start.y ? sel.start.x : 0,
+              y === sel.end.y ? sel.end.x : undefined,
+            ),
+            width,
+            wrapped: line.isWrapped,
+          });
+        }
+        e.clipboardData.setData('text/plain', cleanTerminalCopy(rows, term.cols));
+        e.preventDefault();
+        e.stopPropagation();
+      };
+      containerRef.current.addEventListener('copy', onCopy, { capture: true });
+
       let cid: string;
       let replay = '';
+      if (remoteRef.current && !shellId) setConnecting(true);
       try {
         if (shellId && shellCwd) {
           const res = await api().attachShellTerminal(shellId, shellCwd, term.cols, term.rows);
@@ -275,12 +316,14 @@ export default function Terminal({ conversationId, shellId, shellCwd, baseDir, o
           replay = res.replay || '';
         }
       } catch (err) {
+        if (!disposed) setConnecting(false);
         // eslint-disable-next-line no-console
         console.error('[agentsflow] attachTerminal failed', err);
         if (!disposed) term.write(`\r\n\x1b[31m[attach failed] ${(err as Error)?.message ?? err}\x1b[0m\r\n`);
         return;
       }
       channelId = cid;
+      if (!disposed) setConnecting(false);
 
       // attachTerminal above is async — by the time it resolves the component may
       // have unmounted (e.g. the user navigated away, or `open_file` switched to
@@ -366,8 +409,30 @@ export default function Terminal({ conversationId, shellId, shellCwd, baseDir, o
       // binds explicitly so the behavior doesn't depend on macOptionIsMeta /
       // keymap quirks: ⌥ → Ctrl-W (\x17 backward-kill-word), ⌘ → Ctrl-U
       // (\x15 backward-kill-line). Returning false stops xterm's default.
+      // Remote chat paste: main reads this Mac's clipboard (an image is uploaded
+      // to the host and its path pasted). The keydown does the work; the paste
+      // event that may still follow (e.g. via the Edit menu) is swallowed so the
+      // text never arrives twice — and handled itself if no keydown came first.
+      let remotePasteAt = 0;
+      const pasteRemote = (key: 'cmd' | 'ctrl') => {
+        remotePasteAt = Date.now();
+        if (!conversationId) return;
+        void api().pasteIntoRemoteChat?.(conversationId, cid, key)?.catch(() => undefined);
+      };
+      const onPasteCapture = (e: ClipboardEvent) => {
+        if (!remoteRef.current || !conversationId || shellId) return;
+        e.preventDefault();
+        e.stopPropagation();
+        if (Date.now() - remotePasteAt > 400) pasteRemote('cmd');
+      };
+      containerRef.current?.addEventListener('paste', onPasteCapture, { capture: true });
       term.attachCustomKeyEventHandler((e) => {
         if (e.type !== 'keydown') return true;
+        if (remoteRef.current && conversationId && !shellId && (e.key === 'v' || e.key === 'V') && !e.altKey && !e.shiftKey && (e.metaKey !== e.ctrlKey)) {
+          e.preventDefault();
+          pasteRemote(e.metaKey ? 'cmd' : 'ctrl');
+          return false;
+        }
         const isBackspace = e.key === 'Backspace' || e.code === 'Backspace';
         if (isBackspace && e.metaKey) {
           api().writeTerminal(cid, '\x15'); // ⌘+Backspace → kill whole line
@@ -457,6 +522,7 @@ export default function Terminal({ conversationId, shellId, shellCwd, baseDir, o
         container.removeEventListener('mousedown', onContainerMouseDown);
         container.removeEventListener('focusin', onFocusIn);
         container.removeEventListener('focusout', onFocusOut);
+        container.removeEventListener('copy', onCopy, { capture: true } as any);
         if (a11yOffTimer !== null) clearTimeout(a11yOffTimer);
         container.removeEventListener('wheel', onWheel, { capture: true } as any);
         if (channelId) api().detachTerminal(channelId).catch(() => undefined);
@@ -502,6 +568,13 @@ export default function Terminal({ conversationId, shellId, shellCwd, baseDir, o
   return (
     <div className="absolute inset-0 bg-bg">
       <div ref={containerRef} className="absolute inset-0" />
+      {connecting && (
+        <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-bg/90 text-sm text-muted" role="status" aria-live="polite">
+          <span className="inline-block w-6 h-6 rounded-full border-2 border-border border-t-accent animate-spin" aria-hidden />
+          <span>Connecting to <span className="text-text font-medium">{remoteHostLabel || 'the remote machine'}</span>…</span>
+          <span className="text-xs">Opening the ssh link and starting the session there. This takes a few seconds after launch.</span>
+        </div>
+      )}
     </div>
   );
 }
