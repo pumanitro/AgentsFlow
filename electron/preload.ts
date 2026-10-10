@@ -1,5 +1,6 @@
 import { contextBridge, ipcRenderer, IpcRendererEvent } from 'electron';
 import type { TrackedDirectory, AccountsSnapshot, AgentsFlowApi, Conversation, OpenFileNavPayload, PinnedDivider, PinnedItemRef, PinnedTodo, RemoteHostStatus, RotationStatus, SpawnRequest, WorktreeInfo } from '../shared/types';
+import { ROUTINES_IPC, type RoutinesSnapshot } from '../shared/routines';
 
 const api: AgentsFlowApi = {
   codexSnapshot: (id, older) => ipcRenderer.invoke('codex:snapshot', id, older),
@@ -144,6 +145,17 @@ const api: AgentsFlowApi = {
     const listener = (_e: IpcRendererEvent, todos: PinnedTodo[]) => cb(todos);
     ipcRenderer.on('todos:updated', listener);
     return () => ipcRenderer.removeListener('todos:updated', listener);
+  },
+
+  listRoutines: () => ipcRenderer.invoke(ROUTINES_IPC.list),
+  createRoutine: (input) => ipcRenderer.invoke(ROUTINES_IPC.create, input),
+  updateRoutine: (id, patch) => ipcRenderer.invoke(ROUTINES_IPC.update, id, patch),
+  removeRoutine: (id) => ipcRenderer.invoke(ROUTINES_IPC.remove, id),
+  runRoutineNow: (id) => ipcRenderer.invoke(ROUTINES_IPC.runNow, id),
+  onRoutinesUpdated: (cb) => {
+    const listener = (_e: IpcRendererEvent, snapshot: RoutinesSnapshot) => cb(snapshot);
+    ipcRenderer.on(ROUTINES_IPC.updated, listener);
+    return () => ipcRenderer.removeListener(ROUTINES_IPC.updated, listener);
   },
 
   gitStatus: (dirPath) => ipcRenderer.invoke('git:status', dirPath),

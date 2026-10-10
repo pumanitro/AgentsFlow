@@ -8,7 +8,7 @@ export interface UIState {
   selectedDirId: string | null;
   rightPane: 'chat' | 'file';
   sidebarMode: 'changes' | 'files';
-  view: 'home' | 'stats';
+  view: 'home' | 'stats' | 'routines';
   // The Claude / Codex mark before the peer name on every conversation row.
   // Off for anyone who runs a single provider and finds the column noise.
   showProviderIcon: boolean;

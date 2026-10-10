@@ -68,6 +68,12 @@ import { startPeersBridge, type AddRemotePeerRequest, type DelegateRequest, type
 import { RemoteHosts, setRemoteHosts } from './remote/remote-hosts';
 import { remoteCommand, runRemote } from './remote/remote-exec';
 import { hostKeyOf } from '../shared/remote';
+import { createRoutinesStore } from './routines-store';
+import { createRoutineScheduler } from './routine-scheduler';
+import { ensureSeedRoutines } from './routines-seed';
+import type { RoutineScheduler, RoutinesStore } from './routines-api';
+import { formatSlot, validateRoutineInput } from '../shared/routine-schedule';
+import { ROUTINES_IPC, type Routine, type RoutineInput, type RoutinePatch, type RoutineRun, type RoutinesSnapshot } from '../shared/routines';
 import {
   buildProbeScript,
   delegationLooksFinished,
@@ -101,6 +107,10 @@ let peersBridge: PeersBridge | null = null;
 // bridge socket), so every IPC handler below reads it through `?.` — a call
 // that lands before startup finishes just sees "no remote hosts yet".
 let remoteHosts: RemoteHosts | null = null;
+// Routines (Routines tab). Created in whenReady, after the poller; the IPC
+// handlers below fail politely until then.
+let routinesStore: RoutinesStore | null = null;
+let routineScheduler: RoutineScheduler | null = null;
 
 /** hostKey of the machine a tracked dir runs on; undefined = this one. */
 function remoteHostKeyForDir(dir: TrackedDirectory): string | undefined {
@@ -464,6 +474,7 @@ app.whenReady().then(() => {
   }
   createWindow();
   startPoller(() => mainWindow);
+  startRoutines();
   perf.startPerfSummary();
   // Live sampler behind the sidebar Performance panel (event-loop lag, CPU).
   sysmon.startSysmon({
@@ -642,6 +653,7 @@ app.on('before-quit', () => {
   // Flush any debounced store changes synchronously so a quit never loses the
   // last few mutations (the async debounce window would otherwise drop them).
   try { store.flushSync(); } catch { /* ignore */ }
+  try { routineScheduler?.stop(); routinesStore?.flushSync(); } catch { /* ignore */ }
 });
 
 // ----- IPC -----
@@ -1699,6 +1711,125 @@ ipcMain.handle('convs:forkTo', async (_e, conversationId: string, provider: Agen
   });
   console.log('[agentsflow][fork] forked to the other provider', { from: src.id, to: spawn.conversationId, provider, cwd: plan.cwd });
   return { conversationId: spawn.conversationId };
+});
+
+// ----- Routines: scheduled prompts that each run as a pinned chat -----
+
+function broadcastRoutines(): void {
+  if (mainWindow && !mainWindow.isDestroyed() && routinesStore) {
+    mainWindow.webContents.send(ROUTINES_IPC.updated, routinesStore.snapshot(Date.now()));
+  }
+}
+
+function startRoutines(): void {
+  routinesStore = createRoutinesStore(path.join(app.getPath('userData'), 'routines.json'));
+  const seeded = ensureSeedRoutines(routinesStore, store.getDirectories(), new Date().toISOString());
+  if (seeded.created.length) console.log('[agentsflow][routines] seeded', seeded.created.map((r) => r.name));
+  routineScheduler = createRoutineScheduler({
+    store: routinesStore,
+    now: Date.now,
+    getDirectories: () => store.getDirectories(),
+    getConversation: (id) => store.getConversation(id),
+    spawn: async (routine, run) => {
+      const dir = store.getDirectories().find((d) => d.id === routine.directoryId);
+      if (!dir) throw new Error('peer not found — edit the routine and pick a directory');
+      const r = await spawnConversation({
+        dir,
+        prompt: routine.prompt,
+        title: `${routine.name} · ${formatSlot(run.slotAt)}`,
+        pinned: true,
+        peerAware: true,
+        model: routine.model || undefined,
+        provider: routine.provider,
+      });
+      return { conversationId: r.conversationId };
+    },
+    settleQuietRun: settleQuietRoutineRun,
+    onChange: broadcastRoutines,
+    log: (m, d) => console.log(`[agentsflow][routines] ${m}`, d ?? {}),
+  });
+  routineScheduler.start();
+}
+
+/**
+ * The same fallback waitForDelegationCompletion uses: a `--bg` daemon can answer
+ * and never write a terminal state. The scheduler calls this only after the run
+ * has looked quiet for 3 ticks; we confirm with the job state, take the answer
+ * from the transcript, and settle the chat row the way the delegate path does.
+ */
+async function settleQuietRoutineRun(conv: Conversation, run: RoutineRun): Promise<{ summary: string } | null> {
+  if (conv.provider === 'codex' || !conv.sessionId) return null;
+  const job = readJobState(conv.daemonShort, conv.host);
+  if (!delegationLooksFinished(conv, job)) return null;
+  let harvested: { text: string; at: string } | null = null;
+  try {
+    const jsonl = await readDelegateTranscript(conv);
+    harvested = jsonl ? lastAssistantText(jsonl) : null;
+  } catch (err) {
+    console.warn('[agentsflow][routines] quiet-run fallback could not read the transcript', { runId: run.id, conversationId: conv.id, host: conv.host, error: (err as Error)?.message ?? err });
+  }
+  if (!harvested) return null;
+  const result = (job?.output?.result || '').trim() || harvested.text;
+  const firstLine = result.split(/\r?\n/).map((l) => l.trim()).find(Boolean) ?? 'done';
+  console.log('[agentsflow][routines] settled from the transcript — daemon never wrote a terminal state', { runId: run.id, conversationId: conv.id, host: conv.host, chars: result.length });
+  store.updateConversation(conv.id, { state: 'done', description: firstLine.slice(0, 200) });
+  broadcastConversations();
+  return { summary: firstLine };
+}
+
+function requireRoutinesStore(): RoutinesStore {
+  if (!routinesStore) throw new Error('routines are still starting — try again in a moment');
+  return routinesStore;
+}
+
+ipcMain.handle(ROUTINES_IPC.list, (): RoutinesSnapshot =>
+  routinesStore ? routinesStore.snapshot(Date.now()) : { routines: [], runs: [], now: new Date().toISOString() });
+
+ipcMain.handle(ROUTINES_IPC.create, (_e, input: RoutineInput): Routine => {
+  const rs = requireRoutinesStore();
+  const err = validateRoutineInput(input, store.getDirectories());
+  if (err) throw new Error(err);
+  const now = new Date().toISOString();
+  const r = rs.addRoutine({
+    id: uuid(),
+    name: input.name.trim(),
+    directoryId: input.directoryId,
+    provider: input.provider ?? 'claude',
+    model: input.model || undefined,
+    prompt: input.prompt.trim(),
+    schedule: input.schedule,
+    icon: input.icon ?? 'star',
+    enabled: true,
+    createdAt: now,
+    updatedAt: now,
+    enabledAt: now,
+  });
+  broadcastRoutines();
+  return r;
+});
+
+ipcMain.handle(ROUTINES_IPC.update, (_e, id: string, patch: RoutinePatch): Routine => {
+  const rs = requireRoutinesStore();
+  const cur = rs.getRoutine(id);
+  if (!cur) throw new Error('routine not found');
+  const merged = { ...cur, ...patch };
+  if (merged.enabled && !merged.directoryId) throw new Error('pick a directory before enabling');
+  const err = validateRoutineInput(merged, store.getDirectories());
+  // A plain pause of a routine whose peer has since gone must still succeed.
+  if (err && (merged.enabled || patch.schedule || patch.name !== undefined || patch.prompt !== undefined)) throw new Error(err);
+  const r = rs.updateRoutine(id, patch)!;
+  broadcastRoutines();
+  return r;
+});
+
+ipcMain.handle(ROUTINES_IPC.remove, (_e, id: string): void => {
+  requireRoutinesStore().removeRoutine(id);
+  broadcastRoutines();
+});
+
+ipcMain.handle(ROUTINES_IPC.runNow, (_e, id: string): Promise<RoutineRun> => {
+  if (!routineScheduler) throw new Error('routines are still starting — try again in a moment');
+  return routineScheduler.runNow(id);
 });
 
 // ----- Delegation bridge: the MCP server asks main to spawn a tracked peer ----

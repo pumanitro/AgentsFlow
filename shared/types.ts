@@ -1,3 +1,5 @@
+import type { Routine, RoutineInput, RoutinePatch, RoutineRun, RoutinesSnapshot } from './routines';   // type-only, cycle is fine
+
 export type AgentProvider = 'claude' | 'codex';
 
 // Where a conversation forked to the other provider came from. A conversation
@@ -821,6 +823,14 @@ export interface AgentsFlowApi {
   setTodoDone: (id: string, done: boolean) => Promise<void>;
   removeTodo: (id: string) => Promise<void>;
   onTodosUpdated: (cb: (todos: PinnedTodo[]) => void) => () => void;
+
+  // ---- Routines: chats that start themselves on a schedule (shared/routines.ts) ----
+  listRoutines: () => Promise<RoutinesSnapshot>;                               // 'routines:list'
+  createRoutine: (input: RoutineInput) => Promise<Routine>;                    // 'routines:create' — rejects with validateRoutineInput's message
+  updateRoutine: (id: string, patch: RoutinePatch) => Promise<Routine>;        // 'routines:update' — same validation on the merged routine; enabling with directoryId '' rejects
+  removeRoutine: (id: string) => Promise<void>;                                 // 'routines:remove'
+  runRoutineNow: (id: string) => Promise<RoutineRun>;                           // 'routines:runNow'
+  onRoutinesUpdated: (cb: (snapshot: RoutinesSnapshot) => void) => () => void; // 'routines:updated' — full snapshot on every change
 
   gitStatus: (dirPath: string) => Promise<GitStatusResult>;
   listFiles: (dirPath: string) => Promise<FileEntry[]>;

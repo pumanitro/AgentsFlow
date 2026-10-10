@@ -73,6 +73,25 @@ The session lands in the pinned list like any other, so "why did the machine sta
 
 Every process is billed to its nearest `claude` ancestor, so a delegated peer session is its own row rather than hidden inside its caller. Claude Code's `grep` → `ugrep` and `find` → `bfs` shims are recognised and shown as the command the agent typed.
 
+## Routines
+
+The home header has a **Chat | Routines** pill. Chat is the usual home; Routines is a schedule board for prompts that should run on their own.
+
+- **Sidebar** — routines grouped by cadence: Daily, Every 2 days, Weekly, Twice a month, Monthly (empty groups are hidden). **+ New routine** opens the form; clicking a row opens its preview.
+- **Week board** — Mon–Sun columns with one lane per cadence. All dailies of a day share one segmented bar; rarer routines are small cards.
+- **Month calendar** — a daily health bar with `x/y` per day, filled circles for every-2-days routines, and chips for weekly / twice-monthly / monthly ones. Hover or click any mark for a tooltip; click selects the routine and highlights that run in the preview. `‹ ›` and **Today** move the week or month.
+- **Preview** — schedule, next run, run history, and **Run now**, **Pause**, **Edit**, **Delete**.
+
+Mark colours: green success · red failed · blue (pulsing) in progress · orange needs attention · grey dashed scheduled · hollow red missed.
+
+A run is a normal chat: when a slot is due, the app starts a background session in the routine's peer directory and pins it as "Routine name · 11 Oct 09:00". Its mark follows that chat, and the run row in the preview opens it.
+
+Catch-up rule: the scheduler checks every 15 s. If the app was closed over a slot and comes back within 20 h, that newest missed slot runs once. Older unrun slots are marked missed and never run. A routine never runs a slot older than its own creation or last resume, and a paused routine records no misses. Deleting a routine removes it and its run history, but its chats stay.
+
+Data lives in `<userData>/routines.json`.
+
+On first launch the app seeds **Reddit daily**: peer `atlas-of-doors`, prompt `/reddit-daily-routine`, daily at 09:00. If that peer is not tracked, the routine is created disabled and the preview says "Peer not tracked — Edit to pick one". Deleting a seeded routine is permanent; it is not re-created on the next launch.
+
 ## Requirements
 
 - Node 20+

@@ -1,5 +1,8 @@
 import type { AccountsSnapshot, AgentProvider, AgentsFlowApi, CodexAccount, Conversation, PinnedDivider, PinnedItemRef, PinnedTodo, TrackedDirectory, SpawnRequest, GitStatusResult, FileEntry, SearchOptions, SearchResult, SearchMatchLine, WorktreeInfo } from '../../shared/types';
 import { forkTitle } from '../../shared/fork-title';
+import type { Routine, RoutineRun, RoutinesSnapshot } from '../../shared/routines';
+import { validateRoutineInput } from '../../shared/routine-schedule';
+import { buildMockRoutines } from './mock-routines';
 
 const STORE_KEY = 'agentsflow:mock:v3';
 
@@ -51,6 +54,7 @@ const listeners = {
   dividers: new Set<(d: PinnedDivider[]) => void>(),
   todos: new Set<(t: PinnedTodo[]) => void>(),
   pinnedOrder: new Set<(o: PinnedItemRef[]) => void>(),
+  routines: new Set<(s: RoutinesSnapshot) => void>(),
   termData: new Set<(id: string, data: string) => void>(),
   termExit: new Set<(id: string) => void>(),
 };
@@ -114,6 +118,10 @@ function insertRefAtEndOfFirstSection(state: MockShape, ref: PinnedItemRef) {
 
 export function createMockApi(): AgentsFlowApi {
   let state = load();
+
+  const routineState = buildMockRoutines(state.directories, Date.now());
+  const routinesSnapshot = (): RoutinesSnapshot => ({ routines: routineState.routines, runs: routineState.runs, now: new Date().toISOString() });
+  const fireRoutines = () => { const snap = routinesSnapshot(); listeners.routines.forEach((cb) => cb(snap)); };
 
   // Account pool. The browser demo has no keychain and no CLI, so the pool is
   // static — but the *selection* (which provider, which Codex sign-in) is real
@@ -690,6 +698,59 @@ export function createMockApi(): AgentsFlowApi {
       fireOrder(state);
     },
     onTodosUpdated: (cb) => { listeners.todos.add(cb); return () => listeners.todos.delete(cb); },
+
+    // Routines live in memory only (fixtures rebuilt on reload) — the demo
+    // shows the boards full, not a persistence layer. Validation is the same
+    // shared function main runs.
+    listRoutines: async () => routinesSnapshot(),
+    createRoutine: async (input) => {
+      const err = validateRoutineInput(input, state.directories);
+      if (err) throw new Error(err);
+      const now = new Date().toISOString();
+      const r: Routine = {
+        id: uuid(), name: input.name.trim(), directoryId: input.directoryId, provider: input.provider ?? 'claude',
+        model: input.model || undefined, prompt: input.prompt.trim(), schedule: input.schedule, icon: input.icon ?? 'star',
+        enabled: true, createdAt: now, updatedAt: now, enabledAt: now,
+      };
+      routineState.routines = [...routineState.routines, r];
+      fireRoutines();
+      return r;
+    },
+    updateRoutine: async (id, patch) => {
+      const cur = routineState.routines.find((r) => r.id === id);
+      if (!cur) throw new Error('routine not found');
+      const merged = { ...cur, ...patch };
+      if (merged.enabled && !merged.directoryId) throw new Error('pick a directory before enabling');
+      const err = validateRoutineInput(merged, state.directories);
+      if (err) throw new Error(err);
+      const now = new Date().toISOString();
+      const next: Routine = { ...merged, updatedAt: now, ...(patch.enabled && !cur.enabled ? { enabledAt: now } : {}) };
+      routineState.routines = routineState.routines.map((r) => (r.id === id ? next : r));
+      fireRoutines();
+      return next;
+    },
+    removeRoutine: async (id) => {
+      routineState.routines = routineState.routines.filter((r) => r.id !== id);
+      routineState.runs = routineState.runs.filter((run) => run.routineId !== id);
+      fireRoutines();
+    },
+    runRoutineNow: async (id) => {
+      const r = routineState.routines.find((x) => x.id === id);
+      if (!r) throw new Error('routine not found');
+      if (!r.directoryId) throw new Error('pick a directory first');
+      const now = new Date().toISOString();
+      const run: RoutineRun = { id: uuid(), routineId: id, slotAt: now, trigger: 'manual', status: 'running', startedAt: now, conversationId: `mock-conv-${uuid()}` };
+      routineState.runs = [...routineState.runs, run];
+      fireRoutines();
+      setTimeout(() => {
+        routineState.runs = routineState.runs.map((x) => (x.id === run.id
+          ? { ...x, status: 'success', endedAt: new Date().toISOString(), summary: `${r.name} finished — ran by hand` }
+          : x));
+        fireRoutines();
+      }, 4000);
+      return run;
+    },
+    onRoutinesUpdated: (cb) => { listeners.routines.add(cb); return () => listeners.routines.delete(cb); },
 
     listPinnedOrder: async () => state.pinnedOrder,
     reorderPinned: async (orderedRefs) => {

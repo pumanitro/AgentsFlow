@@ -19,6 +19,7 @@ import StatsView from '../components/StatsView';
 import DockedPanes, { TOP_REGION_MIN } from '../components/DockedPanes';
 import { api } from '../lib/ipc';
 import { useUIState } from '../lib/ui-state';
+import { PILL } from '../lib/routine-style';
 import { BridgeHealth, Conversation, PinnedDivider, PinnedItemRef, PinnedTodo, RemoteHostStatus, TrackedDirectory } from '../../shared/types';
 import { hostKeyOf } from '../../shared/remote';
 import { blockStepDropIndex, marqueeHits, moveRefsTo, refKey } from '../../shared/pinned-selection';
@@ -39,6 +40,7 @@ const UsagePanel = dynamic(() => import('../components/UsagePanel'), { ssr: fals
 const AccountsPanel = dynamic(() => import('../components/AccountsPanel'), { ssr: false });
 const PerfLauncher = dynamic(() => import('../components/PerfPanel'), { ssr: false });
 const FileEditor = dynamic(() => import('../components/FileEditor'), { ssr: false });
+const RoutinesView = dynamic(() => import('../components/routines/RoutinesView'), { ssr: false });
 
 type PinnedItem =
   | { kind: 'conversation'; id: string; ref: PinnedItemRef; conv: Conversation }
@@ -522,7 +524,7 @@ export default function Home() {
     const onKey = (e: KeyboardEvent) => {
       if (historyDirId) return;
       if (globalNoteFile) return; // the quick-look modal owns the keyboard
-      if (view === 'stats') return;
+      if (view !== 'home') return;
       if (pinnedItems.length === 0) return;
 
       const target = e.target as HTMLElement | null;
@@ -870,6 +872,10 @@ export default function Home() {
             <rect x="350" y="620" width="226" height="64" rx="32" ry="32" fill="#ff7847" fillOpacity="0.52" />
           </svg>
           <span className="font-semibold text-sm tracking-tight">Peers Flow</span>
+          <div role="tablist" aria-label="Main view" className={`ml-3 ${PILL.wrap}`} style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}>
+            <button role="tab" aria-selected={view !== 'routines'} onClick={() => setView('home')} className={view !== 'routines' ? PILL.on : PILL.off} title="Pinned conversations">Chat</button>
+            <button role="tab" aria-selected={view === 'routines'} onClick={() => setView('routines')} className={view === 'routines' ? PILL.on : PILL.off} title="Chats that start themselves on a schedule">Routines</button>
+          </div>
           {bridgeHealth && (
             <button
               onClick={() => setMcpOpen(true)}
@@ -915,6 +921,7 @@ export default function Home() {
                   {([
                     { key: 'home', label: 'Home view' },
                     { key: 'stats', label: 'Stats view' },
+                    { key: 'routines', label: 'Routines view' },
                   ] as const).map((opt) => (
                     <button
                       key={opt.key}
@@ -966,7 +973,9 @@ export default function Home() {
       </header>
 
       <main className="flex-1 overflow-hidden">
-        {view === 'stats' ? (
+        {view === 'routines' ? (
+          <RoutinesView dirs={dirs} onOpenConversation={(id) => router.push({ pathname: '/session', query: { id } })} />
+        ) : view === 'stats' ? (
           <div className="h-full overflow-y-auto">
             <StatsView dirs={dirs} convs={convs} />
           </div>
@@ -1251,7 +1260,7 @@ export default function Home() {
         )}
       </main>
 
-      {view !== 'stats' && <SpawnBar targetDir={selectedDir} onSend={handleSpawn} />}
+      {view === 'home' && <SpawnBar targetDir={selectedDir} onSend={handleSpawn} />}
 
       {globalNoteFile && (
         <div
