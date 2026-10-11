@@ -2,6 +2,9 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api } from '../lib/ipc';
 import type { PerfActionRow, PerfAgentRow, PerfHistory, PerfHistoryPoint, PerfSnapshot, PerfToolCategory, TrackedDirectory } from '../../shared/types';
 import PerfAsk from './PerfAsk';
+import { Row, SectionLabel, SEV_COLOR } from './PerfBits';
+import GuardSection, { GUARD_LEVEL_LONG, GUARD_LEVEL_SHORT, useGuardSnapshot } from './GuardSection';
+import { GUARD_LEVEL_COLOR } from '../lib/contract';
 import { LineChart, OTHER_COLOR, PALETTE, type Series } from './PerfCharts';
 import {
   CPU_DANGER, CPU_WARN, LAG_DANGER_MS, LAG_WARN_MS,
@@ -14,12 +17,10 @@ import {
 const ZONE_COLOR = '#f472b6';
 const OPEN_REFRESH_MS = 3000;
 const CLOSED_REFRESH_MS = 20_000;
-
-const SEV_COLOR: Record<PerfSeverity, string> = {
-  normal: '#4ade80',
-  warning: '#fbbf24',
-  danger: '#ef4444',
-};
+// The memory guard re-measures every 30 s and pushes each change, so the poll
+// is only a safety net: 10 s while the monitor is open, 30 s behind the pill.
+const GUARD_OPEN_REFRESH_MS = 10_000;
+const GUARD_CLOSED_REFRESH_MS = 30_000;
 
 function ago(iso: string | null): string {
   if (!iso) return '–';
@@ -44,23 +45,6 @@ function Bar({ pct, severity }: { pct: number; severity: PerfSeverity }) {
   return (
     <div className="mt-1 h-1.5 rounded-full overflow-hidden" style={{ backgroundColor: 'rgba(255,255,255,0.08)' }}>
       <div className="h-full rounded-full" style={{ width: `${Math.max(0, Math.min(100, pct))}%`, background: color }} />
-    </div>
-  );
-}
-
-function SectionLabel({ children }: { children: React.ReactNode }) {
-  return <div className="px-3 pt-2 pb-0.5 text-[10px] uppercase tracking-wider text-subtle">{children}</div>;
-}
-
-// One "label ....... value" line with an optional coloured value and sub-note.
-function Row({ label, value, severity, sub }: { label: string; value: string; severity?: PerfSeverity; sub?: string }) {
-  return (
-    <div className="px-3 py-0.5 flex items-baseline justify-between gap-2">
-      <span className="text-[11px] text-muted truncate">{label}</span>
-      <span className="text-[11px] font-mono shrink-0 text-right" style={{ color: severity ? SEV_COLOR[severity] : undefined }}>
-        <span className={severity ? '' : 'text-text'}>{value}</span>
-        {sub && <span className="text-subtle ml-1.5">{sub}</span>}
-      </span>
     </div>
   );
 }
@@ -178,13 +162,16 @@ export default function PerfLauncher({ dirs = [], targetDir = null, onSend }: Pe
   const { snap, unavailable } = usePerfSnapshot(false);
   const verdict = snap ? perfVerdict(snap) : null;
   const color = verdict ? SEV_COLOR[verdict.severity] : undefined;
+  const guard = useGuardSnapshot(open ? GUARD_OPEN_REFRESH_MS : GUARD_CLOSED_REFRESH_MS);
+  const memLevel = guard.snap ? (guard.snap.level in GUARD_LEVEL_COLOR ? guard.snap.level : 'unknown') : null;
+  const perfTitle = verdict ? `Performance: ${verdict.badgeLong} — ${verdict.reason}` : unavailable ? 'Performance monitor (restart the app to enable)' : 'Performance monitor';
   return (
     <>
       <button
         onClick={() => setOpen(true)}
         className="shrink-0 h-6 px-2 rounded-full border border-border bg-panel hover:bg-panel2 hover:border-accent flex items-center gap-1.5 text-[10px] font-mono"
         style={{ color: color ?? undefined }}
-        title={verdict ? `Performance: ${verdict.badgeLong} — ${verdict.reason}` : unavailable ? 'Performance monitor (restart the app to enable)' : 'Performance monitor'}
+        title={memLevel ? `${perfTitle}\nMemory guard: ${GUARD_LEVEL_LONG[memLevel]}` : perfTitle}
         aria-label="Open performance monitor"
       >
         <span
@@ -193,13 +180,25 @@ export default function PerfLauncher({ dirs = [], targetDir = null, onSend }: Pe
           aria-hidden="true"
         />
         <span className={verdict ? '' : 'text-muted'}>{verdict ? verdict.badge : 'perf'}</span>
+        {/* The memory guard's level, beside the verdict. Absent until the
+            guard has answered (an app that predates it shows nothing here). */}
+        {memLevel && (
+          <span className="flex items-center gap-1 pl-1.5 border-l border-border" style={{ color: GUARD_LEVEL_COLOR[memLevel] }}>
+            <span
+              className={`inline-block w-1.5 h-1.5 rounded-full shrink-0 ${memLevel === 'critical' ? 'animate-pulse' : ''}`}
+              style={{ backgroundColor: GUARD_LEVEL_COLOR[memLevel] }}
+              aria-hidden="true"
+            />
+            {GUARD_LEVEL_SHORT[memLevel]}
+          </span>
+        )}
       </button>
-      {open && <PerfModal onClose={() => setOpen(false)} dirs={dirs} targetDir={targetDir} onSend={onSend} />}
+      {open && <PerfModal onClose={() => setOpen(false)} dirs={dirs} targetDir={targetDir} onSend={onSend} guard={guard} />}
     </>
   );
 }
 
-function PerfModal({ onClose, dirs, targetDir, onSend }: { onClose: () => void } & PerfLauncherProps) {
+function PerfModal({ onClose, dirs, targetDir, onSend, guard }: { onClose: () => void; guard: ReturnType<typeof useGuardSnapshot> } & PerfLauncherProps) {
   const [view, setView] = usePersisted<PerfView>('agentsflow:perf:view', 'timeline');
   const [rangeKey, setRangeKey] = usePersisted<string>('agentsflow:perf:range', '15');
   const range = RANGES.find((r) => r.key === rangeKey);
@@ -238,6 +237,9 @@ function PerfModal({ onClose, dirs, targetDir, onSend }: { onClose: () => void }
 
   const verdict = snap ? perfVerdict(snap) : null;
   const color = verdict ? SEV_COLOR[verdict.severity] : undefined;
+  const memLevel = guard.snap ? (guard.snap.level in GUARD_LEVEL_COLOR ? guard.snap.level : 'unknown') : null;
+  const guardRef = useRef<HTMLDivElement | null>(null);
+  const showGuard = () => guardRef.current?.scrollIntoView?.({ behavior: 'smooth', block: 'start' });
   const openLog = () => {
     const a = api();
     if (snap?.logPath && typeof a.revealInFinder === 'function') void a.revealInFinder(snap.logPath);
@@ -261,6 +263,18 @@ function PerfModal({ onClose, dirs, targetDir, onSend }: { onClose: () => void }
                 <span className={`inline-block w-1.5 h-1.5 rounded-full ${verdict.severity === 'danger' ? 'animate-pulse' : ''}`} style={{ backgroundColor: color }} aria-hidden="true" />
                 {verdict.badgeLong}
               </span>
+            )}
+            {memLevel && (
+              <button
+                type="button"
+                onClick={showGuard}
+                className="text-[10px] font-mono flex items-center gap-1.5 px-1.5 py-0.5 rounded border border-border hover:border-accent hover:bg-panel whitespace-nowrap"
+                style={{ color: GUARD_LEVEL_COLOR[memLevel] }}
+                title="Memory guard — click to jump to it"
+              >
+                <span className={`inline-block w-1.5 h-1.5 rounded-full ${memLevel === 'critical' ? 'animate-pulse' : ''}`} style={{ backgroundColor: GUARD_LEVEL_COLOR[memLevel] }} aria-hidden="true" />
+                {GUARD_LEVEL_LONG[memLevel]}
+              </button>
             )}
           </div>
           {/* View switch + (Timeline only) the time range. One row, scoping
@@ -315,6 +329,16 @@ function PerfModal({ onClose, dirs, targetDir, onSend }: { onClose: () => void }
           ) : (
             <PerfBody snap={snap} uiFrameGapMs={uiFrameGapMs} onOpenLog={openLog} loading={loading} layout="wide" />
           )}
+          {/* The memory guard sits under both views: it has its own data
+              source, so it shows even while the monitor above is still sampling. */}
+          <div ref={guardRef} className="mt-1 border-t border-border">
+            <GuardSection
+              snap={guard.snap}
+              onPins={(patch) => void guard.setPins(patch)}
+              layout="wide"
+              unavailable={guard.unavailable || guard.failed}
+            />
+          </div>
         </div>
         {/* Ask about what is on screen: freezes this window's samples into a
             report and starts a session that already has them. Outside the

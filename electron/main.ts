@@ -4,7 +4,7 @@ import * as codexServer from './codex-server';
 import { codexUpgradeAvailable } from './codex-cli';
 import { upgradeCodexWhenIdle } from './codex-upgrade';
 import type { CodexReply } from '../shared/codex';
-import { app, BrowserWindow, clipboard, dialog, ipcMain, nativeImage, powerMonitor, shell } from 'electron';
+import { app, BrowserWindow, clipboard, dialog, ipcMain, nativeImage, Notification, powerMonitor, shell } from 'electron';
 import * as path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
@@ -48,6 +48,11 @@ import * as codexAccounts from './codex-accounts';
 import * as handover from './handover';
 import * as rotation from './rotation';
 import * as limitWatch from './limit-watch';
+import * as keeper from './keeper/keeper';
+import { consumeSkillContractNote, listSkillContractNotes } from './keeper/skill-contracts';
+import * as guard from './guard/guard';
+import { readKillLogSince } from './guard/kill-log';
+import { worstMeter } from '../shared/usage';
 import { forkTitle } from '../shared/fork-title';
 import { findTranscript, latestContinuation, mungeCwd, transcriptExists as transcriptExistsUnder } from './transcript-path';
 import { computeDisplayName } from './naming';
@@ -59,6 +64,9 @@ import {
   removeAgent as cliRemove,
   readJobState,
   hasLiveDaemon,
+  jobStateMtimeMs,
+  resumeBackground,
+  type ClaudeAgentJsonRow,
 } from './claude-cli';
 import { ensureWorkspaceTrusted } from './workspace-trust';
 import { applyRemoteJobState, getLastAgentRows, refreshNow, setPollerForeground, startPoller, stopPoller, syncWatchers, unwatchConversation, watchConversation, watcherStats } from './poller';
@@ -90,7 +98,7 @@ import * as remoteFs from './remote/remote-fs';
 import { deleteAttachmentFiles, pastedImagesRoot, prunePastedImages, sweepOrphanAttachments, todayDateSlug } from './attachments';
 import { noteDirForPath, sweepNoteDir, sweepNoteImages } from './note-images';
 import { disableLeftArrowAgents } from './attach-guard';
-import { Account, AccountsSnapshot, AddAccountResult, AddRemoteRequest, AgentProvider, BridgeHealth, CodexModel, Conversation, FileEntry, PerfReportResult, PinnedDivider, PinnedItemRef, PinnedTodo, ProbeAccountResult, ProbeCodexResult, RemoteHostStatus, RemoteProbeResult, RotationPolicy, SlashCommand, SpawnRequest, SwitchAccountResult, SwitchCodexResult, TrackedDirectory, UsageResult } from '../shared/types';
+import { Account, AccountsSnapshot, AddAccountResult, AddRemoteRequest, AgentProvider, BridgeHealth, CodexModel, Conversation, FileEntry, GuardPins, PerfReportResult, PinnedDivider, PinnedItemRef, PinnedTodo, ProbeAccountResult, ProbeCodexResult, RemoteHostStatus, RemoteProbeResult, RotationPolicy, RunContract, SlashCommand, SpawnRequest, SwitchAccountResult, SwitchCodexResult, TrackedDirectory, UsageResult } from '../shared/types';
 
 const isDev = process.env.NODE_ENV === 'development';
 const loadURL = isDev ? null : serve({ directory: path.join(__dirname, '..', '..', '..', 'renderer', 'out') });
@@ -487,6 +495,15 @@ app.whenReady().then(() => {
   // And catch the walls the threshold misses: a chat that reports a rate limit
   // gets a fresh account and a "continue" rather than sitting dead till morning.
   limitWatch.startLimitWatch(limitWatchDeps);
+  // The memory guard samples pressure and judges containers (dry-run unless the
+  // user says otherwise); the Keeper holds chats to their run contract. Guard
+  // first: the Keeper reads its level.
+  guard.startGuard(guardDeps);
+  keeper.startKeeper(keeperDeps);
+  // The /until-done and /forever skills declare a chat's contract from inside
+  // the chat; pick their notes up quickly so the chat is covered before it idles.
+  void applySkillContracts();
+  setInterval(() => { void applySkillContracts(); }, SKILL_CONTRACT_POLL_MS).unref();
 
   // OS sleep/wake: tell the stall detector so the multi-minute gap it sees on
   // resume is logged as a power event, not a "UI frozen" false alarm, and back
@@ -635,6 +652,8 @@ app.on('window-all-closed', () => {
 });
 
 app.on('before-quit', () => {
+  keeper.stopKeeper();
+  guard.stopGuard();
   codex.close();
   try { peersBridge?.stop(); } catch { /* ignore */ }
   // Best effort and not awaited: quitting must not wait on a dead ssh master.
@@ -1233,6 +1252,34 @@ accounts.onAccountRevoked((account, reason) => {
   setTimeout(() => attempt(1), 0);
 });
 
+/**
+ * Type `text` into a chat as a user turn and wait for the receipt. Shared by
+ * the rate-limit rescue (limit-watch) and the Keeper: both need "say this to
+ * that session, whether or not anyone has it open, and tell me it landed".
+ */
+async function nudgeConversation(conv: Conversation, text: string): Promise<pty.NudgeResult> {
+  // The live row, not the snapshot the pass started from: a session id or a
+  // daemon short id can have landed since the caller read it.
+  const live = store.getConversation(conv.id) ?? conv;
+  // Snapshotted BEFORE anything is typed: the receipt for this nudge is a
+  // user turn that wasn't in the transcript a moment ago.
+  //
+  // Zero means the transcript could not be read (or holds no user turn yet),
+  // and then "a user turn exists" proves nothing — it would match the
+  // session's own opening prompt. Every chat the rate-limit path rescues has a
+  // transcript deep enough to have one, since that is where its rate-limit
+  // error was found, so a zero here is an anomaly and gets no false receipt.
+  const before = limitWatch.lastUserTurnAt(live);
+  return pty.sendToSession({
+    sessionId: live.sessionId,
+    // Mirrors term:attach's rule: the daemon short id when there is one, else
+    // the session id's own 8-char prefix.
+    attachId: live.daemonShort || live.sessionId.slice(0, 8),
+    text,
+    verify: before > 0 ? () => limitWatch.lastUserTurnAt(live) > before : undefined,
+  });
+}
+
 // ----- The wall that got hit anyway -----
 // Same switch, triggered by a chat's own rate-limit error instead of by a
 // meter. Lives beside rotation because it shares the switch, the policy and the
@@ -1241,30 +1288,162 @@ const limitWatchDeps: limitWatch.LimitWatchDeps = {
   getPolicy: () => store.getRotationPolicy(),
   getConversations: () => store.getConversations().filter((c) => c.provider !== 'codex'),
   rotate: () => rotation.runOnce(rotationDeps, { urgent: true }),
-  nudge: async (conv, text) => {
-    // The live row, not the snapshot the pass started from: a session id or a
-    // daemon short id can have landed since the wall was read.
-    const live = store.getConversation(conv.id) ?? conv;
-    // Snapshotted BEFORE anything is typed: the receipt for this nudge is a
-    // user turn that wasn't in the transcript a moment ago.
-    //
-    // Zero means the transcript could not be read (or holds no user turn yet),
-    // and then "a user turn exists" proves nothing — it would match the
-    // session's own opening prompt. Every chat this path rescues has a
-    // transcript deep enough to have one, since that is where its rate-limit
-    // error was found, so a zero here is an anomaly and gets no false receipt.
-    const before = limitWatch.lastUserTurnAt(live);
-    return pty.sendToSession({
-      sessionId: live.sessionId,
-      // Mirrors term:attach's rule: the daemon short id when there is one, else
-      // the session id's own 8-char prefix.
-      attachId: live.daemonShort || live.sessionId.slice(0, 8),
-      text,
-      verify: before > 0 ? () => limitWatch.lastUserTurnAt(live) > before : undefined,
-    });
-  },
+  nudge: nudgeConversation,
   onEvent: (message) => rotation.recordEvent(rotationDeps, message),
 };
+
+// ----- Run contracts: the Keeper and the memory guard -----
+// See keeper/keeper.ts and guard/guard.ts. Both are loops fed entirely through
+// these deps, so everything they do to a chat or to the screen goes through the
+// same store, PTY and push channels as the rest of this file.
+
+function notifyUser(title: string, body: string): void {
+  try {
+    if (Notification.isSupported()) new Notification({ title, body }).show();
+    else console.log('[agentsflow][notify]', { title, body });
+  } catch (err) {
+    console.warn('[agentsflow][notify] failed', { title, error: (err as Error)?.message ?? err });
+  }
+}
+
+// One changed row to the renderer, on the incremental channel the poller uses.
+function pushConversationPatch(saved: Conversation | null): void {
+  if (saved && mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('conversations:patched', [saved]);
+  }
+}
+
+// The poller replaces its row array only on a SUCCESSFUL `claude agents --json`
+// and keeps the last good one otherwise, so the array's identity changing is
+// the only sign of a fresh listing. Stamped here so the Keeper can refuse to
+// call a daemon dead on the strength of a listing that is minutes old. Until a
+// first listing lands `at` is 0 — never fresh.
+let liveRowsSeen: ClaudeAgentJsonRow[] | null = null;
+let liveRowsAt = 0;
+function liveRowsWithAge(): { rows: ClaudeAgentJsonRow[]; at: number } {
+  const rows = getLastAgentRows();
+  if (rows !== liveRowsSeen) {
+    // The poller's initial empty array is "no listing yet", not a listing.
+    if (liveRowsSeen !== null) liveRowsAt = Date.now();
+    liveRowsSeen = rows;
+  }
+  return { rows, at: liveRowsAt };
+}
+
+// Applies the notes the /until-done and /forever skills leave (see
+// keeper/skill-contracts.ts) to the conversation that owns each session. A note
+// for a session this app does not know is left for a later pass — the row may
+// not have its session id yet — and ages out on its own.
+const SKILL_CONTRACT_POLL_MS = 10_000;
+let applyingSkillContracts = false;
+async function applySkillContracts(): Promise<void> {
+  if (applyingSkillContracts) return;
+  applyingSkillContracts = true;
+  try {
+    const notes = await listSkillContractNotes();
+    if (notes.length === 0) return;
+    const convs = store.getConversations();
+    let applied = false;
+    for (const { file, note } of notes) {
+      const conv = convs.find((c) => !c.host && c.provider !== 'codex'
+        && (c.sessionId === note.sessionId || (!!c.daemonShort && note.sessionId.startsWith(c.daemonShort))));
+      if (!conv) continue;
+      const prev = store.getConversation(conv.id)?.keeper;
+      // A fresh declaration re-arms a chat that had reached its finish line.
+      const { completedAt: _done, ...rest } = prev ?? { nudgesAt: [] };
+      pushConversationPatch(store.updateConversation(conv.id, {
+        contract: note.contract,
+        contractSource: 'skill',
+        keeper: note.contract === 'once' ? { ...rest, keptAlive: false, stalled: null } : rest,
+      }));
+      console.log('[agentsflow][keeper] contract set from inside the chat', { title: conv.title, contract: note.contract });
+      await consumeSkillContractNote(file);
+      applied = true;
+    }
+    if (applied) void keeper.runKeeperOnce(keeperDeps);
+  } catch (err) {
+    console.warn('[agentsflow][keeper] could not apply skill contracts', { error: (err as Error)?.message ?? err });
+  } finally {
+    applyingSkillContracts = false;
+  }
+}
+
+const keeperDeps: keeper.KeeperDeps = {
+  // Contracts are declared from inside a chat (/until-done, /forever), never
+  // guessed: a chat nobody declared is left alone when it stops.
+  inferContracts: false,
+  getConversations: () => store.getConversations(),
+  getConversation: (id) => store.getConversation(id) ?? null,
+  updateConversation: (id, patch) => pushConversationPatch(store.updateConversation(id, patch)),
+  liveRows: liveRowsWithAge,
+  jobQuietAt: (conv) => jobStateMtimeMs(conv.daemonShort, conv.host),
+  isWalled: (conv) => limitWatch.readLimitHit(conv) !== null,
+  // Unreadable usage counts as headroom: a meter that cannot be read must not
+  // silence the Keeper, and a genuinely walled chat is caught by isWalled.
+  poolHasHeadroom: () => getUsage(false).then((r) => !(r.ok && (worstMeter(r)?.percent ?? 0) >= 100)).catch(() => true),
+  memLevel: () => guard.getMemLevel(),
+  readKillsSince: (offset) => readKillLogSince(offset),
+  nudge: nudgeConversation,
+  relaunch: async (conv, prompt) => {
+    const live = store.getConversation(conv.id) ?? conv;
+    if (!live.sessionId) return { ok: false, error: 'no session id' };
+    const cwd = live.worktreePath ?? live.directoryPath;
+    try {
+      const r = await resumeBackground({
+        sessionId: live.sessionId,
+        cwd,
+        prompt,
+        mcpConfigPath: writeMcpConfigForConversation(live.id, cwd),
+        appendSystemPrompt: buildBootstrapSystemPrompt(store.getDirectories()),
+        model: live.model,
+      });
+      if (!r.daemonShort) return { ok: false, error: r.raw.trim().slice(0, 300) || `claude exited ${r.code}` };
+      pushConversationPatch(store.updateConversation(live.id, { daemonShort: r.daemonShort, state: 'starting', status: '' }));
+      syncWatchers();
+      void refreshNow().catch(() => undefined);
+      return { ok: true, daemonShort: r.daemonShort };
+    } catch (err) {
+      return { ok: false, error: (err as Error)?.message ?? String(err) };
+    }
+  },
+  notify: notifyUser,
+  onSnapshot: (s) => {
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('keeper:updated', s);
+  },
+};
+
+const guardDeps: guard.GuardDeps = {
+  liveRows: () => getLastAgentRows(),
+  getConversations: () => store.getConversations(),
+  notify: notifyUser,
+  onSnapshot: (s) => {
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('guard:updated', s);
+  },
+};
+
+const RUN_CONTRACTS: readonly RunContract[] = ['once', 'until-done', 'forever'];
+function isRunContract(v: unknown): v is RunContract {
+  return typeof v === 'string' && (RUN_CONTRACTS as readonly string[]).includes(v);
+}
+
+ipcMain.handle('convs:setContract', (_e, id: string, contract: RunContract): void => {
+  if (!isRunContract(contract)) throw new Error('Unknown run contract');
+  const prev = store.getConversation(id)?.keeper;
+  pushConversationPatch(store.updateConversation(id, {
+    contract,
+    contractSource: 'chip',
+    // Picking "Once" is the stop control: the Keeper lets go at once rather
+    // than at its next tick.
+    keeper: contract === 'once' ? { nudgesAt: [], ...prev, keptAlive: false, stalled: null } : prev,
+  }));
+  // Refresh the Keeper card now rather than at its next 30 s tick, so the row
+  // and the sidebar never disagree about who is being kept alive.
+  void keeper.runKeeperOnce(keeperDeps);
+});
+
+ipcMain.handle('keeper:snapshot', () => keeper.getKeeperSnapshot());
+ipcMain.handle('guard:snapshot', () => guard.getGuardSnapshot());
+ipcMain.handle('guard:setPins', (_e, patch: { mode?: GuardPins['mode']; idleMinutes?: number; keep?: { name: string; keep: boolean } }): GuardPins => guard.setPins(patch ?? {}));
 
 ipcMain.handle('rotation:get', () => ({
   policy: store.getRotationPolicy(),
@@ -1533,10 +1712,21 @@ ipcMain.handle('convs:spawn', async (_e, req: SpawnRequest): Promise<{ conversat
   const prompt = req.prompt.trim();
   if (!prompt) throw new Error('prompt required');
   if (req.provider && req.provider !== 'claude' && req.provider !== 'codex') throw new Error('Unknown agent provider');
+  // The run contract: whatever the first skill/command named in the prompt
+  // declares for itself (/until-done, /forever), so the chat is covered from
+  // its first second; the skill's own note confirms it once it runs.
+  let row: Partial<Conversation> | undefined;
+  if (isRunContract(req.contract) && req.contract !== 'once') {
+    row = { contract: req.contract, contractSource: 'chip' };
+  } else {
+    const declared = contractFromPrompt(prompt, dir);
+    if (declared) row = { contract: declared, contractSource: 'skill' };
+  }
   return spawnConversation({
     dir, prompt,
     provider: req.provider,
     attachments: req.attachments, model: req.model, pinned: true, peerAware: true,
+    row,
   });
 });
 
@@ -2409,38 +2599,57 @@ ipcMain.handle('term:detach', (_e, channelId: string) => {
 });
 
 // --- Slash command / skill discovery -------------------------------------
-// Parses a one-line description from a command/skill markdown file: prefers a
-// YAML frontmatter `description:` field, otherwise falls back to the first
-// non-empty, non-heading line.
-function describeMarkdown(filePath: string): string {
+// The value of a frontmatter `contract:` key, as a run contract. Accepts
+// once | until-done | "until done" | forever, in any case; anything else is
+// treated as not declared.
+function parseContractValue(raw: string): RunContract | undefined {
+  const v = raw.trim().replace(/^["']|["']$/g, '').trim().toLowerCase().replace(/[\s_]+/g, '-');
+  return isRunContract(v) ? v : undefined;
+}
+
+// Parses a command/skill markdown file's one-line description — a YAML
+// frontmatter `description:` field, otherwise the first non-empty, non-heading
+// line — and the run contract it declares in frontmatter `contract:`, if any.
+function readMarkdownMeta(filePath: string): { description: string; contract?: RunContract } {
   let raw = '';
   try {
     raw = fs.readFileSync(filePath, 'utf8');
   } catch {
-    return '';
+    return { description: '' };
   }
   const lines = raw.split(/\r?\n/);
   // YAML frontmatter block delimited by ---
   if (lines[0]?.trim() === '---') {
+    let description: string | undefined;
+    let contract: RunContract | undefined;
     for (let i = 1; i < lines.length; i++) {
       const t = lines[i].trim();
       if (t === '---') break;
-      const m = /^description\s*:\s*(.+)$/i.exec(t);
-      if (m) return m[1].trim().replace(/^["']|["']$/g, '');
+      if (description === undefined) {
+        const m = /^description\s*:\s*(.+)$/i.exec(t);
+        if (m) { description = m[1].trim().replace(/^["']|["']$/g, ''); continue; }
+      }
+      if (contract === undefined) {
+        const c = /^contract\s*:\s*(.+)$/i.exec(t);
+        if (c) contract = parseContractValue(c[1]);
+      }
     }
-    // No description in frontmatter — use first body line after it.
-    const end = lines.indexOf('---', 1);
-    for (let i = end + 1; i < lines.length; i++) {
-      const t = lines[i].trim();
-      if (t && !t.startsWith('#')) return t;
+    if (description === undefined) {
+      // No description in frontmatter — use first body line after it.
+      description = '';
+      const end = lines.indexOf('---', 1);
+      for (let i = end + 1; i < lines.length; i++) {
+        const t = lines[i].trim();
+        if (t && !t.startsWith('#')) { description = t; break; }
+      }
     }
-    return '';
+    return contract ? { description, contract } : { description };
   }
   for (const line of lines) {
     const t = line.trim();
-    if (t && !t.startsWith('#')) return t;
+    if (t && !t.startsWith('#')) return { description: t };
   }
-  return '';
+  return { description: '' };
 }
 
 // Reads all slash commands and skills under a single `.claude` directory.
@@ -2466,7 +2675,7 @@ function readClaudeScope(claudeDir: string, scope: 'project' | 'user'): SlashCom
         out.push({
           name,
           invocation: `/${name}`,
-          description: describeMarkdown(full),
+          ...readMarkdownMeta(full),
           scope,
           kind: 'command',
           source: full,
@@ -2490,7 +2699,7 @@ function readClaudeScope(claudeDir: string, scope: 'project' | 'user'): SlashCom
     out.push({
       name: ent.name,
       invocation: `/${ent.name}`,
-      description: describeMarkdown(skillFile),
+      ...readMarkdownMeta(skillFile),
       scope,
       kind: 'skill',
       source: skillFile,
@@ -2498,6 +2707,39 @@ function readClaudeScope(claudeDir: string, scope: 'project' | 'user'): SlashCom
   }
 
   return out;
+}
+
+// This machine's commands and skills for a directory, by name.
+function localSlashCommands(dirPath: string | null): Map<string, SlashCommand> {
+  const byName = new Map<string, SlashCommand>();
+  // User scope first so project entries overwrite (shadow) same-named ones.
+  const userClaude = path.join(app.getPath('home'), '.claude');
+  for (const cmd of readClaudeScope(userClaude, 'user')) byName.set(cmd.name, cmd);
+  if (dirPath) {
+    const projectClaude = path.join(dirPath, '.claude');
+    for (const cmd of readClaudeScope(projectClaude, 'project')) byName.set(cmd.name, cmd);
+  }
+  return byName;
+}
+
+// The run contract declared by the first `/name` in a prompt that declares one.
+// Local peers only: a remote peer's skills live on its machine, and the Keeper
+// does not cover remote chats. The directory walk is skipped entirely for the
+// ordinary prompt that names no command.
+function contractFromPrompt(prompt: string, dir: TrackedDirectory): RunContract | undefined {
+  if (dir.remote) return undefined;
+  const names = Array.from(prompt.matchAll(/(?:^|\s)\/([A-Za-z0-9][\w:.-]*)/g), (m) => m[1]);
+  if (names.length === 0) return undefined;
+  try {
+    const commands = localSlashCommands(dir.path);
+    for (const name of names) {
+      const contract = commands.get(name)?.contract;
+      if (contract) return contract;
+    }
+  } catch (err) {
+    console.warn('[agentsflow][keeper] could not read skill contracts', { error: (err as Error)?.message ?? err });
+  }
+  return undefined;
 }
 
 ipcMain.handle('skills:list', async (_e, dirPath: string | null, directoryId?: string): Promise<SlashCommand[]> => {
@@ -2514,15 +2756,7 @@ ipcMain.handle('skills:list', async (_e, dirPath: string | null, directoryId?: s
       return [];
     }
   }
-  const byName = new Map<string, SlashCommand>();
-  // User scope first so project entries overwrite (shadow) same-named ones.
-  const userClaude = path.join(app.getPath('home'), '.claude');
-  for (const cmd of readClaudeScope(userClaude, 'user')) byName.set(cmd.name, cmd);
-  if (dirPath) {
-    const projectClaude = path.join(dirPath, '.claude');
-    for (const cmd of readClaudeScope(projectClaude, 'project')) byName.set(cmd.name, cmd);
-  }
-  return Array.from(byName.values()).sort((a, b) => a.name.localeCompare(b.name));
+  return Array.from(localSlashCommands(dirPath).values()).sort((a, b) => a.name.localeCompare(b.name));
 });
 
 // Every files:* / git:* handler below routes a path that belongs to a remote

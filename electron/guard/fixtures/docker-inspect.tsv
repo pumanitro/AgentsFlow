@@ -1,0 +1,43 @@
+/supabase_studio_shelly-monitor	false	shelly-monitor		2026-10-11T07:49:03.109265551Z
+/supabase_pg_meta_shelly-monitor	false	shelly-monitor		2026-10-11T07:49:02.579117301Z
+/supabase_edge_runtime_shelly-monitor	false	shelly-monitor		2026-10-01T20:32:23.565343175Z
+/supabase_storage_shelly-monitor	false	shelly-monitor		2026-10-11T07:49:02.651888218Z
+/supabase_rest_shelly-monitor	false	shelly-monitor		2026-10-11T07:49:02.648008551Z
+/supabase_realtime_shelly-monitor	false	shelly-monitor		2026-10-11T07:49:02.69928726Z
+/supabase_inbucket_shelly-monitor	false	shelly-monitor		2026-10-11T07:49:02.810683051Z
+/supabase_auth_shelly-monitor	false	shelly-monitor		2026-10-11T07:49:12.124950041Z
+/supabase_kong_shelly-monitor	false	shelly-monitor		2026-10-11T07:49:02.735985385Z
+/supabase_vector_shelly-monitor	false	shelly-monitor		2026-10-11T07:49:02.895791135Z
+/supabase_analytics_shelly-monitor	false	shelly-monitor		2026-10-11T07:49:02.598525801Z
+/supabase_db_shelly-monitor	false	shelly-monitor		2026-10-11T07:49:03.274262385Z
+/collections-api	false	vitaminology	/Users/iij/IdeaProjects/nutrable/develop/.cache	2026-10-11T07:49:02.73572776Z
+/search-api	false	vitaminology	/Users/iij/IdeaProjects/nutrable/develop/.cache	2026-10-11T07:49:03.26530351Z
+/redis	false			2026-10-11T07:49:02.662936926Z
+/customer-ui	false	vitaminology	/Users/iij/IdeaProjects/nutrable/develop/.cache	2026-10-11T07:49:02.706398718Z
+/admin-ui	false	vitaminology	/Users/iij/IdeaProjects/nutrable/develop/.cache	2026-10-11T07:49:02.705044551Z
+/consultations-api	false	vitaminology	/Users/iij/IdeaProjects/nutrable/develop/.cache	2026-10-11T07:49:02.709743385Z
+/notifications-api	false	vitaminology	/Users/iij/IdeaProjects/nutrable/develop/.cache	2026-10-11T07:49:03.06913126Z
+/billing-api	false	vitaminology	/Users/iij/IdeaProjects/nutrable/develop/.cache	2026-10-11T07:49:02.733199468Z
+/auth-api	false	vitaminology	/Users/iij/IdeaProjects/nutrable/develop/.cache	2026-10-11T07:49:03.311272218Z
+/vpn	false	vitaminology	/Users/iij/IdeaProjects/nutrable/develop/.cache	2026-10-11T07:49:02.713506343Z
+/api-common	false	vitaminology	/Users/iij/IdeaProjects/nutrable/develop/.cache	2026-10-11T07:49:02.903794051Z
+/notifications-api-foundation-emails	false	vitaminology	/Users/iij/IdeaProjects/nutrable/develop/.cache	2026-10-11T07:49:02.584465009Z
+/pe-db	false			2026-08-19T07:17:27.407097928Z
+/influence-demo-caddy-1	false	influence-demo	/Users/iij/IdeaProjects/influence/deploy	2026-10-11T07:49:02.575243259Z
+/influence-demo-backend-1	false	influence-demo	/Users/iij/IdeaProjects/influence/deploy	2026-10-11T07:49:02.586739634Z
+/influence-demo-migrator-1	false	influence-demo	/Users/iij/IdeaProjects/influence/deploy	2026-08-10T15:19:04.204559345Z
+/influence-demo-redis-1	false	influence-demo	/Users/iij/IdeaProjects/influence/deploy	2026-10-11T07:49:02.656609093Z
+/influence-demo-postgres-1	false	influence-demo	/Users/iij/IdeaProjects/influence/deploy	2026-10-11T07:49:02.560169218Z
+/income-challenge-poc-be1-1	false	income-challenge-poc	/Users/iij/Desktop/abi/income-challenge-poc	2026-07-20T13:09:42.599261504Z
+/income-challenge-poc-be2-1	false	income-challenge-poc	/Users/iij/Desktop/abi/income-challenge-poc	2026-07-20T13:09:42.597497879Z
+/income-challenge-poc-nginx-1	false	income-challenge-poc	/Users/iij/Desktop/abi/income-challenge-poc	2026-07-20T12:36:42.589404796Z
+/income-challenge-poc-redis-1	false	income-challenge-poc	/Users/iij/Desktop/abi/income-challenge-poc	2026-07-20T12:36:46.752751381Z
+/income-challenge-poc-postgres-1	false	income-challenge-poc	/Users/iij/Desktop/abi/income-challenge-poc	2026-07-20T12:30:16.630536089Z
+/atlas-dash-db	false	dashboard	/Users/iij/IdeaProjects/atlas-of-doors/.claude/worktrees/dashboard-service/dashboard	2026-10-11T07:49:02.554301926Z
+/arrow-db-1	false	arrow	/Users/iij/IdeaProjects/arrow	2026-10-11T07:49:02.595487468Z
+/influence-postgres	false	influence	/Users/iij/IdeaProjects/influence	2026-10-11T07:49:02.593559718Z
+/influence-redis	false	influence	/Users/iij/IdeaProjects/influence	2026-10-11T07:49:02.554121051Z
+/pe-dev-db	false			2026-06-12T11:15:04.246373167Z
+/mc-db-1	false	mc	/Users/iij/IdeaProjects/mc	2026-06-12T09:29:27.369416595Z
+/case-challenge-redis	false	case-challenge	/Users/iij/IdeaProjects/case-challenge	2026-08-24T10:35:55.781192338Z
+/case-challenge-postgres	false	case-challenge	/Users/iij/IdeaProjects/case-challenge	2026-06-03T09:14:44.782874011Z

@@ -37,6 +37,7 @@ const canOpen = (c: Conversation | undefined | null): boolean =>
 const NotesPanel = dynamic(() => import('../components/NotesPanel'), { ssr: false });
 const UsagePanel = dynamic(() => import('../components/UsagePanel'), { ssr: false });
 const AccountsPanel = dynamic(() => import('../components/AccountsPanel'), { ssr: false });
+const KeeperPanel = dynamic(() => import('../components/KeeperPanel'), { ssr: false });
 const PerfLauncher = dynamic(() => import('../components/PerfPanel'), { ssr: false });
 const FileEditor = dynamic(() => import('../components/FileEditor'), { ssr: false });
 
@@ -1035,7 +1036,8 @@ export default function Home() {
               same component the session sidebar uses, so Notes is always fully
               on screen here too however long the peer list or the account pool
               gets. Order is fixed by the component: Accounts (the switchable
-              pool) directly above the Usage meters it explains, then the global
+              pool) directly above the Usage meters it explains, then the Keeper
+              (the chats being kept alive), then the global
               notes shared across every peer, last and never shrunk. */}
           <DockedPanes
             columnRef={peerColumnRef}
@@ -1043,6 +1045,7 @@ export default function Home() {
             topRegionInsetRefs={peerInsetRefs}
             accounts={<AccountsPanel />}
             usage={<UsagePanel />}
+            keeper={<KeeperPanel />}
             notes={(
               <NotesPanel
                 variant="global"

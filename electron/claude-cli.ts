@@ -445,6 +445,45 @@ export async function dispatchBackground(opts: {
   return { daemonShort: m ? m[1] : null, raw: combined, code };
 }
 
+/**
+ * Bring a session whose daemon has died back as a background job, under the
+ * SAME session id: `claude --bg --resume <session-id> <prompt>`. This is the
+ * Keeper's relaunch (electron/keeper/keeper.ts) and mirrors dispatchBackground
+ * down to the output it parses — the CLI answers `backgrounded · <short>` here
+ * too. Local only: the Keeper does not cover remote peers.
+ *
+ * If the session turns out to be running after all, the CLI starts a copy and
+ * says so; the caller sees that in `raw`.
+ */
+export async function resumeBackground(opts: {
+  sessionId: string;
+  cwd: string;
+  prompt: string;
+  mcpConfigPath?: string;
+  appendSystemPrompt?: string;
+  model?: string;
+}): Promise<{ daemonShort: string | null; raw: string; code: number | null }> {
+  // The prompt must stay the final positional argument.
+  const args = ['--bg', '--resume', opts.sessionId, '--permission-mode', 'bypassPermissions'];
+  if (opts.model) args.push('--model', opts.model);
+  if (opts.mcpConfigPath) args.push('--mcp-config', opts.mcpConfigPath);
+  if (opts.appendSystemPrompt) args.push('--append-system-prompt', opts.appendSystemPrompt);
+  args.push(opts.prompt);
+  // Same log-storm rule as dispatchBackground: prompt length, never the prompt,
+  // and the multi-KB system prompt is elided.
+  console.log('[agentsflow][dispatch] resuming claude in background', {
+    bin: CLAUDE_BIN,
+    cwd: opts.cwd,
+    args: args.slice(0, -1).map((a, i) => (args[i - 1] === '--append-system-prompt' ? `<${a.length} chars>` : a)),
+    promptChars: opts.prompt.length,
+  });
+  const { code, stdout, stderr } = await runCmd(args, { cwd: opts.cwd, timeoutMs: 15000 });
+  const combined = stripAnsi(stdout) + '\n' + stripAnsi(stderr);
+  const m = combined.match(/backgrounded\s*·\s*([0-9a-f]{6,12})/i);
+  console.log('[agentsflow][dispatch] resume result', { code, daemonShort: m ? m[1] : null, sample: combined.trim().slice(0, 300) });
+  return { daemonShort: m ? m[1] : null, raw: combined, code };
+}
+
 // The remote twin of the spawn above. The prompt travels inside the host's
 // NDJSON channel as data (never through a remote shell), and the agent script
 // runs `claude --bg <args...> <prompt>` — so `args` is the local argv minus

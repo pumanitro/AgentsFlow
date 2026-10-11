@@ -140,6 +140,14 @@ export interface Conversation {
   // hostKey (`user@host`) of the remote peer this conversation runs on.
   // Undefined = this machine. Every CLI/PTY/status call routes on it.
   host?: string;
+  // The run contract: how far this chat is meant to go on its own. Undefined
+  // reads as 'once' (see renderer/lib/contract.ts `effectiveContract`).
+  contract?: RunContract;
+  // Who chose the contract — the composer chip, a skill's frontmatter, an
+  // inference from the transcript, or nobody.
+  contractSource?: ContractSource;
+  // The Keeper's own bookkeeping for this chat (see electron/keeper/keeper.ts).
+  keeper?: KeeperConvState;
 }
 
 export interface PinnedDivider {
@@ -192,6 +200,9 @@ export interface SlashCommand {
   kind: 'command' | 'skill';
   // Absolute path to the backing file.
   source: string;
+  // The run contract a skill/command declares in its frontmatter `contract:`
+  // (once | until-done | forever). Absent when it declares none.
+  contract?: RunContract;
 }
 
 export interface SpawnRequest {
@@ -202,6 +213,9 @@ export interface SpawnRequest {
   // Model alias passed straight to `claude --model` (e.g. 'fable', 'opus',
   // 'sonnet', 'haiku'). Omitted ⇒ the session uses the user's configured default.
   model?: string;
+  // The composer chip's pick. Omitted ⇒ the main process falls back to the
+  // contract of the first `/skill` named in the prompt, else none.
+  contract?: RunContract;
 }
 
 export interface SpawnResult {
@@ -795,6 +809,16 @@ export interface AgentsFlowApi {
    */
   onConversationsPatched?: (cb: (changed: Conversation[]) => void) => () => void;
 
+  // Run contracts, the Keeper and the memory guard. All OPTIONAL like
+  // onConversationsPatched: a running app's preload can predate them, so every
+  // renderer call site uses `api().x?.()` and degrades until restart.
+  setConversationContract?: (id: string, contract: RunContract) => Promise<void>; // 'convs:setContract'
+  getKeeperSnapshot?: () => Promise<KeeperSnapshot>; // 'keeper:snapshot'
+  onKeeperUpdated?: (cb: (s: KeeperSnapshot) => void) => () => void; // push 'keeper:updated'
+  getGuardSnapshot?: () => Promise<GuardSnapshot>; // 'guard:snapshot'
+  setGuardPins?: (patch: { mode?: GuardPins['mode']; idleMinutes?: number; keep?: { name: string; keep: boolean } }) => Promise<GuardPins>; // 'guard:setPins'
+  onGuardUpdated?: (cb: (s: GuardSnapshot) => void) => () => void; // push 'guard:updated'
+
   // Fired when something (e.g. the `open_file` MCP tool) asks the app to bring a
   // file up in its file view. The renderer responds by navigating to that
   // directory's Preview page and opening the file.
@@ -1001,6 +1025,60 @@ export interface SearchResult {
   truncated: boolean;
   // Set when the query itself was invalid (e.g. a malformed regex).
   error?: string;
+}
+
+// ---- Run contracts & the Keeper -------------------------------------------
+export type RunContract = 'once' | 'until-done' | 'forever';
+export type ContractSource = 'chip' | 'skill' | 'inferred' | 'default';
+export type KeeperCause = 'stopped-short' | 'daemon-dead' | 'memory-deferred' | 'killed-workload' | 'rate-limit';
+
+export interface KeeperConvState {
+  nudgesAt: number[];            // epoch ms of nudges+relaunches in the trailing hour (pruned by the Keeper)
+  lastNudgeAt?: string;          // ISO
+  lastNudgeReason?: KeeperCause;
+  stalled?: string | null;       // set while the Keeper deliberately does NOT nudge: "asked you a question at 09:41"
+  keptAlive?: boolean;           // contract unmet and the Keeper is actively keeping it alive
+  completedAt?: string;          // until-done reached its finish line
+}
+
+export interface KeeperItem {
+  conversationId: string; title: string; peer: string;
+  contract: RunContract; contractSource: ContractSource;
+  status: 'kept-alive' | 'stalled' | 'waiting-memory' | 'relaunching' | 'idle';
+  detail: string; lastNudgeAt: string | null; lastNudgeReason: KeeperCause | null; nudgesLeftThisHour: number;
+}
+export interface KeeperDeferredItem {
+  file: string; sessionId: string; conversationId: string | null; title: string | null;
+  cwd: string; at: string; what: string; waitingFor: 'memory' | 'idle-chat';
+}
+export interface KeeperRecent { at: string; conversationId: string; title: string; cause: KeeperCause; ok: boolean; detail: string }
+export interface KeeperSnapshot {
+  at: string; enabled: boolean; paused: string | null;
+  items: KeeperItem[]; deferred: KeeperDeferredItem[]; recent: KeeperRecent[];   // recent: newest first, max 20
+}
+
+// ---- Memory guard ----------------------------------------------------------
+export type MemLevel = 'ok' | 'warn' | 'closed' | 'critical' | 'unknown';
+export interface MemSample { at: number; pressure: 1 | 2 | 4 | null; compressedGB: number; swapUsedGB: number; availGB: number | null }
+export type ContainerVerdict = 'keep-pinned' | 'keep-live-chat' | 'keep-active' | 'keep-autoremove' | 'keep-young' | 'stop-candidate' | 'stopping' | 'stopped-by-guard';
+export interface GuardContainerRow {
+  name: string; project: string | null; projectDir: string | null; autoRemove: boolean; pinned: boolean; running: boolean;
+  cpuPct: number | null; memMB: number | null; publishedPorts: number[]; establishedConns: number;
+  lastActiveAt: string | null; idleMinutes: number | null; verdict: ContainerVerdict; note: string; stoppingAt?: string;
+}
+export interface KillLogEntry {
+  at: string; by: 'peersflow-guard' | 'memguard-system'; kind: 'container' | 'process-group';
+  name: string; dry: boolean; reason: string;
+  pgid?: number; family?: string; cmd?: string; cwd?: string; projectDir?: string; claudePid?: number; sessionId?: string;
+}
+export interface GuardPins { version: 1; keep: string[]; mode: 'dry-run' | 'live'; idleMinutes: number }
+export interface GuardSnapshot {
+  at: string; level: MemLevel; levelSince: string; reasons: string[]; sample: MemSample | null; swapGrowthGBper5min: number | null;
+  mode: 'dry-run' | 'live'; idleMinutes: number; admissionClosed: boolean; containers: GuardContainerRow[]; recent: KillLogEntry[];
+}
+export interface DeferredMarker {
+  schema: 1; at: string; sessionId: string; cwd: string; transcriptPath: string; toolName: string; what: string;
+  subagentType?: string; model?: string; reason: string; availGB: number | null; state: string;
 }
 
 declare global {
