@@ -38,7 +38,6 @@ const canOpen = (c: Conversation | undefined | null): boolean =>
 const NotesPanel = dynamic(() => import('../components/NotesPanel'), { ssr: false });
 const UsagePanel = dynamic(() => import('../components/UsagePanel'), { ssr: false });
 const AccountsPanel = dynamic(() => import('../components/AccountsPanel'), { ssr: false });
-const KeeperPanel = dynamic(() => import('../components/KeeperPanel'), { ssr: false });
 const PerfLauncher = dynamic(() => import('../components/PerfPanel'), { ssr: false });
 const FileEditor = dynamic(() => import('../components/FileEditor'), { ssr: false });
 const RoutinesView = dynamic(() => import('../components/routines/RoutinesView'), { ssr: false });
@@ -873,10 +872,6 @@ export default function Home() {
             <rect x="350" y="620" width="226" height="64" rx="32" ry="32" fill="#ff7847" fillOpacity="0.52" />
           </svg>
           <span className="font-semibold text-sm tracking-tight">Peers Flow</span>
-          <div role="tablist" aria-label="Main view" className={`ml-3 ${PILL.wrap}`} style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}>
-            <button role="tab" aria-selected={view !== 'routines'} onClick={() => setView('home')} className={view !== 'routines' ? PILL.on : PILL.off} title="Pinned conversations">Chat</button>
-            <button role="tab" aria-selected={view === 'routines'} onClick={() => setView('routines')} className={view === 'routines' ? PILL.on : PILL.off} title="Chats that start themselves on a schedule">Routines</button>
-          </div>
           {bridgeHealth && (
             <button
               onClick={() => setMcpOpen(true)}
@@ -899,6 +894,12 @@ export default function Home() {
         </div>
         )}
         <div className="flex items-center gap-2" style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}>
+          {view !== 'stats' && (
+            <div role="tablist" aria-label="Main view" className={PILL.wrap}>
+              <button role="tab" aria-selected={view !== 'routines'} onClick={() => setView('home')} className={view !== 'routines' ? PILL.on : PILL.off} title="Pinned conversations">Chat</button>
+              <button role="tab" aria-selected={view === 'routines'} onClick={() => setView('routines')} className={view === 'routines' ? PILL.on : PILL.off} title="Chats that start themselves on a schedule">Routines</button>
+            </div>
+          )}
           <div className="relative">
             <button
               onClick={() => setMenuOpen((o) => !o)}
@@ -1045,8 +1046,7 @@ export default function Home() {
               same component the session sidebar uses, so Notes is always fully
               on screen here too however long the peer list or the account pool
               gets. Order is fixed by the component: Accounts (the switchable
-              pool) directly above the Usage meters it explains, then the Keeper
-              (the chats being kept alive), then the global
+              pool) directly above the Usage meters it explains, then the global
               notes shared across every peer, last and never shrunk. */}
           <DockedPanes
             columnRef={peerColumnRef}
@@ -1054,7 +1054,6 @@ export default function Home() {
             topRegionInsetRefs={peerInsetRefs}
             accounts={<AccountsPanel />}
             usage={<UsagePanel />}
-            keeper={<KeeperPanel />}
             notes={(
               <NotesPanel
                 variant="global"
