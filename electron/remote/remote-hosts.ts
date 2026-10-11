@@ -13,6 +13,7 @@ import { hostKeyOf } from '../../shared/remote';
 import type { FileEntry, GitStatusResult, RemoteHostState, RemoteHostStatus, RemotePeerCache, RemotePeerSpec, SearchOptions, SearchResult, SlashCommand, TrackedDirectory } from '../../shared/types';
 import * as remoteExec from './remote-exec';
 import type { RunResult } from './remote-exec';
+import { repairLink, type LinkRepair } from './link-repair';
 
 export interface RemoteHostsDeps {
   instanceId: string;                              // app.getPath('userData')
@@ -38,6 +39,8 @@ export interface RemoteTransport {
   cancelReverseForward: (spec: RemotePeerSpec, instanceId: string, remoteSock: string, localSock: string) => Promise<RunResult>;
   masterAlive: (spec: RemotePeerSpec, instanceId: string) => Promise<boolean>;
   closeMaster: (spec: RemotePeerSpec, instanceId: string) => Promise<void>;
+  // Brings the local network link under ssh back up when it is what failed.
+  repairLink?: (spec: RemotePeerSpec) => Promise<LinkRepair>;
 }
 
 const realTransport: RemoteTransport = {
@@ -48,6 +51,7 @@ const realTransport: RemoteTransport = {
   cancelReverseForward: remoteExec.cancelReverseForward,
   masterAlive: remoteExec.masterAlive,
   closeMaster: remoteExec.closeMaster,
+  repairLink,
 };
 
 // Shipped to `<home>/.peersflow/bundles/<sha1 of contents>/` once, marked by
@@ -516,10 +520,23 @@ export class RemoteHosts {
         if (!live()) return;
       }
       // (1) Probe before trusting anything; this also starts the master.
-      const probe = await this.transport.run(spec, id, 'echo ok', { timeoutMs: 30_000 });
+      const runProbe = () => this.transport.run(spec, id, 'echo ok', { timeoutMs: 30_000 });
+      const probeOk = (r: RunResult) => r.code === 0 && r.stdout.trim() === 'ok';
+      let probe = await runProbe();
       if (!live()) return;
-      if (probe.code !== 0 || probe.stdout.trim() !== 'ok') {
-        throw new Error(probe.timedOut ? 'ssh probe timed out' : (probe.stderr.trim() || `ssh exited ${probe.code}`));
+      if (!probeOk(probe)) {
+        // ssh's own message for a dead Tailscale daemon is "Could not resolve
+        // hostname"; fix the link when that is the cause, or name it.
+        const repair = await this.transport.repairLink?.(spec).catch(() => undefined);
+        if (!live()) return;
+        if (repair?.repaired) {
+          probe = await runProbe();
+          if (!live()) return;
+        }
+        if (!probeOk(probe)) {
+          const why = probe.timedOut ? 'ssh probe timed out' : (oneLine(probe.stderr) || `ssh exited ${probe.code}`);
+          throw new Error(repair?.note ? `${repair.note}: ${why}` : why);
+        }
       }
       // (2) Where things live on that machine.
       const where = await this.transport.run(spec, id, `printf '%s\\n%s\\n' "$HOME" "$(hostname)"`);

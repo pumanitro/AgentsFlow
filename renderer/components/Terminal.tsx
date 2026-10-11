@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { api } from '../lib/ipc';
 import { createPathLinkProvider } from '../lib/path-links';
 import { cleanTerminalCopy, type CopyRow } from '../../shared/terminal-copy';
+import type { RemoteHostStatus } from '../../shared/types';
 
 interface Props {
   conversationId?: string;
@@ -11,6 +12,8 @@ interface Props {
   // Short machine name for the "Connecting to …" overlay shown while a remote
   // chat waits for its host.
   remoteHostLabel?: string;
+  // The host's key, so that overlay can show why the link is not up yet.
+  remoteHostKey?: string;
   shellId?: string;
   shellCwd?: string;
   // Directory that relative paths in the terminal output are resolved against
@@ -41,7 +44,7 @@ interface XtermViewport {
   syncScrollArea: (immediate?: boolean) => void;
 }
 
-export default function Terminal({ conversationId, remote = false, remoteHostLabel, shellId, shellCwd, baseDir, onExit, autoFocus = true, followOnOpen = false }: Props) {
+export default function Terminal({ conversationId, remote = false, remoteHostLabel, remoteHostKey, shellId, shellCwd, baseDir, onExit, autoFocus = true, followOnOpen = false }: Props) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   // Read fresh inside the link provider so a later prop change is picked up
   // without rebuilding the xterm instance.
@@ -55,6 +58,20 @@ export default function Terminal({ conversationId, remote = false, remoteHostLab
   const [termGen, setTermGen] = useState(0);
   // True while a remote chat's attach is waiting for its host to connect.
   const [connecting, setConnecting] = useState(false);
+  // Why the remote host is not reachable yet, in its own words; null while fine.
+  const [linkError, setLinkError] = useState<string | null>(null);
+  useEffect(() => {
+    if (!connecting || !remoteHostKey) { setLinkError(null); return; }
+    const a = api();
+    let alive = true;
+    const apply = (hosts: RemoteHostStatus[]) => {
+      const h = hosts.find((x) => x.hostKey === remoteHostKey);
+      if (alive) setLinkError(h && h.state !== 'ready' && h.error ? h.error : null);
+    };
+    a.listRemoteHosts?.().then(apply).catch(() => undefined);
+    const off = a.onRemoteHostsUpdated?.(apply);
+    return () => { alive = false; off?.(); };
+  }, [connecting, remoteHostKey]);
   const onExitRef = useRef<typeof onExit>(onExit);
   onExitRef.current = onExit;
   const followOnOpenRef = useRef(followOnOpen);
@@ -572,7 +589,18 @@ export default function Terminal({ conversationId, remote = false, remoteHostLab
         <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-bg/90 text-sm text-muted" role="status" aria-live="polite">
           <span className="inline-block w-6 h-6 rounded-full border-2 border-border border-t-accent animate-spin" aria-hidden />
           <span>Connecting to <span className="text-text font-medium">{remoteHostLabel || 'the remote machine'}</span>…</span>
-          <span className="text-xs">Opening the ssh link and starting the session there. This takes a few seconds after launch.</span>
+          {linkError ? (
+            <>
+              <span className="max-w-xl px-4 text-center text-xs text-text break-words" role="alert">Not connected yet: {linkError}</span>
+              <span className="text-xs">Still retrying.</span>
+              <button
+                onClick={() => { if (remoteHostKey) api().reconnectRemoteHost?.(remoteHostKey).catch(() => undefined); }}
+                className="px-3 py-1 text-[11px] uppercase tracking-wider rounded-md border border-border bg-panel text-muted hover:text-text hover:bg-panel2"
+              >Retry now</button>
+            </>
+          ) : (
+            <span className="text-xs">Opening the ssh link and starting the session there. This takes a few seconds after launch.</span>
+          )}
         </div>
       )}
     </div>
