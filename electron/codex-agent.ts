@@ -1,11 +1,16 @@
 import { execFile } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
+import * as path from 'node:path';
 import { CodexAccountReader } from './codex-account';
 import { agentEnvironment } from './cli-environment';
+import { pinnedCodexCli } from './codex-cli';
 import type { CodexModel, Conversation } from '../shared/types';
 import type { CodexEntry, CodexReply, CodexRequest, CodexSnapshot } from '../shared/codex';
 import { CodexRpc, WireObject } from './codex-protocol';
 import { codexHistoryText } from './handover';
+import { CODEX_DEFAULT_APPROVAL_POLICY, CODEX_DEFAULT_SANDBOX } from './codex-permissions';
+
+export { CODEX_DEFAULT_APPROVAL_POLICY, CODEX_DEFAULT_SANDBOX } from './codex-permissions';
 
 /** How the app-server words "you are out of quota", in any of its shapes. */
 const LIMIT_MESSAGE = /rate.?limit|usage limit|quota|too many requests|429/i;
@@ -19,16 +24,6 @@ export const CODEX_SWITCHED = 'Codex account switched — reopen to continue';
 const HANDOVER_NOTE = 'Forked from Claude Code — that conversation was passed to Codex as context.';
 
 /**
- * Spawn defaults for a thread this app starts. Codex parks a turn forever at
- * `waitingOnApproval` while nobody is connected, so an unattended run must not
- * be able to ask — the same reason Claude conversations here run `--bg` in
- * bypass mode. The sandbox is what keeps that safe. `deps.options(conv)`
- * overrides both, so an attended conversation can still ask for approvals.
- */
-export const CODEX_DEFAULT_APPROVAL_POLICY = 'never';
-export const CODEX_DEFAULT_SANDBOX = 'workspace-write';
-
-/**
  * `thread/resume` fails with `no rollout found` until the thread's first turn
  * has written its rollout file, so a thread published between `thread/start`
  * and its first turn cannot be rejoined yet. Mutable so tests need not wait.
@@ -37,6 +32,14 @@ export const RESUME_RETRY = { attempts: 5, delayMs: 2_000 };
 
 /** The app-server's own words for a thread that was never given a turn. */
 const NO_ROLLOUT = /no rollout found/i;
+
+/**
+ * How `thread/turns/list` refuses a thread that exists but has never been given
+ * a first user message: `thread <id> is not materialized yet; thread/turns/list
+ * is unavailable before first user message`. It is an answer — "no turns" — not
+ * a failure to answer.
+ */
+const NOT_MATERIALIZED = /not materialized yet/i;
 
 /**
  * How the app-server refuses a method it does not have. It answers -32600 with
@@ -49,6 +52,12 @@ const METHOD_ABSENT = /unknown (variant|method)|method not found|unsupported|exp
 export const SETTLED_STATES = new Set(['done', 'error', 'stopped']);
 /** Row states that mean "a turn was in flight when we last looked". */
 const LIVE_STATES = new Set(['working', 'starting', 'active', 'needs-input', 'blocked']);
+/**
+ * The subset of those that can only come from a turn the server is running
+ * right now — unlike `starting`, which this app writes onto a row before the
+ * thread even exists. Nothing inconclusive may paint over these.
+ */
+const TURN_IN_FLIGHT = new Set(['working', 'active', 'needs-input', 'blocked']);
 
 const NEEDS_INPUT = 'Codex needs your input';
 
@@ -60,6 +69,14 @@ export interface ThreadStatusContext {
   /** `thread/turns/list` limit 1, newest first — only read when it can change the answer. */
   lastTurnStatus?: string;
   lastTurnError?: string;
+  /**
+   * False when the thread is known to have run nothing yet — an empty
+   * `thread/turns/list`, or its refusal to answer at all for a thread that has
+   * not been materialized by a first user message. Undefined means "not asked
+   * / could not tell", which is not the same thing and must not be read as
+   * "finished". See the `idle` branch of `mapThreadStatus`.
+   */
+  hasTurns?: boolean;
 }
 
 /**
@@ -84,6 +101,12 @@ export function mapThreadStatus(status: WireObject | undefined | null, ctx: Thre
   if (ctx.lastTurnStatus === 'failed') return { state: 'error', detail: ctx.lastTurnError || 'The last Codex turn failed' };
   if (ctx.lastTurnStatus === 'interrupted') return { state: 'stopped' };
   if (ctx.lastTurnStatus === 'completed') return { state: 'done' };
+  // A thread that has run nothing has finished nothing. `thread/start`
+  // broadcasts `thread/started` with status idle, and that arrives while the
+  // row is still `starting`/`working` from the send that created it — reading
+  // it as an ending is what painted a brand-new chat's dot green for the whole
+  // of its first turn.
+  if (ctx.hasTurns === false) return null;
   if (ctx.stored && SETTLED_STATES.has(ctx.stored)) return null; // Already settled; idle adds nothing.
   if (ctx.stored && LIVE_STATES.has(ctx.stored)) return { state: 'done' }; // It ended while we were away.
   return { state: 'idle' };
@@ -115,10 +138,15 @@ export function approvalResult(method: string, params: WireObject, reply: CodexR
  * `thread/queue/add`; replaced wholesale in tests rather than mocked per call.
  */
 export const queueCli = {
-  run: (args: string[]): Promise<void> => new Promise((resolve, reject) => {
-    execFile(process.env.CODEX_BIN || 'codex', args, { env: agentEnvironment() }, (error, _out, stderr) =>
-      error ? reject(new Error(`${error.message}${stderr ? `\n${stderr}` : ''}`)) : resolve());
-  }),
+  // `socket` names the server the message is for; its directory holds the record
+  // of the CLI that server was started with (codex-cli.ts).
+  run: async (args: string[], socket?: string): Promise<void> => {
+    const bin = socket ? (await pinnedCodexCli(path.dirname(socket))).bin : process.env.CODEX_BIN || 'codex';
+    await new Promise<void>((resolve, reject) => {
+      execFile(bin, args, { env: agentEnvironment() }, (error, _out, stderr) =>
+        error ? reject(new Error(`${error.message}${stderr ? `\n${stderr}` : ''}`)) : resolve());
+    });
+  },
 };
 
 /**
@@ -188,6 +216,8 @@ export interface Dependencies {
 export class CodexAgents {
   private closing = false;
   private restarting = false;
+  /** What a parked row says after a deliberate restart: why it has to be reopened. */
+  private restartNote = CODEX_SWITCHED;
   private sessions = new Map<string, Session>();
   private threads = new Map<string, string>();
   private loading = new Map<string, Promise<Session>>();
@@ -235,8 +265,9 @@ export class CodexAgents {
    * process. Threads are not lost — each row keeps its thread id, and the
    * reconnect that follows re-syncs them all.
    */
-  async restart(): Promise<void> {
+  async restart(note = CODEX_SWITCHED): Promise<void> {
     if (this.closing) return;
+    this.restartNote = note;
     this.restarting = true;
     this.accountReader.invalidate();
     this.models = undefined;
@@ -256,7 +287,7 @@ export class CodexAgents {
       s.snapshot.requests = []; s.rawRequests.clear();
       s.snapshot.state = 'idle'; s.snapshot.error = undefined;
       s.turnId = undefined; s.busy = false;
-      this.deps.update(id, { state: 'idle', status: 'idle', description: CODEX_SWITCHED });
+      this.deps.update(id, { state: 'idle', status: 'idle', description: this.restartNote });
       this.deps.changed(s.snapshot);
     }
     this.sessions.clear(); this.threads.clear(); this.loading.clear();
@@ -266,6 +297,17 @@ export class CodexAgents {
   hasRunningTurn(): boolean {
     for (const s of this.sessions.values()) if (s.turnId || s.busy) return true;
     return false;
+  }
+
+  /**
+   * Threads the SERVER is running a turn on, whoever started them — a delegated
+   * child or a terminal pane's turn never shows up in `sessions`. Only asks a
+   * server that is already there: this must not be what starts one.
+   */
+  async activeThreadCount(): Promise<number> {
+    await this.rpc.start();
+    const page = await this.rpc.request('thread/list', { limit: 100, excludeTurns: true });
+    return (page?.data || []).filter((row: WireObject) => row?.status?.type === 'active').length;
   }
 
   /** The models this Codex CLI offers, default first. Never throws: [] on any failure. */
@@ -403,10 +445,26 @@ export class CodexAgents {
     try {
       const page = await this.rpc.request('thread/turns/list', { threadId, limit: 1, sortDirection: 'desc' });
       const turn = page?.data?.[0];
-      return turn ? { lastTurnStatus: turn.status, lastTurnError: turn.error?.message } : {};
-    } catch {
-      return {};
+      return turn ? { hasTurns: true, lastTurnStatus: turn.status, lastTurnError: turn.error?.message } : { hasTurns: false };
+    } catch (error) {
+      // "not materialized yet" is an answer, not a failure: the thread exists
+      // and has never been given a turn. Every other error means we could not
+      // ask, which stays undefined so no ending is inferred from it either.
+      return NOT_MATERIALIZED.test((error as Error).message) ? { hasTurns: false } : {};
     }
+  }
+
+  /**
+   * True when an `idle` status has been overtaken while we were asking the
+   * server how the last turn ended: a turn is in flight now, or something more
+   * recent than this notification has already repainted the row. Painting it
+   * anyway drops "Codex finished" on top of a live turn's working dot, where it
+   * stays until the turn ends — the row reads as done for the whole turn.
+   */
+  private staleIdle(id: string, stored?: string): boolean {
+    if (this.sessions.get(id)?.turnId) return true;
+    const now = this.deps.get(id)?.state;
+    return now !== undefined && stored !== undefined && now !== stored;
   }
 
   /** Paint one thread status onto its row. Returns what was applied, or null. */
@@ -414,6 +472,7 @@ export class CodexAgents {
     let ctx: ThreadStatusContext = { stored };
     if (status?.type === 'idle' && threadId && !(stored && SETTLED_STATES.has(stored))) {
       ctx = { ...ctx, ...(await this.lastTurn(threadId)) };
+      if (this.staleIdle(id, stored)) return null;
     }
     const mapped = mapThreadStatus(status, ctx);
     if (!mapped) return null;
@@ -492,7 +551,12 @@ export class CodexAgents {
       if (p.turn.status === 'failed') this.limit(id, s, completedTurn, p.turn.error?.message);
       this.state(id, status, p.turn.error?.message);
     }
-    if (method === 'thread/name/updated' && p.threadName) this.deps.update(id, { title: p.threadName });
+    // Codex renames its own thread as the work goes on, which used to rewrite
+    // the row's title on every turn. The title belongs to the user: it is
+    // seeded from the first message and changes only when they rename it, so a
+    // generated name is taken only for a row that has no title at all and
+    // never overwrites one that does.
+    if (method === 'thread/name/updated' && p.threadName && !this.deps.get(id)?.title) this.deps.update(id, { title: p.threadName });
     if (method === 'error' && !p.willRetry) {
       this.limit(id, s, s.turnId, p.error?.message || p.message);
       this.state(id, 'error', p.error?.message || 'Codex reported an error');
@@ -553,7 +617,11 @@ export class CodexAgents {
     } finally { this.loading.delete(id); }
   }
 
-  /** Thread options, with a pending fork's seed folded into the developer instructions. */
+  /**
+   * Apply the same execution defaults to start, fork, resume and reconnect,
+   * including when reusing a daemon launched before these defaults changed.
+   * Explicit dependency options can still override them for an attended client.
+   */
   private threadOptions(conv: Conversation, handover: boolean): WireObject {
     const options: WireObject = {
       approvalPolicy: CODEX_DEFAULT_APPROVAL_POLICY, sandbox: CODEX_DEFAULT_SANDBOX,
@@ -592,7 +660,11 @@ export class CodexAgents {
       // resume response is the only status snapshot the server ever gives.
       if (await this.applyThreadStatus(id, thread.status, conv.state, thread.id)) return s;
     }
-    this.state(id, 'idle');
+    // Nothing conclusive came back. "Ready to continue" is right for a cold
+    // thread, but not on top of a row that says a turn is in flight — the
+    // status may have been dropped precisely because it was overtaken by one.
+    const live = (this.deps.get(id)?.state || '').toLowerCase();
+    if (!TURN_IN_FLIGHT.has(live)) this.state(id, 'idle');
     return s;
   }
 
@@ -671,7 +743,7 @@ export class CodexAgents {
       }
     }
     const socket = this.rpc.socketPath?.();
-    await queueCli.run(['queue', '--thread', threadId, '--message', text, ...(socket ? ['--remote', `unix://${socket}`] : [])]);
+    await queueCli.run(['queue', '--thread', threadId, '--message', text, ...(socket ? ['--remote', `unix://${socket}`] : [])], socket);
   }
 
   async stop(id: string): Promise<void> {

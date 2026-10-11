@@ -126,6 +126,26 @@ test('streamed results belong to their thread and an empty later turn cannot ret
   } finally { f.manager.close(); }
 });
 
+test('a Codex rename never rewrites a titled row, and only fills an empty one', async () => {
+  const f = fixture();
+  try {
+    await Promise.all([f.manager.send('one', 'first message'), f.manager.send('two', 'second message')]);
+    // 'one' carries the title it was created with; Codex's own name is ignored.
+    f.conversations.get('one')!.title = 'first message';
+    f.event('thread/name/updated', 'thread-1', { threadName: 'Refactor the parser' });
+    assert.equal(f.conversations.get('one')!.title, 'first message');
+    // A manual rename is just as final.
+    f.conversations.get('one')!.title = 'My own name';
+    f.event('thread/name/updated', 'thread-1', { threadName: 'Something else entirely' });
+    assert.equal(f.conversations.get('one')!.title, 'My own name');
+    // A row with no title at all still gets one, once.
+    f.event('thread/name/updated', 'thread-2', { threadName: 'Untitled work' });
+    assert.equal(f.conversations.get('two')!.title, 'Untitled work');
+    f.event('thread/name/updated', 'thread-2', { threadName: 'Renamed again' });
+    assert.equal(f.conversations.get('two')!.title, 'Untitled work');
+  } finally { f.manager.close(); }
+});
+
 test('approval requests require a response for the owning conversation', async () => {
   const f = fixture();
   try {
@@ -367,6 +387,15 @@ test('a thread status becomes a row state, and says nothing when the server is n
   assert.deepEqual(mapThreadStatus({ type: 'idle' }, { stored: 'working' }), { state: 'done' }); // Finished while we were away.
   assert.equal(mapThreadStatus({ type: 'idle' }, { stored: 'done' }), null);
   assert.deepEqual(mapThreadStatus({ type: 'idle' }, { stored: 'idle' }), { state: 'idle' });
+
+  // A thread that has run nothing has finished nothing: `thread/start` answers
+  // idle, and reading that as an ending painted a new chat "done" — a green dot
+  // — for the whole of its first turn.
+  assert.equal(mapThreadStatus({ type: 'idle' }, { stored: 'working', hasTurns: false }), null);
+  assert.equal(mapThreadStatus({ type: 'idle' }, { stored: 'starting', hasTurns: false }), null);
+  assert.equal(mapThreadStatus({ type: 'idle' }, { stored: 'idle', hasTurns: false }), null);
+  // Having turns is not itself an ending — the last turn's status still decides.
+  assert.deepEqual(mapThreadStatus({ type: 'idle' }, { stored: 'working', hasTurns: true }), { state: 'done' });
 });
 
 test('reconnecting resumes every pinned Codex thread, applies its status and backfills what was missed', async () => {
@@ -493,6 +522,50 @@ test('a broadcast status change reaches a row the app never resumed', async () =
   } finally { f.manager.close(); }
 });
 
+test('the thread/started broadcast cannot mark a brand-new chat done during its first turn', async () => {
+  const f = fixture();
+  try {
+    f.conversations.get('one')!.state = 'starting'; // What main.ts writes when the chat is spawned.
+    await f.manager.send('one', 'first message');
+    assert.equal(f.conversations.get('one')!.state, 'working');
+
+    // `thread/start` makes the server broadcast `thread/started` carrying
+    // `status: idle` — it reaches every client, and it used to land *after*
+    // send() had painted the row working.
+    f.event('thread/started', 'thread-1', { thread: { id: 'thread-1', status: { type: 'idle' } } });
+    await settle();
+    assert.equal(f.conversations.get('one')!.state, 'working'); // Still blue, not "Codex finished".
+
+    // The same, for a server that refuses to list the turns of a thread whose
+    // first user message has not been recorded yet.
+    f.rpc.queued.set('thread/turns/list', [new Error('thread thread-1 is not materialized yet; thread/turns/list is unavailable before first user message')]);
+    f.event('thread/status/changed', 'thread-1', { status: { type: 'idle' } });
+    await settle();
+    assert.equal(f.conversations.get('one')!.state, 'working');
+
+    // The turn's own completion is still what ends it.
+    f.event('turn/completed', 'thread-1', { turn: { status: 'completed', items: [] } });
+    assert.equal(f.conversations.get('one')!.state, 'done');
+  } finally { f.manager.close(); }
+});
+
+test('an idle status overtaken while we ask how the last turn ended is dropped', async () => {
+  const f = fixture();
+  try {
+    pinned(f.conversations.get('one')!, 'thread-x', 'idle');
+    // The previous turn really did complete — but a new one starts while
+    // `thread/turns/list` is in flight, which is the whole race: the answer is
+    // about the turn before the one now running.
+    f.rpc.queued.set('thread/turns/list', [() => {
+      f.conversations.get('one')!.state = 'working';
+      return { data: [{ status: 'completed' }] };
+    }]);
+    f.event('thread/status/changed', 'thread-x', { status: { type: 'idle' } });
+    await settle();
+    assert.equal(f.conversations.get('one')!.state, 'working');
+  } finally { f.manager.close(); }
+});
+
 test('opening a row mid-turn no longer relabels a working thread as idle', async () => {
   const f = fixture();
   try {
@@ -569,12 +642,54 @@ test('closing the app gives up the connection, not the work in flight', async ()
   assert.notEqual(conv.description, 'App closed. Reopen to continue.');
 });
 
-test('spawn defaults keep an unattended thread from parking on an approval prompt', async () => {
-  const f = fixture({ options: () => ({ developerInstructions: 'house rules' }) });
+const defaultPermissionCases: { name: string; row: Partial<Conversation>; method: string }[] = [
+  { name: 'new UI chat', row: {}, method: 'thread/start' },
+  { name: 'delegated peer', row: { delegatedByConversationId: 'parent' }, method: 'thread/start' },
+  { name: 'Codex fork', row: { forkFromSessionId: 'source-thread' }, method: 'thread/fork' },
+  { name: 'Claude handover', row: { handover: forkedFromClaude(), forkFromSessionId: 'claude-session' }, method: 'thread/start' },
+  { name: 'resumed chat', row: { sessionId: 'existing-thread' }, method: 'thread/resume' },
+];
+
+for (const { name, row, method } of defaultPermissionCases) {
+  test(`${name} defaults to full access without command approvals`, async () => {
+    const f = fixture({ options: () => ({ developerInstructions: 'house rules' }) });
+    try {
+      Object.assign(f.conversations.get('one')!, row);
+      await f.manager.send('one', 'a');
+      const launch = f.rpc.calls.find((c) => c.method === method)!;
+      assert.ok(launch, `expected ${method}`);
+      assert.equal(launch.params.approvalPolicy, 'never');
+      assert.equal(launch.params.sandbox, 'danger-full-access');
+      assert.equal(launch.params.developerInstructions, 'house rules');
+      // The first turn must inherit the thread's settings, without downgrading them.
+      const turn = f.rpc.calls.find((c) => c.method === 'turn/start')!;
+      assert.equal(turn.params.approvalPolicy, undefined);
+      assert.equal(turn.params.sandboxPolicy, undefined);
+    } finally { f.manager.close(); }
+  });
+}
+
+test('reconnecting to an existing daemon reasserts the full-access thread defaults', async () => {
+  const f = fixture({ options: () => ({}) });
+  try {
+    pinned(f.conversations.get('one')!, 'thread-live');
+    f.rpc.statuses.set('thread-live', { type: 'active', activeFlags: [] });
+    f.rpc.emit('connected');
+    await until(() => f.statuses.length > 0, 'the thread to rejoin');
+    const resume = f.rpc.calls.find((c) => c.method === 'thread/resume')!;
+    assert.equal(resume.params.approvalPolicy, 'never');
+    assert.equal(resume.params.sandbox, 'danger-full-access');
+    assert.equal(f.conversations.get('one')!.state, 'working');
+    assert.equal(f.rpc.calls.some((c) => c.method === 'turn/interrupt'), false);
+  } finally { f.manager.close(); }
+});
+
+test('explicit thread permission overrides remain supported', async () => {
+  const f = fixture();
   try {
     await f.manager.send('one', 'a');
     const start = f.rpc.calls.find((c) => c.method === 'thread/start')!;
-    assert.equal(start.params.approvalPolicy, 'never');
+    assert.equal(start.params.approvalPolicy, 'on-request');
     assert.equal(start.params.sandbox, 'workspace-write');
   } finally { f.manager.close(); }
 });

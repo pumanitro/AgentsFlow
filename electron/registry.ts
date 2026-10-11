@@ -46,7 +46,14 @@ export interface PeerInfo {
   hasProjectMcp: boolean;
   // The slash commands / skills this peer exposes under its own `.claude`.
   skills: PeerSkill[];
+  // Set for a peer on another machine. Everything above then comes from the
+  // persisted remoteCache, because its path means nothing on this machine.
+  remote?: { hostKey: string; hostname: string };
 }
+
+// Who the receiving session itself is, so a prompt can tell it which machine
+// and peer it runs on (a remote session otherwise assumes it is on the laptop).
+export interface SelfInfo { hostKey: string; hostname: string; dir: string; displayName: string }
 
 export interface Registry {
   generatedAt: string;
@@ -99,7 +106,7 @@ export const TOOL_DEFS = [
     name: 'open_file',
     title: 'Open a file in Peers Flow',
     description:
-      'Open a file in the Peers Flow desktop app so the user can see it: the app switches to its file view ("Preview" mode) and displays the file. Use this whenever the user asks you to open / show / pull up / display a file in Peers Flow. By default the file is opened in the peer this session is rooted in; pass `directory` to open it in a different peer. The path may be absolute or relative to that peer\'s directory. PDFs are handed to the system\'s default PDF application when one is available (and only previewed in-app as a fallback).',
+      'USER REQUEST REQUIRED: Call this tool ONLY when the user explicitly asks to open or display the specific file in the IDE or a viewer. Default file delivery is a clickable link/URL or an absolute path in chat. Creating, editing, reading, reviewing, or finishing work on a file does NOT authorize opening it. Never call this as an automatic final step or just to present a result; return the link/path without asking to open it. This tool switches the Peers Flow desktop app to its file view ("Preview" mode) and displays the file. By default the file is opened in the peer this session is rooted in; pass `directory` to open it in a different peer. The path may be absolute or relative to that peer\'s directory. PDFs are handed to the system\'s default PDF application when one is available (and only previewed in-app as a fallback).',
     usage: 'open_file({ file, directory?, line? })',
     inputSchema: {
       type: 'object',
@@ -118,6 +125,41 @@ export const TOOL_DEFS = [
         },
       },
       required: ['file'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'whoami',
+    title: 'Who and where am I',
+    description:
+      'Return this session\'s identity as Peers Flow sees it: the machine it runs on (hostname / ssh host key or "local"), the peer directory, the conversation id, the Claude session id and background job id. Call it when asked where or what you are running as, or before reporting a path so the user knows which machine it is on.',
+    usage: 'No arguments.',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+  },
+  {
+    name: 'add_remote_peer',
+    title: 'Add a remote peer',
+    description:
+      'Track a directory on ANOTHER machine (reached over ssh) as a Peers Flow peer, exactly like the app\'s "Add remote peer" form. Peers Flow first tests the connection (hostname, claude and node versions, whether the directory exists), then saves the peer, connects to the host and waits until it is ready. Sessions there run with bypassPermissions and use THAT machine\'s own Claude login. Only call this when the user asks to add/connect a remote peer. Pass `test_only: true` to just test the connection without saving anything.',
+    usage: 'add_remote_peer({ user, host, path, ssh_args?, display_name?, env_file?, claude_bin?, node_bin?, test_only? })',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        user: { type: 'string', description: 'ssh login on the remote machine, e.g. "patryk".' },
+        host: { type: 'string', description: 'ssh host name or IP, e.g. "theos-mac-studio.tail4a0f3d.ts.net".' },
+        path: { type: 'string', description: 'Absolute path of the directory on the remote machine.' },
+        ssh_args: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Extra ssh arguments, one per array item, e.g. ["-o","IdentitiesOnly=yes","-i","/Users/demo/.ssh/id_ed25519","-o","ProxyCommand=/opt/homebrew/bin/tailscale --socket=… nc %h %p"]. Binaries inside ProxyCommand need absolute paths.',
+        },
+        display_name: { type: 'string', description: 'Optional name for the peer card.' },
+        env_file: { type: 'string', description: 'Optional file on the remote sourced before every command (e.g. "~/.config/peersflow/env" holding CLAUDE_CODE_OAUTH_TOKEN).' },
+        claude_bin: { type: 'string', description: 'claude binary on the remote. Default "claude".' },
+        node_bin: { type: 'string', description: 'node binary on the remote. Default "node".' },
+        test_only: { type: 'boolean', description: 'Only test the connection; save nothing.' },
+      },
+      required: ['user', 'host', 'path'],
       additionalProperties: false,
     },
   },
@@ -205,6 +247,25 @@ export function readProjectSkills(dirPath: string): PeerSkill[] {
 }
 
 export function buildPeerInfo(dir: TrackedDirectory): PeerInfo {
+  if (dir.remote) {
+    // Never stat a remote path locally: a same-named local dir would lie.
+    // No cache yet (host never connected) reads as "missing, no skills".
+    // hostKey is spelled out rather than imported so this module stays
+    // shippable to the remote host as a single file.
+    const c = dir.remoteCache;
+    return {
+      id: dir.id,
+      displayName: dir.displayName,
+      path: dir.path,
+      exists: c?.exists ?? false,
+      hasClaudeMd: c?.hasClaudeMd ?? false,
+      hasAgentsMd: c?.hasAgentsMd ?? false,
+      hasCodexConfig: c?.hasCodexConfig ?? false,
+      hasProjectMcp: c?.hasProjectMcp ?? false,
+      skills: c ? c.skills.slice(0, MAX_SKILLS_PER_PEER) : [],
+      remote: { hostKey: `${dir.remote.user}@${dir.remote.host}`, hostname: c?.hostname ?? dir.remote.host },
+    };
+  }
   let exists = false;
   try {
     exists = fs.statSync(dir.path).isDirectory();
@@ -254,9 +315,22 @@ function skillLine(p: PeerInfo): string {
  * The block injected into every spawned session's system prompt so it boots up
  * aware of its peers and knows it can delegate. Kept compact on purpose.
  */
-export function renderBootstrapPrompt(reg: Registry): string {
+// `self` is set only for a session running on a remote peer's machine: without
+// it that session assumes it shares the laptop's filesystem and hands back
+// paths nobody on the laptop can open.
+export function renderBootstrapPrompt(reg: Registry, self?: SelfInfo): string {
   const lines: string[] = [];
   lines.push('# Peers Flow — your peers & delegation');
+  lines.push('');
+  lines.push('## File delivery — links by default; opening requires an explicit user request');
+  lines.push('');
+  lines.push('- **Return a clickable file link/URL or an absolute file path in chat by default. Keep the user in chat.**');
+  lines.push(
+    `- **NEVER call \`${qualifiedToolName('open_file')}\` unless the user explicitly asks to open or display that specific file in the IDE or a viewer.** A request to create, edit, read, inspect, review, or deliver a file is not permission to open it on the user's screen. Reading files internally to do the work is fine.`,
+  );
+  lines.push('- Never open a file automatically when finishing a task, presenting an artifact, or reporting changes. A request for a link, URL, or path must be answered in chat.');
+  lines.push('- Without an explicit request to open the file, just provide the link/path; do not add a routine permission question. Do not bypass this rule with shell commands, another tool, or UI automation.');
+  lines.push('- This rule also applies to delegated peers. Pass along permission to open a file only when the user has explicitly given it for that file.');
   lines.push('');
   lines.push(
     'This agent session runs inside **Peers Flow**, which tracks several project directories. In Peers Flow each tracked directory is a **peer**: a sibling agent rooted in its own directory, with its own skills and MCP connections (Slack, Gmail, …). A peer is NOT one of your subagents — it is a lateral collaborator you can delegate to and rely on.',
@@ -269,10 +343,20 @@ export function renderBootstrapPrompt(reg: Registry): string {
     for (const p of reg.peers) {
       const mcp = p.hasProjectMcp ? ' · has its own MCP connections' : '';
       const missing = p.exists ? '' : ' · ⚠️ path missing';
-      lines.push(`- **${p.displayName}** — \`${p.path}\`${skillLine(p)}${mcp}${missing}`);
+      // A remote peer's path lives on another machine; say which, or the
+      // reader treats it as a local path and goes looking for it.
+      const where = p.remote ? ` on ${p.remote.hostname} (remote peer, ssh \`${p.remote.hostKey}\`)` : '';
+      lines.push(`- **${p.displayName}** — \`${p.path}\`${where}${skillLine(p)}${mcp}${missing}`);
     }
   }
   lines.push('');
+  if (self) {
+    lines.push('## Where you are running');
+    lines.push(
+      `You are running on **${self.hostname}** (ssh \`${self.hostKey}\`), inside the remote peer **${self.displayName}** at \`${self.dir}\`. Your working tree, your \`~/.claude\` skills and every path you print are on THAT machine. The Peers Flow app, the delegation bridge and every peer not marked "remote" live on the user's laptop; paths you receive from them are laptop paths. Call \`${qualifiedToolName('whoami')}\` for your exact ids when you need to report where you are.`,
+    );
+    lines.push('');
+  }
   lines.push('## How to collaborate');
   lines.push('Before project work, follow AGENTS.md. If the directory has only CLAUDE.md, read and follow that file as the repository guidance. Each provider uses its own configured connections; a configuration file is not proof of authentication.');
   lines.push('Directory instructions and user approvals still apply. Connections do not grant permission to send messages or change external state. Tool prefixes differ between hosts; use the peersflow tools as exposed by your runtime.');
@@ -287,7 +371,10 @@ export function renderBootstrapPrompt(reg: Registry): string {
   );
   lines.push("- Prefer delegating over reaching into another peer's files directly.");
   lines.push(
-    `- Call \`${qualifiedToolName('open_file')}\` when the user asks you to open / show / pull up / display a file — Peers Flow IS the IDE you are running inside, and this is how you open a file in it. It brings the file up in the app's file view. Defaults to the peer you're rooted in; pass \`directory\` to target another peer, and \`line\` to land on a specific line.`,
+    `- When the user asks to connect or add a directory on another machine, call \`${qualifiedToolName('add_remote_peer')}\` (user, host, absolute path, ssh options). It tests the connection first and returns the new peer's name to delegate to.`,
+  );
+  lines.push(
+    `- Only after an explicit user request to open / show / pull up / display a specific file in the IDE or a viewer, use \`${qualifiedToolName('open_file')}\`. Peers Flow is the IDE you are running inside; this tool brings the file up in its file view. Defaults to the peer you're rooted in; pass \`directory\` to target another peer, and \`line\` to land on a specific line.`,
   );
   lines.push(
     `- Never shell out to \`open -a "Peers Flow" <path>\` for this. That only raises the app window; it does not open the file. \`${qualifiedToolName('open_file')}\` is the only thing that does.`,
@@ -311,6 +398,7 @@ export function renderRegistryMarkdown(reg: Registry): string {
   for (const p of reg.peers) {
     lines.push(`## ${p.displayName}`);
     lines.push(`- path: \`${p.path}\`${p.exists ? '' : ' (⚠️ missing)'}`);
+    if (p.remote) lines.push(`- host: ${p.remote.hostname} (remote peer, ssh \`${p.remote.hostKey}\`)`);
     lines.push(`- delegate with: \`directory: "${p.displayName}"\``);
     if (p.hasProjectMcp) lines.push('- has its own MCP connections (`.mcp.json`)');
     if (p.hasClaudeMd) lines.push('- Claude instructions: `CLAUDE.md`');
@@ -339,6 +427,8 @@ export function buildDelegatePrompt(goal: string, deliverable: string): string {
     'You are being delegated a task by another Peers Flow agent (a "peer"). You share none of its context, so treat this brief as complete and self-contained.',
     '',
     'Follow AGENTS.md in your directory. If it is absent, read CLAUDE.md before doing project work.',
+    '',
+    'Deliver files as clickable links/URLs or absolute paths in your response. Do not open files in the IDE or a viewer unless this brief relays an explicit user request to open that specific file. Creating, editing, or completing a file does not grant that permission; do not ask to open it as a routine final step.',
     '',
     '## Goal',
     goal,

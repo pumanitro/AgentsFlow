@@ -8,6 +8,10 @@ import type { IPty } from 'node-pty';
 import { terminalEnvironment } from './terminal-environment';
 import { buildResumeArgs, redactResumeArgs } from './resume-args';
 import { codexResumeArgs } from './codex-resume-args';
+import { pinnedCodexCli } from './codex-cli';
+import { appendBuffer, replayText, type ReplayBuffer } from './replay-buffer';
+import { allowReattach, findChatExit, LEFT_CHAT_GRACE_MS, type ScreenWatch } from './attach-guard';
+import { getRemoteHosts } from './remote/remote-hosts';
 
 // Re-exported so the PTY layer stays the single import site for terminal argv,
 // while the builder itself lives in a module that pulls in neither `electron`
@@ -26,7 +30,13 @@ function getPty(): typeof import('node-pty') {
 }
 
 const CLAUDE_BIN = process.env.CLAUDE_BIN || 'claude';
-const CODEX_BIN = process.env.CODEX_BIN || 'codex';
+
+// The claude binary to name in a remote command line. Resolved on the remote
+// PATH (RemoteHosts prepends the peer's extraPath), so it is the peer's own
+// setting — never this machine's CLAUDE_BIN override.
+function claudeBinFor(host: string): string {
+  return getRemoteHosts()?.specFor(host)?.claudeBin ?? 'claude';
+}
 
 // ---------- node-pty callback safety ----------
 // node-pty invokes our onData/onExit callbacks from a *native* N-API
@@ -84,7 +94,10 @@ function safeSend(win: BrowserWindow, channel: string, ...args: unknown[]): void
 //    screen and a detach must not tear the TUI down under the other one.
 //    Measured (probe E4): killing the PTY is a pure detach — the thread stays
 //    loaded, keeps its in-flight turn, and other clients see no event at all.
-//    So the idle reaper reclaiming a Codex PTY costs a redraw, never a turn.
+//    So the PTY lives exactly as long as someone is watching it: the last
+//    detach kills it and the next open spawns a fresh TUI, which re-renders
+//    the complete history at the current size (see detach for why a warm
+//    replay is the wrong tool here).
 
 const env = terminalEnvironment;
 
@@ -102,11 +115,11 @@ function codexEnv(): Record<string, string> {
 interface ClaudeChannel { id: string; pty: IPty; win: BrowserWindow; sessionId: string; }
 const claudeChannels = new Map<string, ClaudeChannel>();
 
-interface ResumeSession {
+interface ResumeSession extends ReplayBuffer {
   sessionId: string;
   pty: IPty;
-  buffer: string[];
-  bufferBytes: number;
+  // A Codex TUI viewer ('codex' mode above): torn down on its last detach.
+  isCodex: boolean;
   subscribers: Map<string, ShellSubscriber>;
   lastDataAt: number;            // last time the PTY produced output
   detachedAt: number | null;     // when the last subscriber left (null while watched)
@@ -371,6 +384,11 @@ export async function attach(opts: {
   // mode, where the daemon already carries what it was spawned with.
   mcpConfigPath?: string;
   appendSystemPrompt?: string;
+  // Remote peer: hostKey to run the CLI on over `ssh -tt`, and the cwd on that
+  // machine for resume mode. The local PTY is then the ssh client; everything
+  // above it (attach-guard, replay buffers, subscribers) is unchanged.
+  host?: string;
+  remoteCwd?: string;
 }): Promise<string> {
   startPtyReaper();
   const mode = opts.mode ?? 'attach';
@@ -380,13 +398,40 @@ export async function attach(opts: {
   }
   if (mode === 'resume') return attachResume(opts);
 
-  const args = ['attach', opts.sessionId];
-  const cwd = os.homedir();
-  console.log('[agentsflow][pty] spawning', { bin: CLAUDE_BIN, args, cols: opts.cols, rows: opts.rows, cwd, mode });
   if (!(await ensurePtyCapacity(opts.win, opts.channelId, 'pty'))) return '';
+  spawnAttachViewer(opts, []);
+  return '';
+}
+
+// One `claude attach` viewer on a chat channel. Respawned in place (same
+// channel, same xterm) when the viewer leaves the chat — see attach-guard.ts.
+// Remote (`host`): the viewer is `ssh -tt … exec claude attach <id>`; a
+// re-attach asks RemoteHosts for a fresh command line, so a host that dropped
+// in between fails visibly instead of spawning a dead ssh.
+function spawnAttachViewer(
+  opts: { channelId: string; sessionId: string; cols: number; rows: number; win: BrowserWindow; host?: string },
+  reattaches: number[],
+): void {
+  let bin = CLAUDE_BIN;
+  let args = ['attach', opts.sessionId];
+  const cwd = os.homedir();
+  if (opts.host) {
+    const spec = getRemoteHosts()?.ptyCommand(opts.host, [claudeBinFor(opts.host), 'attach', opts.sessionId]);
+    if (!spec) {
+      claudeChannels.delete(opts.channelId);
+      failAttach(opts.win, opts.channelId, 'remote', new Error(`host ${opts.host} is not ready`));
+      return;
+    }
+    bin = spec.bin;
+    args = spec.args;
+    // The ssh argv is mostly connection options; the remote argv is what matters.
+    console.log('[agentsflow][pty] spawning', { bin, host: opts.host, remoteArgs: ['attach', opts.sessionId], cols: opts.cols, rows: opts.rows, cwd, mode: 'attach' });
+  } else {
+    console.log('[agentsflow][pty] spawning', { bin: CLAUDE_BIN, args, cols: opts.cols, rows: opts.rows, cwd, mode: 'attach' });
+  }
   let pty: IPty;
   try {
-    pty = getPty().spawn(CLAUDE_BIN, args, {
+    pty = getPty().spawn(bin, args, {
       name: 'xterm-256color',
       cols: Math.max(opts.cols, 20),
       rows: Math.max(opts.rows, 5),
@@ -397,31 +442,68 @@ export async function attach(opts: {
     console.error('[agentsflow][pty] spawn failed', err);
     safeSend(opts.win, 'terminal:data', opts.channelId, `\r\n\x1b[31m[pty spawn failed] ${(err as Error)?.message ?? err}\x1b[0m\r\n`);
     safeSend(opts.win, 'terminal:exit', opts.channelId);
-    return '';
+    claudeChannels.delete(opts.channelId);
+    return;
   }
   console.log('[agentsflow][pty] spawn ok', { pid: pty.pid });
 
-  const ch: ClaudeChannel = { id: opts.channelId, pty, win: opts.win, sessionId: opts.sessionId };
+  const prev = claudeChannels.get(opts.channelId);
+  const ch: ClaudeChannel = prev ?? { id: opts.channelId, pty, win: opts.win, sessionId: opts.sessionId };
+  ch.pty = pty;
+  ch.win = opts.win;
   claudeChannels.set(opts.channelId, ch);
 
+  const watch: ScreenWatch = { inChat: false };
+  // Output after the viewer left the chat, held until we know why it left.
+  let held: string[] | null = null;
+  let exited = false;
+  // The pane moved on to a fresh viewer; this one's exit is not the pane's.
+  let replaced = false;
+  const current = () => claudeChannels.get(opts.channelId) === ch && ch.pty === pty;
+
   pty.onData(guardCb('attach onData', (data) => {
-    safeSend(ch.win, 'terminal:data', opts.channelId, data);
+    if (held) { held.push(data); return; }
+    const at = findChatExit(watch, data);
+    if (at === -1) { safeSend(ch.win, 'terminal:data', opts.channelId, data); return; }
+    if (at > 0) safeSend(ch.win, 'terminal:data', opts.channelId, data.slice(0, at));
+    held = [data.slice(at)];
+    setTimeout(guardCb('attach left-chat check', () => {
+      if (exited || !current()) return;
+      const now = Date.now();
+      if (!allowReattach(reattaches, now)) {
+        console.warn('[agentsflow][pty] attach viewer keeps leaving the chat; showing it as-is', { sessionId: opts.sessionId });
+        safeSend(ch.win, 'terminal:data', opts.channelId, held!.join(''));
+        held = null;
+        return;
+      }
+      reattaches.push(now);
+      console.log('[agentsflow][pty] attach viewer left the chat (agents list / Ctrl+Z); re-attaching', {
+        sessionId: opts.sessionId,
+        pid: pty.pid,
+      });
+      replaced = true;
+      try { pty.kill(); } catch { /* ignore */ }
+      spawnAttachViewer({ ...opts, win: ch.win, cols: pty.cols, rows: pty.rows }, reattaches);
+    }), LEFT_CHAT_GRACE_MS);
   }));
   // Logged like the shell/resume exits below. Without this, an attach PTY's
   // whole lifecycle was write-only in the log — every spawn recorded, no exit
   // ever — so "88 spawns, 0 exits" read as a leak when reconstructing an
   // incident, and a *real* leak would have looked identical.
   pty.onExit(guardCb('attach onExit', (e) => {
+    exited = true;
     console.log('[agentsflow][pty] attach onExit', {
       sessionId: opts.sessionId,
       pid: pty.pid,
       exitCode: e?.exitCode,
       signal: e?.signal,
+      replaced,
     });
+    if (replaced || !current()) return;
+    if (held) safeSend(ch.win, 'terminal:data', opts.channelId, held.join(''));
     safeSend(ch.win, 'terminal:exit', opts.channelId);
     claudeChannels.delete(opts.channelId);
   }));
-  return '';
 }
 
 /** Live PTY/subsystem counts for the heartbeat. Cheap: no subprocess, no fds. */
@@ -434,6 +516,22 @@ export function ptyStats(): Record<string, number> {
     systemPtys: systemPtyCount(),
     ptmxMax: PTMX_MAX,
   };
+}
+
+/** A Codex viewer that exits non-zero this soon after spawn failed to attach; nobody closed it. */
+const FAILED_ATTACH_MS = 5_000;
+
+/** Terminal output minus its escape sequences, for a message shown outside xterm. */
+function plainText(data: string): string {
+  return data.replace(/\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07]*\x07|\x1b[=>]/g, '').replace(/\r/g, '');
+}
+
+function failAttach(win: BrowserWindow, channelId: string, label: string, err: unknown): string {
+  const message = (err as Error)?.message ?? String(err);
+  console.error(`[agentsflow][pty] ${label} attach failed`, err);
+  safeSend(win, 'terminal:data', channelId, `\r\n\x1b[31m[${label} attach failed] ${message}\x1b[0m\r\n`);
+  safeSend(win, 'terminal:exit', channelId, message);
+  return '';
 }
 
 // Persistent, subscriber-based attach for `claude --resume` and for the Codex
@@ -458,16 +556,41 @@ async function attachResume(opts: {
   // Present ⇒ this is a Codex attach: `sessionId` is a thread id, and the PTY
   // is a viewer of a thread that runs in the app-server at this socket.
   codexSocket?: string;
+  // Remote peer (Claude only): run `claude --resume …` on that host over
+  // `ssh -tt`, in `remoteCwd` there.
+  host?: string;
+  remoteCwd?: string;
 }): Promise<string> {
   const isCodex = Boolean(opts.codexSocket);
   const label = isCodex ? 'codex' : 'resume';
   let sess = resumeSessions.get(opts.sessionId);
 
   if (!sess) {
-    const bin = isCodex ? CODEX_BIN : CLAUDE_BIN;
-    const args = isCodex ? codexResumeArgs(opts.sessionId, opts.codexSocket!) : buildResumeArgs(opts);
-    const cwd = opts.cwd || os.homedir();
-    console.log(`[agentsflow][pty] spawning ${label}`, { bin, args: redactResumeArgs(args), cwd, cols: opts.cols, rows: opts.rows });
+    let bin = CLAUDE_BIN;
+    if (isCodex) {
+      // The CLI this thread's app-server was started with, not `codex` on PATH:
+      // a global update must not reach an open chat (codex-cli.ts). The record
+      // lives beside the socket.
+      try { bin = (await pinnedCodexCli(path.dirname(opts.codexSocket!))).bin; }
+      catch (err) { return failAttach(opts.win, opts.channelId, label, err); }
+    }
+    let args = isCodex ? codexResumeArgs(opts.sessionId, opts.codexSocket!) : buildResumeArgs(opts);
+    let cwd = opts.cwd || os.homedir();
+    if (opts.host && !isCodex) {
+      const remoteArgs = args;
+      const spec = getRemoteHosts()?.ptyCommand(opts.host, [claudeBinFor(opts.host), ...remoteArgs], { cwd: opts.remoteCwd });
+      if (!spec) return failAttach(opts.win, opts.channelId, 'remote', new Error(`host ${opts.host} is not ready`));
+      bin = spec.bin;
+      args = spec.args;
+      // The local end is just the ssh client; the remote cwd is set by the
+      // remote command line itself.
+      cwd = os.homedir();
+      // Log the remote argv redacted: the ssh argv embeds the whole remote
+      // command, system prompt included (see the log-storm freeze).
+      console.log(`[agentsflow][pty] spawning ${label}`, { bin, host: opts.host, remoteArgs: redactResumeArgs(remoteArgs), remoteCwd: opts.remoteCwd, cols: opts.cols, rows: opts.rows });
+    } else {
+      console.log(`[agentsflow][pty] spawning ${label}`, { bin, args: redactResumeArgs(args), cwd, cols: opts.cols, rows: opts.rows });
+    }
     if (!(await ensurePtyCapacity(opts.win, opts.channelId, label))) return '';
     let pty: IPty;
     try {
@@ -479,18 +602,18 @@ async function attachResume(opts: {
         env: isCodex ? codexEnv() : env(),
       });
     } catch (err) {
-      console.error(`[agentsflow][pty] ${label} spawn failed`, err);
-      safeSend(opts.win, 'terminal:data', opts.channelId, `\r\n\x1b[31m[pty spawn failed] ${(err as Error)?.message ?? err}\x1b[0m\r\n`);
-      safeSend(opts.win, 'terminal:exit', opts.channelId);
-      return '';
+      return failAttach(opts.win, opts.channelId, label, err);
     }
     console.log(`[agentsflow][pty] ${label} spawn ok`, { sessionId: opts.sessionId, pid: pty.pid });
+    const spawnedAt = Date.now();
 
     const newSess: ResumeSession = {
       sessionId: opts.sessionId,
       pty,
+      isCodex,
       buffer: [],
       bufferBytes: 0,
+      trimmed: false,
       subscribers: new Map(),
       lastDataAt: Date.now(),
       detachedAt: null,
@@ -498,9 +621,14 @@ async function attachResume(opts: {
     resumeSessions.set(opts.sessionId, newSess);
     sess = newSess;
 
+    // Both callbacks check that the session under this id is still OURS: a
+    // Codex TUI is killed on its last detach, and the next open — possibly
+    // before that process has reported its exit — spawns a fresh one under the
+    // same thread id. The old process's trailing output and exit must not land
+    // on the new session's viewers.
     pty.onData(guardCb(`${label} onData`, (data) => {
       const s = resumeSessions.get(opts.sessionId);
-      if (!s) return;
+      if (!s || s.pty !== pty) return;
       s.lastDataAt = Date.now();
       appendBuffer(s, data, RESUME_BUFFER_MAX_BYTES);
       for (const sub of s.subscribers.values()) {
@@ -508,11 +636,16 @@ async function attachResume(opts: {
       }
     }));
     pty.onExit(guardCb(`${label} onExit`, (e) => {
-      console.log(`[agentsflow][pty] ${label} onExit`, { sessionId: opts.sessionId, exitCode: e.exitCode, signal: e.signal });
+      console.log(`[agentsflow][pty] ${label} onExit`, { sessionId: opts.sessionId, pid: pty.pid, exitCode: e.exitCode, signal: e.signal });
       const s = resumeSessions.get(opts.sessionId);
-      if (!s) return;
+      if (!s || s.pty !== pty) return;
+      // A viewer that dies at once never attached: say so, with what it printed,
+      // instead of the pane's "closing only detaches the view".
+      const reason = isCodex && e.exitCode !== 0 && Date.now() - spawnedAt < FAILED_ATTACH_MS
+        ? `Codex could not attach (${bin} exited ${e.exitCode}).\n${plainText(replayText(s)).slice(-600)}`.trim()
+        : undefined;
       for (const sub of s.subscribers.values()) {
-        safeSend(sub.win, 'terminal:exit', sub.channelId);
+        safeSend(sub.win, 'terminal:exit', sub.channelId, reason);
         resumeChannelToSessionId.delete(sub.channelId);
       }
       resumeSessions.delete(opts.sessionId);
@@ -532,18 +665,16 @@ async function attachResume(opts: {
   resumeChannelToSessionId.set(opts.channelId, opts.sessionId);
 
   // Replay buffer is written by the renderer after its data listener is wired.
-  return sess.buffer.length > 0 ? sess.buffer.join('') : '';
+  return replayText(sess);
 }
 
 // ---------- Shells: one PTY per shellId, survives renderer detach ----------
 
 interface ShellSubscriber { channelId: string; win: BrowserWindow; }
-interface ShellState {
+interface ShellState extends ReplayBuffer {
   shellId: string;
   pty: IPty;
   cwd: string;
-  buffer: string[];        // chunks of recent output, capped by total bytes
-  bufferBytes: number;
   subscribers: Map<string, ShellSubscriber>;
   lastDataAt: number;            // last time the PTY produced output
   detachedAt: number | null;     // when the last subscriber left (null while watched)
@@ -561,19 +692,6 @@ const SHELL_BUFFER_MAX_BYTES = 256 * 1024;
 // are few and user-opened (unlike chatty shells), so the memory trade-off is
 // cheap. ~4 MB comfortably holds a reprint within xterm's 10 000-line window.
 const RESUME_BUFFER_MAX_BYTES = Number(process.env.AGENTSFLOW_RESUME_BUFFER_MAX_BYTES) || 4 * 1024 * 1024;
-
-function appendBuffer(
-  s: { buffer: string[]; bufferBytes: number },
-  data: string,
-  maxBytes: number = SHELL_BUFFER_MAX_BYTES,
-) {
-  s.buffer.push(data);
-  s.bufferBytes += data.length;
-  while (s.bufferBytes > maxBytes && s.buffer.length > 1) {
-    const removed = s.buffer.shift()!;
-    s.bufferBytes -= removed.length;
-  }
-}
 
 // A command to run automatically the first time a given shell is spawned. Used
 // by the account-add flow, which must open a terminal *and* start the one-time
@@ -597,21 +715,41 @@ export async function attachShell(opts: {
   cols: number;
   rows: number;
   win: BrowserWindow;
+  // Remote peer: open a login zsh on that host (in `cwd` there) over `ssh -tt`.
+  host?: string;
 }): Promise<string> {
   startPtyReaper();
   let shell = shells.get(opts.shellId);
 
   if (!shell) {
-    const shellBin = process.env.SHELL || '/bin/zsh';
-    console.log('[agentsflow][pty] spawning shell', { shellId: opts.shellId, shell: shellBin, cwd: opts.cwd, cols: opts.cols, rows: opts.rows });
+    let shellBin = process.env.SHELL || '/bin/zsh';
+    let shellArgs = ['-l'];
+    let spawnCwd = opts.cwd;
+    if (opts.host) {
+      const spec = getRemoteHosts()?.ptyCommand(opts.host, ['/bin/zsh', '-l'], { cwd: opts.cwd });
+      if (!spec) {
+        const message = `host ${opts.host} is not ready`;
+        console.error('[agentsflow][pty] remote shell unavailable', { shellId: opts.shellId, host: opts.host });
+        safeSend(opts.win, 'terminal:data', opts.channelId, `\r\n\x1b[31m[shell spawn failed] ${message}\x1b[0m\r\n`);
+        safeSend(opts.win, 'terminal:exit', opts.channelId);
+        return '';
+      }
+      shellBin = spec.bin;
+      shellArgs = spec.args;
+      // `opts.cwd` is a path on the remote host; the ssh client runs from home.
+      spawnCwd = os.homedir();
+      console.log('[agentsflow][pty] spawning shell', { shellId: opts.shellId, host: opts.host, shell: '/bin/zsh', remoteCwd: opts.cwd, cols: opts.cols, rows: opts.rows });
+    } else {
+      console.log('[agentsflow][pty] spawning shell', { shellId: opts.shellId, shell: shellBin, cwd: opts.cwd, cols: opts.cols, rows: opts.rows });
+    }
     if (!(await ensurePtyCapacity(opts.win, opts.channelId, 'shell'))) return '';
     let pty: IPty;
     try {
-      pty = getPty().spawn(shellBin, ['-l'], {
+      pty = getPty().spawn(shellBin, shellArgs, {
         name: 'xterm-256color',
         cols: Math.max(opts.cols, 20),
         rows: Math.max(opts.rows, 5),
-        cwd: opts.cwd,
+        cwd: spawnCwd,
         env: env(),
       });
     } catch (err) {
@@ -628,6 +766,7 @@ export async function attachShell(opts: {
       cwd: opts.cwd,
       buffer: [],
       bufferBytes: 0,
+      trimmed: false,
       subscribers: new Map(),
       lastDataAt: Date.now(),
       detachedAt: null,
@@ -639,7 +778,7 @@ export async function attachShell(opts: {
       const s = shells.get(opts.shellId);
       if (!s) return;
       s.lastDataAt = Date.now();
-      appendBuffer(s, data);
+      appendBuffer(s, data, SHELL_BUFFER_MAX_BYTES);
       for (const sub of s.subscribers.values()) {
         safeSend(sub.win, 'terminal:data', sub.channelId, data);
       }
@@ -682,7 +821,7 @@ export async function attachShell(opts: {
   // Return the replay buffer to the caller so the renderer can write it AFTER
   // it has registered its `terminal:data` listener. Sending the replay through
   // the data IPC here would race the listener registration and get dropped.
-  return shell.buffer.length > 0 ? shell.buffer.join('') : '';
+  return replayText(shell);
 }
 
 export function listShellIds(): string[] {
@@ -931,6 +1070,12 @@ export function resize(channelId: string, cols: number, rows: number): void {
   }
 }
 
+/** True while a Codex chat pane is open: restarting the app-server would close it. */
+export function hasCodexViewers(): boolean {
+  for (const s of resumeSessions.values()) if (s.isCodex && s.subscribers.size > 0) return true;
+  return false;
+}
+
 export function detach(channelId: string): void {
   // Claude attach-mode viewer: kill the PTY (the daemon keeps running).
   const cc = claudeChannels.get(channelId);
@@ -947,8 +1092,27 @@ export function detach(channelId: string): void {
     const rs = resumeSessions.get(rsid);
     rs?.subscribers.delete(channelId);
     resumeChannelToSessionId.delete(channelId);
-    // Last viewer gone — start the idle clock so the reaper can reclaim the PTY.
-    if (rs && rs.subscribers.size === 0) rs.detachedAt = Date.now();
+    if (rs && rs.subscribers.size === 0) {
+      // Codex: the last viewer leaving ends the TUI. Keeping it warm for an
+      // instant re-open is what blanked the chat (2026-09-14): a working
+      // thread's status line repaints ~10×/s, so within the hour the replay
+      // buffer hits its cap and evicts its head — which is the history the
+      // TUI printed once, on spawn, and never again. The re-open then replayed
+      // an hour of spinner frames drawn for the old geometry, opening on a
+      // torn escape sequence ("5;49m" top-left) over an otherwise empty pane.
+      // A fresh `codex resume` re-renders the whole thread at the current size
+      // in about a second, and the kill is a pure detach (probe E4): the turn
+      // runs on in the app-server. The history a second viewer joins from is
+      // still the replay buffer, so that path is unchanged.
+      if (rs.isCodex) {
+        console.log('[agentsflow][pty] codex viewer closed — ending the TUI', { sessionId: rsid, pid: rs.pty.pid });
+        resumeSessions.delete(rsid);
+        try { rs.pty.kill(); } catch { /* ignore */ }
+        return;
+      }
+      // Last viewer gone — start the idle clock so the reaper can reclaim the PTY.
+      rs.detachedAt = Date.now();
+    }
     return;
   }
   // Shell: just unsubscribe — PTY stays alive for future re-attach.

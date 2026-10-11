@@ -3,6 +3,7 @@ import { Conversation } from '../../shared/types';
 import { statusDotClass } from '../lib/status';
 import { useUIState } from '../lib/ui-state';
 import ProviderIcon, { providerName } from './ProviderIcon';
+import { shortHost } from '../lib/remote';
 
 interface Props {
   conv: Conversation;
@@ -75,6 +76,9 @@ export default function PinnedRow({ conv, onAttach, onSaveTitle, onMarkDone, onA
   // its own view creates on the first turn — so it must not be parked at
   // "starting…" while waiting for one.
   const ready = !!conv.sessionId || conv.provider === 'codex';
+  // A Claude chat whose spawn never produced a session: the CLI's reason is in
+  // the description, and the row must say so instead of "starting…" forever.
+  const failed = !ready && conv.state === 'error';
 
   // Missing on legacy rows means Claude.
   const provider = conv.provider ?? 'claude';
@@ -98,7 +102,7 @@ export default function PinnedRow({ conv, onAttach, onSaveTitle, onMarkDone, onA
       className={`group grid grid-cols-[16px_200px_minmax(0,1fr)_auto] items-center gap-3 px-4 py-2.5 border-l-2 ${bare ? 'border-l-transparent' : (focused ? 'border-l-accent bg-panel2' : selected ? 'border-l-accent/60 bg-accent/10' : `border-l-transparent ${suppressHover ? '' : 'hover:bg-panel2'}`)} ${hideBottomBorder ? '' : 'border-b border-b-border'} cursor-pointer ${ready ? '' : 'opacity-80'} ${justAdded ? 'row-just-added' : ''}`}
       title={ready
         ? (conv.description ? `${conv.description}\n\nOpen terminal · drag to reorder` : 'Open terminal · drag to reorder')
-        : 'Session is still starting…'}
+        : failed ? `Could not start: ${conv.description}` : 'Session is still starting…'}
     >
       <span
         className="text-muted/60 group-hover:text-muted opacity-50 group-hover:opacity-100 cursor-grab active:cursor-grabbing shrink-0"
@@ -118,7 +122,14 @@ export default function PinnedRow({ conv, onAttach, onSaveTitle, onMarkDone, onA
         {/* The provider mark belongs to the name, not to the dot: extra air on
             its left, the normal gap on its right. */}
         {showProviderIcon && <ProviderIcon provider={provider} size={12} className="text-muted ml-1.5" title={providerName(provider)} />}
-        <div className="truncate text-text font-medium">{conv.displayName}</div>
+        {/* Name on top; for a remote peer conversation, the machine it runs on
+            sits on a second line underneath so the name keeps its full width. */}
+        <div className="min-w-0 flex flex-col leading-tight">
+          <div className="truncate text-text font-medium">{conv.displayName}</div>
+          {conv.host && (
+            <span className="truncate text-[10px] text-muted font-mono" title={conv.host}>⇅ {shortHost(conv.host)}</span>
+          )}
+        </div>
       </div>
 
       <div className="min-w-0 flex items-center gap-2">
@@ -159,7 +170,9 @@ export default function PinnedRow({ conv, onAttach, onSaveTitle, onMarkDone, onA
       </div>
 
       <div className="flex items-center gap-1">
-        {!ready && <span className="shrink-0 text-xs text-muted italic mr-1">starting…</span>}
+        {failed
+          ? <span className="min-w-0 max-w-[28rem] truncate text-xs text-err mr-1">{conv.description}</span>
+          : !ready && <span className="shrink-0 text-xs text-muted italic mr-1">starting…</span>}
         {onAddTask && (
           <button
             onClick={(e) => { e.stopPropagation(); onAddTask(); }}

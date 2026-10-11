@@ -1,19 +1,33 @@
 import { useEffect, useRef, useState } from 'react';
 import { api } from '../lib/ipc';
 import { createPathLinkProvider } from '../lib/path-links';
+import { cleanTerminalCopy, type CopyRow } from '../../shared/terminal-copy';
+import type { RemoteHostStatus } from '../../shared/types';
 
 interface Props {
   conversationId?: string;
+  // The chat runs on another machine: ⌘V / Ctrl+V paste goes through main so an
+  // image on THIS Mac's clipboard reaches the remote Claude (see pasteIntoRemoteChat).
+  remote?: boolean;
+  // Short machine name for the "Connecting to …" overlay shown while a remote
+  // chat waits for its host.
+  remoteHostLabel?: string;
+  // The host's key, so that overlay can show why the link is not up yet.
+  remoteHostKey?: string;
   shellId?: string;
   shellCwd?: string;
   // Directory that relative paths in the terminal output are resolved against
   // when turning them into clickable "reveal in Finder" links. For a chat pane
   // this is the conversation's directory; for a shell it's the shell's cwd.
   baseDir?: string;
-  onExit?: () => void;
+  /** `reason` is set only when the terminal never came up (a failed attach). */
+  onExit?: (reason?: string) => void;
   // Controls whether the terminal grabs focus on mount and refocuses on window
   // focus. Shells pass false so they never steal focus from the chat/file pane.
   autoFocus?: boolean;
+  // Hold the view at the bottom while the attached chat streams its history in,
+  // so opening lands on the latest output. Used for Codex chats — see pinToBottom.
+  followOnOpen?: boolean;
 }
 
 interface ScrollState {
@@ -30,18 +44,38 @@ interface XtermViewport {
   syncScrollArea: (immediate?: boolean) => void;
 }
 
-export default function Terminal({ conversationId, shellId, shellCwd, baseDir, onExit, autoFocus = true }: Props) {
+export default function Terminal({ conversationId, remote = false, remoteHostLabel, remoteHostKey, shellId, shellCwd, baseDir, onExit, autoFocus = true, followOnOpen = false }: Props) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   // Read fresh inside the link provider so a later prop change is picked up
   // without rebuilding the xterm instance.
   const baseDirRef = useRef<string | undefined>(baseDir);
+  const remoteRef = useRef(remote);
+  remoteRef.current = remote;
   baseDirRef.current = baseDir ?? shellCwd;
   const cleanupRef = useRef<(() => void) | null>(null);
   const scrollToLineRef = useRef<((line: number) => void) | null>(null);
   const termFocusRef = useRef<() => void>(() => {});
   const [termGen, setTermGen] = useState(0);
+  // True while a remote chat's attach is waiting for its host to connect.
+  const [connecting, setConnecting] = useState(false);
+  // Why the remote host is not reachable yet, in its own words; null while fine.
+  const [linkError, setLinkError] = useState<string | null>(null);
+  useEffect(() => {
+    if (!connecting || !remoteHostKey) { setLinkError(null); return; }
+    const a = api();
+    let alive = true;
+    const apply = (hosts: RemoteHostStatus[]) => {
+      const h = hosts.find((x) => x.hostKey === remoteHostKey);
+      if (alive) setLinkError(h && h.state !== 'ready' && h.error ? h.error : null);
+    };
+    a.listRemoteHosts?.().then(apply).catch(() => undefined);
+    const off = a.onRemoteHostsUpdated?.(apply);
+    return () => { alive = false; off?.(); };
+  }, [connecting, remoteHostKey]);
   const onExitRef = useRef<typeof onExit>(onExit);
   onExitRef.current = onExit;
+  const followOnOpenRef = useRef(followOnOpen);
+  followOnOpenRef.current = followOnOpen;
 
   const [scroll, setScroll] = useState<ScrollState>({ viewportY: 0, baseY: 0, rows: 0, altBuffer: false });
 
@@ -256,8 +290,38 @@ export default function Terminal({ conversationId, shellId, shellCwd, baseDir, o
       containerRef.current.addEventListener('focusin', onFocusIn);
       containerRef.current.addEventListener('focusout', onFocusOut);
 
+      // xterm copies raw cells, so a selection over Claude Code's output carries
+      // its quote gutter (▎), the reply's indent and the TUI's own hard wraps.
+      // Capture phase runs before xterm's copy handler on its child element.
+      const onCopy = (e: ClipboardEvent) => {
+        const sel = term.getSelectionPosition();
+        if (!sel || !e.clipboardData) return;
+        const buf = term.buffer.active;
+        const rows: CopyRow[] = [];
+        for (let y = sel.start.y; y <= sel.end.y; y++) {
+          const line = buf.getLine(y);
+          if (!line) continue;
+          let width = line.length;
+          while (width > 0 && /^\s?$/.test(line.getCell(width - 1)?.getChars() ?? '')) width--;
+          rows.push({
+            selected: line.translateToString(
+              true,
+              y === sel.start.y ? sel.start.x : 0,
+              y === sel.end.y ? sel.end.x : undefined,
+            ),
+            width,
+            wrapped: line.isWrapped,
+          });
+        }
+        e.clipboardData.setData('text/plain', cleanTerminalCopy(rows, term.cols));
+        e.preventDefault();
+        e.stopPropagation();
+      };
+      containerRef.current.addEventListener('copy', onCopy, { capture: true });
+
       let cid: string;
       let replay = '';
+      if (remoteRef.current && !shellId) setConnecting(true);
       try {
         if (shellId && shellCwd) {
           const res = await api().attachShellTerminal(shellId, shellCwd, term.cols, term.rows);
@@ -269,12 +333,14 @@ export default function Terminal({ conversationId, shellId, shellCwd, baseDir, o
           replay = res.replay || '';
         }
       } catch (err) {
+        if (!disposed) setConnecting(false);
         // eslint-disable-next-line no-console
         console.error('[agentsflow] attachTerminal failed', err);
         if (!disposed) term.write(`\r\n\x1b[31m[attach failed] ${(err as Error)?.message ?? err}\x1b[0m\r\n`);
         return;
       }
       channelId = cid;
+      if (!disposed) setConnecting(false);
 
       // attachTerminal above is async — by the time it resolves the component may
       // have unmounted (e.g. the user navigated away, or `open_file` switched to
@@ -297,13 +363,59 @@ export default function Terminal({ conversationId, shellId, shellCwd, baseDir, o
       // Re-asserting the size here closes that race.
       api().resizeTerminal(cid, term.cols, term.rows);
 
+      // Opening a Codex chat should land on its latest output. On attach the TUI
+      // streams the whole thread history into scrollback (hundreds of KB, or the
+      // replay buffer on a re-attach). During that burst the viewport can receive
+      // a scroll event whose scrollTop lags the growing scroll area; xterm reads
+      // it as a scroll-up, marks the buffer "user is scrolling", and every later
+      // line lands below the view — the chat opens mid-history. scrollToBottom()
+      // clears that mark, so re-pin after each write until the output goes quiet
+      // (bounded, since a working thread's spinner never does).
+      //
+      // Let go the moment the user wheels, clicks or presses a key. Those are
+      // synchronous DOM events; gating on onScroll instead lags a busy stream and
+      // drags the user back down mid-gesture.
+      const FOLLOW_QUIET_MS = 600;
+      const FOLLOW_MAX_MS = 8000;
+      const followDeadline = performance.now() + FOLLOW_MAX_MS;
+      let following = followOnOpenRef.current;
+      let followTimer: number | null = null;
+      const stopFollowing = () => {
+        following = false;
+        if (followTimer !== null) { clearTimeout(followTimer); followTimer = null; }
+        container.removeEventListener('wheel', stopFollowing, { capture: true } as any);
+        container.removeEventListener('mousedown', stopFollowing, { capture: true } as any);
+        container.removeEventListener('keydown', stopFollowing, { capture: true } as any);
+      };
+      const pinToBottom = () => {
+        if (!following || disposed) return;
+        term.scrollToBottom();
+        if (followTimer !== null) clearTimeout(followTimer);
+        const wait = Math.min(FOLLOW_QUIET_MS, followDeadline - performance.now());
+        if (wait <= 0) { stopFollowing(); return; }
+        followTimer = window.setTimeout(() => {
+          followTimer = null;
+          if (following && !disposed) term.scrollToBottom();
+          stopFollowing();
+        }, wait);
+      };
+      if (following) {
+        container.addEventListener('wheel', stopFollowing, { capture: true, passive: true });
+        container.addEventListener('mousedown', stopFollowing, { capture: true });
+        container.addEventListener('keydown', stopFollowing, { capture: true });
+        // A freshly spawned TUI takes a moment to print anything, so the quiet
+        // window only starts with the first write; this bounds a silent attach.
+        followTimer = window.setTimeout(stopFollowing, FOLLOW_MAX_MS);
+      }
+      const afterWrite = () => { sync(); pinToBottom(); };
+
       const offData = api().onTerminalData((id, data) => {
         if (id !== cid) return;
-        term.write(data, sync);
+        term.write(data, afterWrite);
       });
-      const offExit = api().onTerminalExit((id) => {
+      const offExit = api().onTerminalExit((id, reason) => {
         if (id !== cid) return;
-        onExitRef.current?.();
+        onExitRef.current?.(reason);
       });
       off.push(offData, offExit);
 
@@ -314,8 +426,30 @@ export default function Terminal({ conversationId, shellId, shellCwd, baseDir, o
       // binds explicitly so the behavior doesn't depend on macOptionIsMeta /
       // keymap quirks: ⌥ → Ctrl-W (\x17 backward-kill-word), ⌘ → Ctrl-U
       // (\x15 backward-kill-line). Returning false stops xterm's default.
+      // Remote chat paste: main reads this Mac's clipboard (an image is uploaded
+      // to the host and its path pasted). The keydown does the work; the paste
+      // event that may still follow (e.g. via the Edit menu) is swallowed so the
+      // text never arrives twice — and handled itself if no keydown came first.
+      let remotePasteAt = 0;
+      const pasteRemote = (key: 'cmd' | 'ctrl') => {
+        remotePasteAt = Date.now();
+        if (!conversationId) return;
+        void api().pasteIntoRemoteChat?.(conversationId, cid, key)?.catch(() => undefined);
+      };
+      const onPasteCapture = (e: ClipboardEvent) => {
+        if (!remoteRef.current || !conversationId || shellId) return;
+        e.preventDefault();
+        e.stopPropagation();
+        if (Date.now() - remotePasteAt > 400) pasteRemote('cmd');
+      };
+      containerRef.current?.addEventListener('paste', onPasteCapture, { capture: true });
       term.attachCustomKeyEventHandler((e) => {
         if (e.type !== 'keydown') return true;
+        if (remoteRef.current && conversationId && !shellId && (e.key === 'v' || e.key === 'V') && !e.altKey && !e.shiftKey && (e.metaKey !== e.ctrlKey)) {
+          e.preventDefault();
+          pasteRemote(e.metaKey ? 'cmd' : 'ctrl');
+          return false;
+        }
         const isBackspace = e.key === 'Backspace' || e.code === 'Backspace';
         if (isBackspace && e.metaKey) {
           api().writeTerminal(cid, '\x15'); // ⌘+Backspace → kill whole line
@@ -347,7 +481,7 @@ export default function Terminal({ conversationId, shellId, shellCwd, baseDir, o
 
       // Replay buffered history now that the data listener is registered. Doing
       // this earlier would race with listener wiring and the replay would be lost.
-      if (replay) term.write(replay, sync);
+      if (replay) term.write(replay, afterWrite);
 
       // In alternate-screen mode (TUI apps like Claude Code), xterm has no scrollback,
       // so wheel events have no effect. Translate them into Page Up/Down bytes the app can read.
@@ -391,11 +525,13 @@ export default function Terminal({ conversationId, shellId, shellCwd, baseDir, o
           fit.fit();
           api().resizeTerminal(cid, term.cols, term.rows);
           sync();
+          pinToBottom();
         } catch {}
       });
       ro.observe(container);
 
       detach = () => {
+        stopFollowing();
         pathLinks.dispose();
         scrollDisp.dispose();
         bufDisp.dispose();
@@ -403,6 +539,7 @@ export default function Terminal({ conversationId, shellId, shellCwd, baseDir, o
         container.removeEventListener('mousedown', onContainerMouseDown);
         container.removeEventListener('focusin', onFocusIn);
         container.removeEventListener('focusout', onFocusOut);
+        container.removeEventListener('copy', onCopy, { capture: true } as any);
         if (a11yOffTimer !== null) clearTimeout(a11yOffTimer);
         container.removeEventListener('wheel', onWheel, { capture: true } as any);
         if (channelId) api().detachTerminal(channelId).catch(() => undefined);
@@ -448,6 +585,24 @@ export default function Terminal({ conversationId, shellId, shellCwd, baseDir, o
   return (
     <div className="absolute inset-0 bg-bg">
       <div ref={containerRef} className="absolute inset-0" />
+      {connecting && (
+        <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-bg/90 text-sm text-muted" role="status" aria-live="polite">
+          <span className="inline-block w-6 h-6 rounded-full border-2 border-border border-t-accent animate-spin" aria-hidden />
+          <span>Connecting to <span className="text-text font-medium">{remoteHostLabel || 'the remote machine'}</span>…</span>
+          {linkError ? (
+            <>
+              <span className="max-w-xl px-4 text-center text-xs text-text break-words" role="alert">Not connected yet: {linkError}</span>
+              <span className="text-xs">Still retrying.</span>
+              <button
+                onClick={() => { if (remoteHostKey) api().reconnectRemoteHost?.(remoteHostKey).catch(() => undefined); }}
+                className="px-3 py-1 text-[11px] uppercase tracking-wider rounded-md border border-border bg-panel text-muted hover:text-text hover:bg-panel2"
+              >Retry now</button>
+            </>
+          ) : (
+            <span className="text-xs">Opening the ssh link and starting the session there. This takes a few seconds after launch.</span>
+          )}
+        </div>
+      )}
     </div>
   );
 }

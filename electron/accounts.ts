@@ -508,7 +508,7 @@ export function freshenAccountToken(account: Account, opts: FreshenOptions = {})
 // ~/.claude.json — swap the recorded account identity alongside the tokens
 // ---------------------------------------------------------------------------
 
-function mainConfigJsonPath(): string {
+export function mainConfigJsonPath(): string {
   return path.join(os.homedir(), '.claude.json');
 }
 
@@ -521,8 +521,8 @@ function vaultConfigJsonPath(configDir: string): string {
  * interleave with a concurrent CLI write. A lock older than STALE_MS is assumed
  * abandoned (a crashed CLI would otherwise block switching forever).
  */
-async function withConfigLock<T>(fn: () => Promise<T>): Promise<T> {
-  const lockDir = `${mainConfigJsonPath()}.lock`;
+export async function withConfigLock<T>(fn: () => Promise<T>, configPath = mainConfigJsonPath()): Promise<T> {
+  const lockDir = `${configPath}.lock`;
   const STALE_MS = 10_000;
   const DEADLINE_MS = 5_000;
   const start = Date.now();

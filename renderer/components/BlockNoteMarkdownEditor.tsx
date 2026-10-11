@@ -343,28 +343,16 @@ async function serializeDoc(editor: BNEditorInstance, restoreMap: Map<string, st
  * decode-via-canvas + the async web clipboard API, which also covers a main
  * process that predates the handler.
  */
-const DBG_LOG = '/Users/iij/.claude/jobs/fb5ecc4f/tmp/copy-debug.log';
-const dbgLines: string[] = [];
-function dbg(msg: string) {
-  dbgLines.push(`${new Date().toISOString()} ${msg}`);
-  try { void api().writeTextFile(DBG_LOG, dbgLines.join('\n') + '\n'); } catch { /* noop */ }
-}
-if (typeof window !== 'undefined') setTimeout(() => dbg('module loaded (instrumented build is live)'), 0);
-
 async function copyImageToSystemClipboard(url: string): Promise<void> {
   const a = api();
-  dbg(`click urlLen=${url.length} head=${JSON.stringify(url.slice(0, 48))} native=${typeof a.copyImageDataToClipboard}`);
   if (url.startsWith('data:') && typeof a.copyImageDataToClipboard === 'function') {
     try {
       const res = await a.copyImageDataToClipboard(url.slice(url.indexOf(',') + 1));
-      dbg(`native result=${JSON.stringify(res)}`);
       if (res.ok) return;
-    } catch (e) {
-      dbg(`native threw ${(e as Error)?.message ?? String(e)}`);
+    } catch {
       // handler missing (stale main) — fall through to the web path
     }
   }
-  dbg('falling back to web clipboard path');
   const img = new Image();
   img.crossOrigin = 'anonymous';
   await new Promise<void>((resolve, reject) => {
@@ -383,7 +371,6 @@ async function copyImageToSystemClipboard(url: string): Promise<void> {
     canvas.toBlob((b) => (b ? resolve(b) : reject(new Error('PNG encode failed'))), 'image/png'),
   );
   await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]);
-  dbg(`web path wrote blob bytes=${blob.size}`);
 }
 
 const COPY_ICON = (

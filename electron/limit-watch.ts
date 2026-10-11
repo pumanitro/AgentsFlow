@@ -244,6 +244,9 @@ const SETTLED_STATES = new Set(['done', 'completed', 'failed', 'error', 'stopped
 
 export function isRescuable(conv: Conversation): boolean {
   if (!conv.sessionId) return false;
+  // Remote peers: the wall is read from a LOCAL transcript and the rescue is a
+  // local account switch — neither reaches a session on another machine.
+  if (conv.host) return false;
   if (conv.pinned) return true;
   return !SETTLED_STATES.has((conv.state || '').toLowerCase());
 }

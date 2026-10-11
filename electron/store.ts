@@ -116,6 +116,9 @@ function migrateConversation(c: any): Conversation {
     attachments: Array.isArray(c.attachments) ? c.attachments : [],
     forkFromSessionId: typeof c.forkFromSessionId === 'string' ? c.forkFromSessionId : undefined,
     worktreePath: typeof c.worktreePath === 'string' ? c.worktreePath : undefined,
+    // Which remote peer host this chat runs on; dropping it would route a
+    // remote session's stop/attach to the local CLI.
+    host: typeof c.host === 'string' ? c.host : undefined,
     handover: lostInSwitch ? undefined : handover,
     sessionId: c.sessionId ?? '',
     daemonShort: c.daemonShort ?? '',

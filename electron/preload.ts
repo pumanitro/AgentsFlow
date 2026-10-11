@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer, IpcRendererEvent } from 'electron';
-import type { AccountsSnapshot, AgentsFlowApi, Conversation, OpenFileNavPayload, PinnedDivider, PinnedItemRef, PinnedTodo, RotationStatus, SpawnRequest } from '../shared/types';
+import type { TrackedDirectory, AccountsSnapshot, AgentsFlowApi, Conversation, OpenFileNavPayload, PinnedDivider, PinnedItemRef, PinnedTodo, RemoteHostStatus, RotationStatus, SpawnRequest, WorktreeInfo } from '../shared/types';
 
 const api: AgentsFlowApi = {
   codexSnapshot: (id, older) => ipcRenderer.invoke('codex:snapshot', id, older),
@@ -14,7 +14,22 @@ const api: AgentsFlowApi = {
   addDirectory: () => ipcRenderer.invoke('dirs:add'),
   removeDirectory: (id) => ipcRenderer.invoke('dirs:remove', id),
 
-  listSlashCommands: (dirPath) => ipcRenderer.invoke('skills:list', dirPath),
+  listSlashCommands: (dirPath, directoryId) => ipcRenderer.invoke('skills:list', dirPath, directoryId),
+
+  probeRemoteDirectory: (req) => ipcRenderer.invoke('dirs:probeRemote', req),
+  addRemoteDirectory: (req) => ipcRenderer.invoke('dirs:addRemote', req),
+  listRemoteHosts: () => ipcRenderer.invoke('remote:hosts'),
+  reconnectRemoteHost: (hostKey) => ipcRenderer.invoke('remote:reconnect', hostKey),
+  onDirectoriesUpdated: (cb) => {
+    const listener = (_e: IpcRendererEvent, dirs: TrackedDirectory[]) => cb(dirs);
+    ipcRenderer.on('dirs:updated', listener);
+    return () => ipcRenderer.removeListener('dirs:updated', listener);
+  },
+  onRemoteHostsUpdated: (cb) => {
+    const listener = (_e: IpcRendererEvent, hosts: RemoteHostStatus[]) => cb(hosts);
+    ipcRenderer.on('remote:hostsUpdated', listener);
+    return () => ipcRenderer.removeListener('remote:hostsUpdated', listener);
+  },
 
   getMcpServerInfo: () => ipcRenderer.invoke('mcp:info'),
   getBridgeHealth: () => ipcRenderer.invoke('bridge:health'),
@@ -71,6 +86,7 @@ const api: AgentsFlowApi = {
     ipcRenderer.invoke('term:attachShell', shellId, cwd, cols, rows),
   killShell: (shellId) => ipcRenderer.invoke('term:killShell', shellId),
   writeTerminal: (channelId, data) => ipcRenderer.invoke('term:write', channelId, data),
+  pasteIntoRemoteChat: (conversationId, channelId, key) => ipcRenderer.invoke('term:pasteRemote', conversationId, channelId, key),
   resizeTerminal: (channelId, cols, rows) => ipcRenderer.invoke('term:resize', channelId, cols, rows),
   detachTerminal: (channelId) => ipcRenderer.invoke('term:detach', channelId),
 
@@ -80,7 +96,7 @@ const api: AgentsFlowApi = {
     return () => ipcRenderer.removeListener('terminal:data', listener);
   },
   onTerminalExit: (cb) => {
-    const listener = (_e: IpcRendererEvent, channelId: string) => cb(channelId);
+    const listener = (_e: IpcRendererEvent, channelId: string, reason?: string) => cb(channelId, reason);
     ipcRenderer.on('terminal:exit', listener);
     return () => ipcRenderer.removeListener('terminal:exit', listener);
   },
@@ -132,6 +148,11 @@ const api: AgentsFlowApi = {
 
   gitStatus: (dirPath) => ipcRenderer.invoke('git:status', dirPath),
   listWorktrees: (dirPath, refBranch) => ipcRenderer.invoke('git:worktrees', dirPath, refBranch),
+  onWorktreesUpdated: (cb) => {
+    const listener = (_e: IpcRendererEvent, dirPath: string, refBranch: string | undefined, rows: WorktreeInfo[]) => cb(dirPath, refBranch, rows);
+    ipcRenderer.on('git:worktreesUpdated', listener);
+    return () => ipcRenderer.removeListener('git:worktreesUpdated', listener);
+  },
   listBranches: (dirPath) => ipcRenderer.invoke('git:branches', dirPath),
   removeWorktree: (repoDir, worktreePath, force) =>
     ipcRenderer.invoke('git:removeWorktree', repoDir, worktreePath, force),

@@ -1,3 +1,6 @@
+/** Config override that stops a Codex TUI from offering to update itself. */
+export const CODEX_NO_SELF_UPDATE = ['-c', 'check_for_update_on_startup=false'];
+
 /**
  * Argv construction for the `codex resume` PTY that backs a Codex chat pane.
  *
@@ -21,9 +24,17 @@
  * the TUI renders inline in the normal buffer, so the app's own scrollback
  * (and the replay buffer a second viewer is rebuilt from) holds the history
  * instead of it vanishing with the alternate screen.
+ *
+ * `check_for_update_on_startup=false` keeps the TUI from opening on its
+ * self-update prompt, whose default answer runs `npm install -g @openai/codex`
+ * INSIDE this PTY. The pane's PTY is killed on its last detach, so the install
+ * dies half-way and takes the machine's Codex CLI with it (2026-09-18: no
+ * `codex` on PATH, every Codex chat exiting 1 on open). Updating is something
+ * the user does in their own terminal; see `codex-cli.ts` for why even that
+ * cannot reach a running chat.
  */
 export function codexResumeArgs(threadId: string, socketPath: string): string[] {
-  return ['resume', threadId, '--remote', codexRemoteUrl(socketPath), '--no-alt-screen'];
+  return ['resume', threadId, '--remote', codexRemoteUrl(socketPath), '--no-alt-screen', ...CODEX_NO_SELF_UPDATE];
 }
 
 /**

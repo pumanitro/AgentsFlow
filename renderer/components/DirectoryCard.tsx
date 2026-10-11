@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
-import { TrackedDirectory } from '../../shared/types';
+import { RemoteHostStatus, TrackedDirectory } from '../../shared/types';
+import { collapseHome, shortHost } from '../lib/remote';
 
 interface Props {
   dir: TrackedDirectory;
@@ -10,9 +11,13 @@ interface Props {
   onViewHistory: () => void;
   onPreview: () => void;
   onRemove: () => void;
+  /** Remote peers only: the host's live status (undefined = not reported yet). */
+  remoteStatus?: RemoteHostStatus;
+  /** Remote peers only: ask main to reconnect this peer's host. */
+  onReconnect?: () => void;
 }
 
-export default function DirectoryCard({ dir, selected, historyCount, onSelect, onAddTask, onViewHistory, onPreview, onRemove }: Props) {
+export default function DirectoryCard({ dir, selected, historyCount, onSelect, onAddTask, onViewHistory, onPreview, onRemove, remoteStatus, onReconnect }: Props) {
   const [menuOpen, setMenuOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement | null>(null);
 
@@ -34,6 +39,25 @@ export default function DirectoryCard({ dir, selected, historyCount, onSelect, o
   // prefix; the tooltip keeps the exact path.
   const shortPath = dir.path.replace(/^\/Users\/[^/]+/, '~');
 
+  // Remote peer: `⇅ user@short-host:~/path`, plus a host status dot. The home
+  // used for `~` comes from the live status, else the cached peer info.
+  const remote = dir.remote;
+  const remoteLine = remote
+    ? `⇅ ${remote.user}@${shortHost(remote.host)}:${collapseHome(dir.path, remoteStatus?.home ?? dir.remoteCache?.home)}`
+    : null;
+  const remoteDotClass = !remoteStatus
+    ? 'bg-muted'
+    : remoteStatus.state === 'ready'
+      ? 'bg-ok'
+      : remoteStatus.state === 'connecting'
+        ? 'bg-warn animate-pulse'
+        : 'bg-err';
+  const remoteDotTitle = !remoteStatus
+    ? 'unknown — no status yet (click to reconnect)'
+    : remoteStatus.state === 'ready'
+      ? `ready${remoteStatus.claudeVersion ? ` · claude ${remoteStatus.claudeVersion}` : ''}`
+      : `${remoteStatus.state}${remoteStatus.error ? ` · ${remoteStatus.error}` : ''} (click to reconnect)`;
+
   return (
     <div
       onClick={onSelect}
@@ -46,7 +70,23 @@ export default function DirectoryCard({ dir, selected, historyCount, onSelect, o
       <div className="flex items-center justify-between gap-1.5">
         <div className="min-w-0 flex-1">
           <div className="text-sm font-medium text-text truncate">{dir.displayName}</div>
-          <div className="text-[11px] text-muted truncate font-mono" title={dir.path}>{shortPath}</div>
+          {remoteLine ? (
+            <div className="flex items-center gap-1.5 min-w-0">
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  if (remoteStatus?.state !== 'ready') onReconnect?.();
+                }}
+                className={`shrink-0 inline-block w-2 h-2 rounded-full ${remoteDotClass} ${remoteStatus?.state === 'ready' ? 'cursor-default' : 'cursor-pointer'}`}
+                title={remoteDotTitle}
+                aria-label={`Remote host status: ${remoteDotTitle}`}
+              />
+              <div className="text-[11px] text-muted truncate font-mono" title={`${remote!.user}@${remote!.host}:${dir.path}`}>{remoteLine}</div>
+            </div>
+          ) : (
+            <div className="text-[11px] text-muted truncate font-mono" title={dir.path}>{shortPath}</div>
+          )}
         </div>
         <div className="shrink-0 flex items-center gap-0.5 opacity-60 group-hover:opacity-100">
           <button
@@ -81,6 +121,15 @@ export default function DirectoryCard({ dir, selected, historyCount, onSelect, o
                 >
                   View history{historyCount > 0 ? ` (${historyCount})` : ''}
                 </button>
+                {remote && onReconnect && (
+                  <button
+                    role="menuitem"
+                    className="w-full text-left px-3 py-1.5 text-sm text-text hover:bg-panel"
+                    onClick={() => { setMenuOpen(false); onReconnect(); }}
+                  >
+                    Reconnect host
+                  </button>
+                )}
                 <button
                   role="menuitem"
                   className="w-full text-left px-3 py-1.5 text-sm text-err hover:bg-panel"

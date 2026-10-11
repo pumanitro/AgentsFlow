@@ -29,6 +29,7 @@ if (args[0] !== 'app-server') process.exit(2);
 const listen = args[args.indexOf('--listen') + 1] || '';
 const sock = listen.replace(/^unix:\/\//, '');
 if (!sock) process.exit(3);
+require('fs').writeFileSync(sock + '.argv.json', JSON.stringify(args));
 function frame(op, payload) {
   const n = payload.length;
   let h;
@@ -152,6 +153,10 @@ test('ensureCodexServer starts a server, reuses it, and stops only ours', { time
     assert.ok(first.pid > 0);
     assert.equal(readCodexPid(box.userData), first.pid);
     assert.equal(alive(first.pid), true);
+    assert.deepEqual(JSON.parse(fs.readFileSync(first.socketPath + '.argv.json', 'utf8')), [
+      'app-server', '--listen', `unix://${first.socketPath}`,
+      '-c', 'approval_policy="never"', '-c', 'sandbox_mode="danger-full-access"',
+    ], 'the daemon must start with the same execution defaults as its threads');
 
     const second = await ensureCodexServer({ userData: box.userData });
     assert.equal(second.started, false, 'a live server must be reused, never duplicated');
