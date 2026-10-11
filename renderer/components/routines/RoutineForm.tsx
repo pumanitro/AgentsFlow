@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { CADENCES, CADENCE_GROUP_LABEL, ROUTINE_ICONS } from '../../../shared/routines';
+import { CADENCES, CADENCE_GROUP_LABEL, ROUTINE_ICONS, routineCatchesUp } from '../../../shared/routines';
 import type { AgentProvider } from '../../../shared/types';
 import type { RoutineCadence, RoutineIcon, RoutineInput, RoutineSchedule } from '../../../shared/routines';
 import { localDayKey, validateRoutineInput } from '../../../shared/routine-schedule';
@@ -42,6 +42,7 @@ export default function RoutineForm({ mode, initial, dirs, error, onSubmit, onCa
   const [day1, setDay1] = useState(initial?.schedule.monthDays?.[0] ?? 1);
   const [day2, setDay2] = useState(initial?.schedule.monthDays?.[1] ?? 15);
   const [anchorDate] = useState(initial?.schedule.anchorDate ?? localDayKey(Date.now()));
+  const [catchUp, setCatchUp] = useState(initial ? routineCatchesUp(initial) : true);
   const [pickedIcon, setPickedIcon] = useState<RoutineIcon | null>(initial?.icon ?? null);
   const [submitting, setSubmitting] = useState(false);
   const [touched, setTouched] = useState(false);
@@ -62,9 +63,9 @@ export default function RoutineForm({ mode, initial, dirs, error, onSubmit, onCa
     if (cadence === 'every2days') schedule.anchorDate = anchorDate;
     return {
       name: name.trim(), directoryId, prompt: prompt.trim(), schedule, provider,
-      model: provider === 'claude' && model ? model : undefined, icon,
+      model: provider === 'claude' && model ? model : undefined, icon, catchUp,
     };
-  }, [name, directoryId, prompt, cadence, time, weekday, day1, day2, anchorDate, provider, model, icon]);
+  }, [name, directoryId, prompt, cadence, time, weekday, day1, day2, anchorDate, provider, model, icon, catchUp]);
 
   const problem = validateRoutineInput(input, dirs);
   // Attach the one-line message to the field it is about (best effort on its wording).
@@ -183,6 +184,14 @@ export default function RoutineForm({ mode, initial, dirs, error, onSubmit, onCa
                 </div>
               </Field>
             )}
+          </div>
+
+          <div>
+            <label className="flex items-start gap-2 text-sm text-text cursor-pointer">
+              <input type="checkbox" checked={catchUp} onChange={(e) => setCatchUp(e.target.checked)} className="mt-0.5 accent-[#ff7847]" />
+              If the computer was off at that time, run it when it&apos;s back on
+            </label>
+            <div className="text-[11px] text-subtle mt-1 ml-6">Off: a missed time is skipped and shown as missed.</div>
           </div>
 
           <Field label="Icon">

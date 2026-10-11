@@ -16,7 +16,7 @@ export interface RoutinePreviewProps {
   routine: Routine; runs: RoutineRun[]; dir: TrackedDirectory | undefined; nowMs: number;
   busy: boolean;                        // an action is in flight → disable buttons
   highlightRunId: string | null;        // the run a board click picked
-  onRunNow: () => void; onTogglePaused: () => void; onEdit: () => void; onDelete: () => void;
+  onRunNow: () => void; onTogglePaused: () => void; onToggleCatchUp: () => void; onEdit: () => void; onDelete: () => void;
   onOpenRun: (run: RoutineRun) => void; onClose: () => void;
 }
 export interface RoutineFormProps {

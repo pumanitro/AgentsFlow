@@ -166,13 +166,14 @@ function isDayKey(key: string): boolean {
   return dt.getFullYear() === y && dt.getMonth() === mo - 1 && dt.getDate() === d;
 }
 
-/** null = ok, else a one-line human message. Checks: name 1..60 after trim; directoryId ∈ dirs; prompt non-empty; schedule shape per cadence (time parses; weekday 0..6; monthDays 1..28, 1 or 2 distinct entries; anchorDate 'YYYY-MM-DD'). */
+/** null = ok, else a one-line human message. Checks: name 1..60 after trim; directoryId ∈ dirs; prompt non-empty; catchUp undefined or boolean; schedule shape per cadence (time parses; weekday 0..6; monthDays 1..28, 1 or 2 distinct entries; anchorDate 'YYYY-MM-DD'). */
 export function validateRoutineInput(input: RoutineInput, dirs: Pick<TrackedDirectory, 'id'>[]): string | null {
   const name = (input.name ?? '').trim();
   if (!name) return 'name is required';
   if (name.length > 60) return 'name must be 60 characters or fewer';
   if (!input.directoryId || !dirs.some((d) => d.id === input.directoryId)) return 'pick a directory';
   if (!(input.prompt ?? '').trim()) return 'prompt is required';
+  if (input.catchUp !== undefined && typeof input.catchUp !== 'boolean') return 'catch-up must be on or off';
   const s = input.schedule;
   if (!s) return 'schedule is required';
   if (!parseTime(s.time)) return 'time must be HH:MM';

@@ -710,6 +710,7 @@ export function createMockApi(): AgentsFlowApi {
       const r: Routine = {
         id: uuid(), name: input.name.trim(), directoryId: input.directoryId, provider: input.provider ?? 'claude',
         model: input.model || undefined, prompt: input.prompt.trim(), schedule: input.schedule, icon: input.icon ?? 'star',
+        ...(typeof input.catchUp === 'boolean' ? { catchUp: input.catchUp } : {}),
         enabled: true, createdAt: now, updatedAt: now, enabledAt: now,
       };
       routineState.routines = [...routineState.routines, r];

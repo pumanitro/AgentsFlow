@@ -1,5 +1,5 @@
 import type { TrackedDirectory } from '../../shared/types';
-import { CATCHUP_WINDOW_MS, type Routine, type RoutineRun, type RoutineSchedule } from '../../shared/routines';
+import type { Routine, RoutineRun, RoutineSchedule } from '../../shared/routines';
 
 const DAY_MS = 864e5;
 const pad2 = (n: number) => String(n).padStart(2, '0');
@@ -57,7 +57,8 @@ export function buildMockRoutines(dirs: TrackedDirectory[], nowMs: number): { ro
     { ...base('mock-reddit-daily', 'Reddit daily', 0, '/reddit-daily-routine', { cadence: 'daily', time: '09:00' }, 'reddit'), seedKey: 'reddit-daily' },
     base('mock-crash-sweep', 'Crash sweep', 1, 'Sweep new crash reports and file the repeats', { cadence: 'daily', time: '08:00' }, 'bug'),
     base('mock-telemetry-digest', 'Telemetry digest', 2, 'Digest today\'s telemetry into five lines', { cadence: 'daily', time: '18:30' }, 'chart'),
-    base('mock-inbox-sweep', 'Inbox sweep', 1, 'Sweep the inbox and file what needs an answer', { cadence: 'daily', time: '18:00' }, 'mail'),
+    // The one fixture with "run later if missed" switched off.
+    { ...base('mock-inbox-sweep', 'Inbox sweep', 1, 'Sweep the inbox and file what needs an answer', { cadence: 'daily', time: '18:00' }, 'mail'), catchUp: false },
     base('mock-changelog', 'Changelog', 0, '/devlog', { cadence: 'every2days', time: '10:00', anchorDate: dayKey(new Date(nowMs - 45 * DAY_MS)) }, 'book'),
     base('mock-weekly-metrics', 'Weekly metrics', 2, 'Summarise last week\'s metrics', { cadence: 'weekly', time: '08:30', weekday: 1 }, 'chart'),
     base('mock-invoice-run', 'Invoice run', 1, 'Prepare the invoices', { cadence: 'twiceMonthly', time: '12:00', monthDays: [1, 15] }, 'coin'),
@@ -78,7 +79,7 @@ export function buildMockRoutines(dirs: TrackedDirectory[], nowMs: number): { ro
     const n = i + 1;
     const id = `run-${r.id}-${ms}`;
     if (n % 11 === 0) {
-      return { id, routineId: r.id, slotAt: iso(ms), trigger: 'schedule', status: 'missed', startedAt: iso(Math.min(ms + CATCHUP_WINDOW_MS, nowMs)), endedAt: iso(Math.min(ms + CATCHUP_WINDOW_MS, nowMs)) };
+      return { id, routineId: r.id, slotAt: iso(ms), trigger: 'schedule', status: 'missed', startedAt: iso(Math.min(ms + DAY_MS, nowMs)), endedAt: iso(Math.min(ms + DAY_MS, nowMs)) };
     }
     const failed = n % 5 === 0;
     return {

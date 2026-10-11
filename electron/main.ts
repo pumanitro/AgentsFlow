@@ -1799,6 +1799,7 @@ ipcMain.handle(ROUTINES_IPC.create, (_e, input: RoutineInput): Routine => {
     prompt: input.prompt.trim(),
     schedule: input.schedule,
     icon: input.icon ?? 'star',
+    ...(typeof input.catchUp === 'boolean' ? { catchUp: input.catchUp } : {}),
     enabled: true,
     createdAt: now,
     updatedAt: now,
@@ -1814,6 +1815,7 @@ ipcMain.handle(ROUTINES_IPC.update, (_e, id: string, patch: RoutinePatch): Routi
   if (!cur) throw new Error('routine not found');
   const merged = { ...cur, ...patch };
   if (merged.enabled && !merged.directoryId) throw new Error('pick a directory before enabling');
+  if (patch.catchUp !== undefined && typeof patch.catchUp !== 'boolean') throw new Error('catch-up must be on or off');
   const err = validateRoutineInput(merged, store.getDirectories());
   // A plain pause of a routine whose peer has since gone must still succeed.
   if (err && (merged.enabled || patch.schedule || patch.name !== undefined || patch.prompt !== undefined)) throw new Error(err);

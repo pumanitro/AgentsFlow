@@ -1,7 +1,7 @@
 import { describe, it } from 'node:test';
 import * as assert from 'node:assert/strict';
 import { buildDayCells, dayKeysOfMonthGrid, dayKeysOfWeek, markStatusFor } from '../shared/routine-board';
-import { CATCHUP_WINDOW_MS } from '../shared/routines';
+import { CATCHUP_OFF_GRACE_MS } from '../shared/routines';
 import type { Routine, RoutineRun, RoutineSchedule } from '../shared/routines';
 
 // Local-constructor timestamps keep the suite TZ-independent.
@@ -48,26 +48,65 @@ describe('day key grids', () => {
 
 describe('markStatusFor', () => {
   const now = at(2026, 10, 10, 12);
+  const on = { enabled: true, catchUp: true, isNewestPast: true };
+  const off = { enabled: true, catchUp: false, isNewestPast: true };
 
   it('a run always wins', () => {
-    assert.equal(markStatusFor(run('a', iso(2026, 10, 1, 9), 'failed'), at(2026, 10, 1, 9), now, true), 'failed');
-    assert.equal(markStatusFor(run('a', iso(2026, 10, 11, 9), 'running'), at(2026, 10, 11, 9), now, false), 'running');
+    assert.equal(markStatusFor(run('a', iso(2026, 10, 1, 9), 'failed'), at(2026, 10, 1, 9), now, on), 'failed');
+    assert.equal(markStatusFor(run('a', iso(2026, 10, 11, 9), 'running'), at(2026, 10, 11, 9), now, { ...off, enabled: false }), 'running');
   });
 
   it('a future slot is scheduled', () => {
-    assert.equal(markStatusFor(undefined, at(2026, 10, 11, 9), now, true), 'scheduled');
+    assert.equal(markStatusFor(undefined, at(2026, 10, 11, 9), now, on), 'scheduled');
+    assert.equal(markStatusFor(undefined, at(2026, 10, 11, 9), now, { ...off, isNewestPast: false }), 'scheduled');
   });
 
-  it('a past slot is scheduled while catch-up can still run it, then missed', () => {
-    assert.equal(markStatusFor(undefined, now - CATCHUP_WINDOW_MS + 1, now, true), 'scheduled');
-    assert.equal(markStatusFor(undefined, now - CATCHUP_WINDOW_MS, now, true), 'missed');
-    assert.equal(markStatusFor(undefined, at(2026, 10, 10, 9), now, false), 'missed');
+  it('catch-up on: the newest past slot stays scheduled however old, older ones are missed', () => {
+    assert.equal(markStatusFor(undefined, at(2026, 10, 10, 9), now, on), 'scheduled');
+    assert.equal(markStatusFor(undefined, at(2026, 9, 1, 9), now, on), 'scheduled');
+    assert.equal(markStatusFor(undefined, at(2026, 10, 9, 9), now, { ...on, isNewestPast: false }), 'missed');
+  });
+
+  it('catch-up off: a past slot is scheduled only inside the grace', () => {
+    assert.equal(markStatusFor(undefined, now - CATCHUP_OFF_GRACE_MS, now, off), 'scheduled');
+    assert.equal(markStatusFor(undefined, now - CATCHUP_OFF_GRACE_MS - 1, now, off), 'missed');
+    assert.equal(markStatusFor(undefined, now - 1000, now, { ...off, isNewestPast: false }), 'missed');
+  });
+
+  it('a paused routine has no pending slot', () => {
+    assert.equal(markStatusFor(undefined, at(2026, 10, 10, 9), now, { ...on, enabled: false }), 'missed');
   });
 });
 
 describe('buildDayCells', () => {
   const now = at(2026, 10, 10, 12);   // Saturday
   const week = dayKeysOfWeek(now);
+
+  it('catch-up on: only the newest unrun past slot is pending, older ones are missed', () => {
+    const cells = buildDayCells([routine('d', daily())], [], week, now);
+    assert.deepEqual(week.map((k) => cell(cells, k).dailies[0].status), ['missed', 'missed', 'missed', 'missed', 'missed', 'scheduled', 'scheduled']);
+  });
+
+  it('catch-up on: a weekly slot days old is still pending, even when the newest past slot is in another week', () => {
+    const w = routine('w', { cadence: 'weekly', time: '09:00', weekday: 1 });
+    assert.equal(cell(buildDayCells([w], [], week, now), '2026-10-05').weekly[0].status, 'scheduled');
+    const prev = dayKeysOfWeek(at(2026, 10, 1));
+    assert.equal(cell(buildDayCells([w], [], prev, now), '2026-09-28').weekly[0].status, 'missed');
+  });
+
+  it('catch-up off: a past unrun slot older than the grace is missed', () => {
+    const r = routine('d', daily(), { catchUp: false });
+    assert.equal(cell(buildDayCells([r], [], week, now), '2026-10-10').dailies[0].status, 'missed');
+    assert.equal(cell(buildDayCells([r], [], week, at(2026, 10, 10, 9, 4)), '2026-10-10').dailies[0].status, 'scheduled');
+    assert.equal(cell(buildDayCells([r], [], week, at(2026, 10, 10, 9, 4)), '2026-10-09').dailies[0].status, 'missed');
+  });
+
+  it('a newest past slot with a recorded run shows the run, and nothing older turns pending', () => {
+    const r = routine('d', daily());
+    const cells = buildDayCells([r], [run('d', iso(2026, 10, 10, 9), 'missed')], week, now);
+    assert.equal(cell(cells, '2026-10-10').dailies[0].status, 'missed');
+    assert.equal(cell(cells, '2026-10-09').dailies[0].status, 'missed');
+  });
 
   it('flags today and the past', () => {
     const cells = buildDayCells([], [], week, now);
@@ -122,7 +161,8 @@ describe('buildDayCells', () => {
     const manual = run('w', iso(2026, 10, 9, 16, 42), 'success', { trigger: 'manual' });
     const cells = buildDayCells([r], [manual], week, now);
     assert.deepEqual(cell(cells, '2026-10-09').weekly.map((m) => m.run?.trigger), ['manual']);
-    assert.deepEqual(cell(cells, '2026-10-05').weekly.map((m) => m.status), ['missed']);
+    // A manual run does not take the slot: Monday's is still the newest unrun one, pending catch-up.
+    assert.deepEqual(cell(cells, '2026-10-05').weekly.map((m) => m.status), ['scheduled']);
   });
 
   it('runs of a deleted routine and runs outside the days are dropped', () => {

@@ -75,6 +75,7 @@ function sanitizeRoutine(r: any): Routine | null {
   if (enabledAt) out.enabledAt = enabledAt;
   const seedKey = str(r.seedKey);
   if (seedKey) out.seedKey = seedKey;
+  if (typeof r.catchUp === 'boolean') out.catchUp = r.catchUp;
   return out;
 }
 

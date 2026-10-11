@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { routineCatchesUp } from '../../../shared/routines';
 import { cadenceLabel, formatSlot, nextOccurrence } from '../../../shared/routine-schedule';
 import { STATUS_LABEL, STATUS_TEXT } from '../../lib/routine-style';
 import type { RoutinePreviewProps } from './props';
@@ -7,7 +8,7 @@ import { RoutineGlyph, StatusMark } from './marks';
 const BTN = 'px-3 py-1 text-[11px] uppercase tracking-wider rounded-md border border-border bg-panel text-muted hover:text-text hover:bg-panel2 disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-panel disabled:hover:text-muted';
 
 export default function RoutinePreview(props: RoutinePreviewProps) {
-  const { routine, runs, dir, nowMs, busy, highlightRunId, onRunNow, onTogglePaused, onEdit, onDelete, onOpenRun, onClose } = props;
+  const { routine, runs, dir, nowMs, busy, highlightRunId, onRunNow, onTogglePaused, onToggleCatchUp, onEdit, onDelete, onOpenRun, onClose } = props;
   const [confirming, setConfirming] = useState(false);
   const highlightRef = useRef<HTMLElement | null>(null);
 
@@ -25,6 +26,7 @@ export default function RoutinePreview(props: RoutinePreviewProps) {
     [runs, routine.id],
   );
   const next = routine.enabled ? nextOccurrence(routine.schedule, nowMs) : null;
+  const catchUp = routineCatchesUp(routine);
 
   return (
     <aside className="w-80 shrink-0 min-h-0 flex flex-col border-l border-border bg-panel/40" aria-label="Routine details">
@@ -43,6 +45,24 @@ export default function RoutinePreview(props: RoutinePreviewProps) {
       <div className="shrink-0 px-4 py-3 border-b border-border space-y-3">
         <div className="text-xs text-muted">
           {routine.enabled ? (next ? <>Next run: <span className="text-text">{formatSlot(next)}</span></> : 'Next run: —') : <span className="text-warn">Paused</span>}
+        </div>
+        <div className="flex items-center gap-2 text-xs text-muted">
+          <span>Run later if missed:</span>
+          <button
+            type="button"
+            role="switch"
+            aria-checked={catchUp}
+            aria-label="Run later if missed"
+            disabled={busy}
+            onClick={onToggleCatchUp}
+            title={catchUp ? 'If the computer was off at the scheduled time, the run starts when it is back on' : 'A missed time is skipped and shown as missed'}
+            className="flex items-center gap-1.5 disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            <span className={`relative inline-block h-3.5 w-6 rounded-full border ${catchUp ? 'bg-accent border-accent' : 'bg-panel2 border-border'}`}>
+              <span className={`absolute top-px h-2.5 w-2.5 rounded-full ${catchUp ? 'right-px bg-bg' : 'left-px bg-muted'}`} />
+            </span>
+            <span className="text-text">{catchUp ? 'On' : 'Off'}</span>
+          </button>
         </div>
         {confirming ? (
           <div className="flex items-center gap-2 text-xs">

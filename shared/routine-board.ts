@@ -1,4 +1,4 @@
-import { CATCHUP_WINDOW_MS } from './routines';
+import { CATCHUP_LOOKBACK_MS, CATCHUP_OFF_GRACE_MS, routineCatchesUp } from './routines';
 import type { MarkStatus, Routine, RoutineCadence, RoutineRun } from './routines';
 import { addDays, dayKeyStartMs, localDayKey, occurrencesBetween, routineFloorMs } from './routine-schedule';
 
@@ -32,13 +32,17 @@ export function dayKeysOfMonthGrid(anchorMs: number): string[] {
   return keysFrom(first.getFullYear(), first.getMonth(), 1 - sinceMonday, 42);
 }
 
-/** no run: slot in the future → 'scheduled'; slot in the past → still 'scheduled' while the routine is enabled and now − slot < CATCHUP_WINDOW_MS (pending catch-up), else 'missed'. With a run → run.status. */
-export function markStatusFor(run: RoutineRun | undefined, slotMs: number, nowMs: number, enabled: boolean): MarkStatus {
+/** What decides scheduled-vs-missed for a past slot with no run: the routine's switches and whether the slot is its newest past one. */
+export interface PastSlotRule { enabled: boolean; catchUp: boolean; isNewestPast: boolean }
+
+/** no run: slot in the future → 'scheduled'; slot in the past → still 'scheduled' (pending) only while the routine is enabled, the slot is its NEWEST past one, and either catch-up is on or now − slot ≤ CATCHUP_OFF_GRACE_MS; else 'missed'. With a run → run.status. */
+export function markStatusFor(run: RoutineRun | undefined, slotMs: number, nowMs: number, rule: PastSlotRule): MarkStatus {
   if (run) return run.status;
   if (slotMs > nowMs) return 'scheduled';
-  // A just-passed slot of a live routine is about to be dispatched (or caught
-  // up) by the scheduler, so it is not missed yet.
-  return enabled && nowMs - slotMs < CATCHUP_WINDOW_MS ? 'scheduled' : 'missed';
+  // The scheduler only ever runs a routine's newest past slot: late if catch-up
+  // is on, inside the grace if it is off. Every other unrun past slot is missed.
+  if (!rule.enabled || !rule.isNewestPast) return 'missed';
+  return rule.catchUp || nowMs - slotMs <= CATCHUP_OFF_GRACE_MS ? 'scheduled' : 'missed';
 }
 
 const BUCKET: Record<RoutineCadence, 'dailies' | 'every2days' | 'weekly' | 'twiceMonthly' | 'monthly'> = {
@@ -72,10 +76,25 @@ export function buildDayCells(routines: Routine[], runs: RoutineRun[], dayKeys: 
   for (const run of runs) runsByKey.set(runKey(run.routineId, run.slotAt), run);
   const used = new Set<string>();
 
+  // Each routine's newest past slot — it may lie outside the days shown.
+  const newestPast = new Map<string, number>();
+  const newestPastMs = (routine: Routine): number => {
+    let ms = newestPast.get(routine.id);
+    if (ms === undefined) {
+      const past = occurrencesBetween(routine.schedule, Math.max(routineFloorMs(routine), nowMs - CATCHUP_LOOKBACK_MS), nowMs);
+      ms = past.length ? Date.parse(past[past.length - 1]) : NaN;
+      newestPast.set(routine.id, ms);
+    }
+    return ms;
+  };
+
   const place = (routine: Routine, slotAt: string, run: RoutineRun | undefined) => {
     const cell = cells.get(localDayKey(Date.parse(slotAt)));
     if (!cell) return;
-    const status = markStatusFor(run, Date.parse(slotAt), nowMs, routine.enabled);
+    const slotMs = Date.parse(slotAt);
+    const status = markStatusFor(run, slotMs, nowMs, {
+      enabled: routine.enabled, catchUp: routineCatchesUp(routine), isNewestPast: !run && slotMs === newestPastMs(routine),
+    });
     cell[BUCKET[routine.schedule.cadence]].push({ routine, slotAt, status, run });
   };
 

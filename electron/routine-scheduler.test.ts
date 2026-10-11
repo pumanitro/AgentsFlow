@@ -7,6 +7,7 @@ import { createRoutinesStore } from './routines-store';
 import { createRoutineScheduler } from './routine-scheduler';
 import type { RoutineSchedulerDeps } from './routines-api';
 import type { Conversation, TrackedDirectory } from '../shared/types';
+import { CATCHUP_LOOKBACK_MS, CATCHUP_OFF_GRACE_MS } from '../shared/routines';
 import type { Routine, RoutineRun, RoutineSchedule } from '../shared/routines';
 
 const MIN = 60_000;
@@ -140,7 +141,7 @@ describe('scheduler rule 2: due slots', () => {
     assert.equal(h.spawns[0].routine.id, 'r1');
   });
 
-  it('a slot older than 90 s but inside 20 h runs as catchup', async () => {
+  it('a slot older than 90 s runs as catchup', async () => {
     const h = harness(at(10, 12, 0));
     addRoutine(h);
     await h.sched.tick();
@@ -160,19 +161,21 @@ describe('scheduler rule 2: due slots', () => {
     assert.equal(h.spawns.length, 1);
   });
 
-  it('newest slot outside the 20 h window is missed, never run', async () => {
-    const h = harness(at(10, 8, 0));   // yesterday 09:00 is 23 h old
-    addRoutine(h, { createdAt: isoOf(at(9, 0)) });
+  it('never looks back more than CATCHUP_LOOKBACK_MS', async () => {
+    const h = harness(at(20, 8, 0));
+    addRoutine(h, { createdAt: isoOf(new Date(2026, 6, 1).getTime()) });
     await h.sched.tick();
-    assert.equal(h.spawns.length, 0);
-    assert.deepEqual(runsOf(h).map((r) => r.status), ['missed']);
+    assert.equal(runsOf(h).length, CATCHUP_LOOKBACK_MS / DAY);
+    assert.equal(h.spawns.length, 1);
   });
 
-  it('never looks back more than 7 days', async () => {
-    const h = harness(at(20, 8, 0));
-    addRoutine(h, { createdAt: isoOf(at(1, 0)) });
+  it('an old unrun slot with a later slot already recorded is missed, never run', async () => {
+    const h = harness(at(20, 12, 0));
+    addRoutine(h, { createdAt: isoOf(at(17, 0)) });
+    for (const d of [19, 20]) h.store.upsertRun({ id: `done-${d}`, routineId: 'r1', slotAt: isoOf(at(d, 9)), trigger: 'schedule', status: 'success', startedAt: isoOf(at(d, 9)), endedAt: isoOf(at(d, 9, 5)) });
     await h.sched.tick();
-    assert.equal(runsOf(h).length, 7);
+    assert.equal(h.spawns.length, 0);
+    assert.deepEqual(runsOf(h).map((r) => [new Date(r.slotAt).getDate(), r.status]), [[17, 'missed'], [18, 'missed'], [19, 'success'], [20, 'success']]);
   });
 
   it('a live run holds the newest slot unrun (not missed) until it ends', async () => {
@@ -217,6 +220,84 @@ describe('scheduler rule 2: due slots', () => {
     addRoutine(h, { createdAt: isoOf(at(1, 0)), enabledAt: isoOf(at(10, 11, 0)) });
     await h.sched.tick();
     assert.equal(h.store.listRuns().length, 0);
+  });
+});
+
+describe('scheduler rule 2: catch-up switch', () => {
+  // The real schedule math, so weekly and monthly slots exist.
+  const real = { occurrencesBetween: undefined };
+
+  it('default (catchUp undefined) runs the newest slot however old it is', async () => {
+    const h = harness(at(10, 8, 0));   // yesterday 09:00 is 23 h old
+    addRoutine(h, { createdAt: isoOf(at(9, 0)) });
+    await h.sched.tick();
+    assert.equal(h.spawns.length, 1);
+    assert.deepEqual(runsOf(h).map((r) => [r.slotAt, r.status, r.trigger]), [[isoOf(at(9, 9)), 'running', 'catchup']]);
+  });
+
+  it('on: a weekly slot missed 2 days ago runs once, older ones are missed', async () => {
+    const h = harness(at(7, 12, 0), real);   // Wednesday; the slot was Monday 5 Oct 09:00
+    addRoutine(h, { catchUp: true, schedule: { cadence: 'weekly', time: '09:00', weekday: 1 }, createdAt: isoOf(new Date(2026, 8, 20).getTime()) });
+    await h.sched.tick();
+    assert.deepEqual(runsOf(h).map((r) => [new Date(r.slotAt).getDate(), r.status, r.trigger]), [[21, 'missed', 'schedule'], [28, 'missed', 'schedule'], [5, 'running', 'catchup']]);
+    assert.equal(h.spawns.length, 1);
+    h.setNow(at(7, 12, 1));
+    await h.sched.tick();
+    assert.equal(h.spawns.length, 1, 'the caught-up slot is taken, never run twice');
+  });
+
+  it('on: a monthly slot missed 10 days ago still runs', async () => {
+    const h = harness(at(11, 12, 0), real);
+    addRoutine(h, { schedule: { cadence: 'monthly', time: '09:00', monthDays: [1] }, createdAt: isoOf(new Date(2026, 7, 20).getTime()) });
+    await h.sched.tick();
+    assert.deepEqual(runsOf(h).map((r) => [r.slotAt, r.status, r.trigger]), [[isoOf(at(1, 9)), 'running', 'catchup']]);
+  });
+
+  it('off: a slot noticed inside the grace is dispatched', async () => {
+    const h = harness(at(10, 9, 0) + CATCHUP_OFF_GRACE_MS - 1000);
+    addRoutine(h, { catchUp: false });
+    await h.sched.tick();
+    assert.equal(h.spawns.length, 1);
+    assert.deepEqual(runsOf(h).map((r) => [r.status, r.trigger]), [['running', 'catchup']]);
+  });
+
+  it('off: a slot noticed after the grace is recorded missed and never run', async () => {
+    const h = harness(at(10, 9, 0) + CATCHUP_OFF_GRACE_MS + 1000);
+    addRoutine(h, { catchUp: false });
+    await h.sched.tick();
+    h.setNow(at(10, 12, 0));
+    await h.sched.tick();
+    assert.equal(h.spawns.length, 0);
+    assert.deepEqual(runsOf(h).map((r) => [r.slotAt, r.status]), [[isoOf(at(10, 9)), 'missed']]);
+  });
+
+  it('off: a slot held by a live run past the grace is missed', async () => {
+    const h = harness(at(10, 9, 0) + 5_000);
+    addRoutine(h, { catchUp: false });
+    h.store.upsertRun({ id: 'live', routineId: 'r1', slotAt: isoOf(at(10, 8)), trigger: 'manual', status: 'running', startedAt: isoOf(at(10, 8)), conversationId: 'cl' });
+    h.convs.set('cl', conv('cl', { state: 'working', status: 'busy' }));
+    await h.sched.tick();
+    assert.equal(h.store.findRun('r1', isoOf(at(10, 9))), null);
+    h.setNow(at(10, 9, 10));
+    await h.sched.tick();
+    assert.equal(h.spawns.length, 0);
+    assert.equal(h.store.findRun('r1', isoOf(at(10, 9)))?.status, 'missed');
+  });
+
+  it('flipping off → on does not resurrect a slot already recorded missed', async () => {
+    const h = harness(at(10, 12, 0));
+    addRoutine(h, { catchUp: false });
+    await h.sched.tick();
+    assert.deepEqual(runsOf(h).map((r) => r.status), ['missed']);
+    h.store.updateRoutine('r1', { catchUp: true });
+    h.setNow(at(10, 12, 1));
+    await h.sched.tick();
+    assert.equal(h.spawns.length, 0);
+    assert.deepEqual(runsOf(h).map((r) => r.status), ['missed']);
+    // The next slot is a fresh one and catches up as usual.
+    h.setNow(at(11, 15, 0));
+    await h.sched.tick();
+    assert.deepEqual(runsOf(h).map((r) => [r.status, r.trigger]), [['missed', 'schedule'], ['running', 'catchup']]);
   });
 });
 

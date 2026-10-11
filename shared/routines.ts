@@ -30,6 +30,7 @@ export interface Routine {
   createdAt: string;          // ISO
   updatedAt: string;          // ISO
   enabledAt?: string;         // ISO of the latest false→true flip. Slots earlier than max(createdAt, enabledAt) do not exist
+  catchUp?: boolean;          // run a slot late if the app was closed at its time. undefined = true
   seedKey?: string;           // present on app-seeded routines; makes seeding idempotent
 }
 
@@ -58,6 +59,7 @@ export interface RoutineInput {
   provider?: AgentProvider;
   model?: string;
   icon?: RoutineIcon;
+  catchUp?: boolean;
 }
 export type RoutinePatch = Partial<RoutineInput> & { enabled?: boolean };
 
@@ -77,11 +79,17 @@ export const ROUTINES_IPC = {
 } as const;
 
 export const SCHEDULER_TICK_MS = 15_000;
-export const CATCHUP_WINDOW_MS = 20 * 60 * 60 * 1000;   // a slot older than this is missed, never run
+export const CATCHUP_OFF_GRACE_MS = 5 * 60 * 1000;      // catch-up off: a slot noticed later than this is missed, never run
+export const CATCHUP_LOOKBACK_MS = 40 * 24 * 60 * 60 * 1000;   // how far back an unrun slot is looked for; longer than a month so a monthly slot is found
 export const RUN_TIMEOUT_MS = 6 * 60 * 60 * 1000;       // a run still live after this fails as 'timed out'
 export const RUNS_RETENTION_DAYS = 180;                   // runs older than this are pruned from routines.json
 export const RUNS_SNAPSHOT_DAYS = 120;                    // runs older than this are not sent to the renderer
 export const MAX_RUNNING_PER_ROUTINE = 1;                 // a new slot waits while the previous run is live
+
+/** Catch-up is on unless the routine says otherwise, so files written before the switch existed keep running late slots. */
+export function routineCatchesUp(r: Pick<Routine, 'catchUp'>): boolean {
+  return r.catchUp !== false;
+}
 
 /**
  * The run status a chat's live fields imply. null = no signal yet (starting /

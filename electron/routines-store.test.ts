@@ -39,6 +39,23 @@ describe('routines store', () => {
     assert.equal(disk.version, 1);
   });
 
+  it('round-trips catchUp and drops a junk value on load', () => {
+    const file = tmpFile();
+    const a = createRoutinesStore(file, { now: () => T0 });
+    a.addRoutine(routine('off', { catchUp: false }));
+    a.addRoutine(routine('on', { catchUp: true }));
+    a.addRoutine(routine('unset'));
+    a.addRoutine(routine('junk', { catchUp: 'no' as any }));
+    a.updateRoutine('unset', { name: 'renamed' });
+    a.flushSync();
+    const b = createRoutinesStore(file, { now: () => T0 });
+    assert.equal(b.getRoutine('off')?.catchUp, false);
+    assert.equal(b.getRoutine('on')?.catchUp, true);
+    assert.equal(b.getRoutine('unset')?.catchUp, undefined);
+    assert.equal('catchUp' in b.getRoutine('junk')!, false);
+    assert.equal(b.updateRoutine('off', { catchUp: true })?.catchUp, true);
+  });
+
   it('writes atomically: no temp file left behind, file always parses', () => {
     const file = tmpFile();
     const s = createRoutinesStore(file, { now: () => T0 });

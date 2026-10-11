@@ -178,6 +178,14 @@ describe('validateRoutineInput', () => {
     for (const c of ['daily', 'every2days', 'weekly', 'twiceMonthly', 'monthly'] as const) assert.equal(vs(defaultSchedule(c, at(2026, 10, 10))), null, c);
   });
 
+  it('accepts catch-up on, off or unset and rejects anything else', () => {
+    assert.equal(v({ catchUp: true }), null);
+    assert.equal(v({ catchUp: false }), null);
+    assert.equal(v({ catchUp: undefined }), null);
+    assert.equal(v({ catchUp: 'yes' as any }), 'catch-up must be on or off');
+    assert.equal(v({ catchUp: null as any }), 'catch-up must be on or off');
+  });
+
   it('checks name, directory and prompt', () => {
     assert.equal(v({ name: '   ' }), 'name is required');
     assert.equal(v({ name: 'x'.repeat(61) }), 'name must be 60 characters or fewer');

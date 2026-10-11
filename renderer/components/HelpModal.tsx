@@ -41,6 +41,8 @@ const SHORTCUTS: { section: string; items: Shortcut[] }[] = [
       { keys: ['click a mark'], desc: 'Select that routine and highlight the run in the preview' },
       { keys: ['All agents ▾'], desc: 'Filter the sidebar, week and month to one agent (peer) or a few' },
       { keys: ['‹ › / Today'], desc: 'Move the week or month back / forward, or jump to the current one' },
+      { keys: ['Run later if missed'], desc: 'On (default): if the computer was off at a routine\'s time, its newest missed run starts when the app is back, however late' },
+      { keys: ['Run later if missed', 'Off'], desc: 'A time the app does not notice within 5 minutes is skipped and shown as missed' },
     ],
   },
   {

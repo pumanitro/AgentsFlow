@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { RoutinesViewProps } from './props';
+import { routineCatchesUp } from '../../../shared/routines';
 import type { RoutineInput, RoutineRun } from '../../../shared/routines';
 import type { SlotMark } from '../../../shared/routine-board';
 import { api } from '../../lib/ipc';
@@ -127,6 +128,11 @@ export default function RoutinesView({ dirs, onOpenConversation }: RoutinesViewP
     void act(() => api().updateRoutine(selected.id, { enabled: !selected.enabled }));
   }, [selected, act]);
 
+  const onToggleCatchUp = useCallback(() => {
+    if (!selected) return;
+    void act(() => api().updateRoutine(selected.id, { catchUp: !routineCatchesUp(selected) }));
+  }, [selected, act]);
+
   const onDelete = useCallback(async () => {
     if (!selected) return;
     const id = selected.id;
@@ -215,6 +221,7 @@ export default function RoutinesView({ dirs, onOpenConversation }: RoutinesViewP
             highlightRunId={highlightRunId}
             onRunNow={() => { void onRunNow(); }}
             onTogglePaused={onTogglePaused}
+            onToggleCatchUp={onToggleCatchUp}
             onEdit={() => { setFormError(null); setForm('edit'); }}
             onDelete={() => { void onDelete(); }}
             onOpenRun={onOpenRun}

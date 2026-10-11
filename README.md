@@ -87,7 +87,7 @@ Mark colours: green success · red failed · blue (pulsing) in progress · orang
 
 A run is a normal chat: when a slot is due, the app starts a background session in the routine's peer directory and pins it as "Routine name · 11 Oct 09:00". Its mark follows that chat, and the run row in the preview opens it.
 
-Catch-up rule: the scheduler checks every 15 s. If the app was closed over a slot and comes back within 20 h, that newest missed slot runs once. Older unrun slots are marked missed and never run. A routine never runs a slot older than its own creation or last resume, and a paused routine records no misses. Deleting a routine removes it and its run history, but its chats stay.
+Catch-up rule: the scheduler checks every 15 s. If the computer was off (or the app closed) at a routine's time, its newest missed slot runs once when the app is back, however late; older unrun slots are marked missed and never run. Each routine has a **Run later if missed** switch (form and preview, on by default): switched off, a slot the app does not notice within 5 minutes is skipped and shown as missed. A routine never runs a slot older than its own creation or last resume, and a paused routine records no misses. Deleting a routine removes it and its run history, but its chats stay.
 
 Data lives in `<userData>/routines.json`.
 

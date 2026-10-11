@@ -2,9 +2,11 @@ import { v4 as uuid } from 'uuid';
 import type { RoutineScheduler, RoutineSchedulerDeps } from './routines-api';
 import { occurrencesBetween, routineFloorMs } from '../shared/routine-schedule';
 import {
-  CATCHUP_WINDOW_MS,
+  CATCHUP_LOOKBACK_MS,
+  CATCHUP_OFF_GRACE_MS,
   RUN_TIMEOUT_MS,
   SCHEDULER_TICK_MS,
+  routineCatchesUp,
   runStatusFromConversation,
   type Routine,
   type RoutineRun,
@@ -12,7 +14,6 @@ import {
 } from '../shared/routines';
 
 const FIRST_TICK_DELAY_MS = 10_000;
-const LOOKBACK_MS = 7 * 24 * 60 * 60 * 1000;
 // A slot dispatched this close to its time is "on schedule"; later than that it is a catch-up.
 const ON_TIME_MS = 90_000;
 // The conversation row appears a beat after spawn returns; give it a minute before calling it removed.
@@ -93,15 +94,19 @@ export function createRoutineScheduler(deps: RoutineSchedulerDeps): RoutineSched
   function planRoutine(routine: Routine, nowMs: number, dirIds: Set<string>, pending: Promise<void>[]): void {
     // A paused or peer-less routine records nothing: no runs, and no missed marks either.
     if (!routine.enabled || !routine.directoryId || !dirIds.has(routine.directoryId)) return;
-    const from = Math.max(floorMs(routine), nowMs - LOOKBACK_MS);
+    const from = Math.max(floorMs(routine), nowMs - CATCHUP_LOOKBACK_MS);
     if (from >= nowMs) return;
-    const due = occ(routine.schedule, from, nowMs).filter((slot) => !store.findRun(routine.id, slot));
+    const slots = occ(routine.schedule, from, nowMs);
+    const due = slots.filter((slot) => !store.findRun(routine.id, slot));
     if (!due.length) return;
     const nowIso = iso(nowMs);
-    const newest = due[due.length - 1];
-    for (const slot of due.slice(0, -1)) missSlot(routine, slot, nowIso);
+    // Only the routine's latest slot can still run; an unrun slot with a later one after it is missed.
+    const newest = slots[slots.length - 1];
+    for (const slot of due) if (slot !== newest) missSlot(routine, slot, nowIso);
+    if (due[due.length - 1] !== newest) return;
     const age = nowMs - Date.parse(newest);
-    if (age > CATCHUP_WINDOW_MS) { missSlot(routine, newest, nowIso); return; }
+    // Catch-up on: the newest slot runs however late the app notices it. Off: only inside a short grace.
+    if (!routineCatchesUp(routine) && age > CATCHUP_OFF_GRACE_MS) { missSlot(routine, newest, nowIso); return; }
     // One run at a time per routine: the newest slot waits for the live one and is re-checked next tick.
     if (store.listRuns({ routineId: routine.id }).some(isLive)) return;
     pending.push(dispatch(routine, newest, age < ON_TIME_MS ? 'schedule' : 'catchup', nowMs).done);
