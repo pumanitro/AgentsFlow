@@ -279,6 +279,7 @@ test('unreachable host: one-line error, 5 s → 10 s backoff, reconnect() retrie
     assert.equal(probes(), 1);
     mock.timers.tick(5_000);
     await waitFor(() => probes() === 2, 'retry at 5 s');
+    await flush(); // let the failed probe schedule its retry before the clock moves
     mock.timers.tick(9_999);
     await flush();
     assert.equal(probes(), 2, 'second retry waits 10 s');
@@ -288,6 +289,38 @@ test('unreachable host: one-line error, 5 s → 10 s backoff, reconnect() retrie
     await hosts.reconnect(KEY);
     assert.equal(probes(), 4);
     assert.equal(hosts.status(KEY)?.state, 'ready');
+  } finally { mock.timers.reset(); }
+  await hosts.stop();
+});
+
+test('a dead local link is repaired and the probe retried in the same attempt', async () => {
+  const { root } = makeBundle();
+  let reachable = false;
+  let repairs = 0;
+  const { t, rec } = makeTransport({ reachable: () => reachable });
+  t.repairLink = async () => { repairs++; reachable = true; return { repaired: true }; };
+  const { deps } = makeDeps([remoteDir], t, root);
+  const hosts = new RemoteHosts(deps);
+  hosts.start();
+  await waitFor(() => hosts.status(KEY)?.state === 'ready', 'ready');
+  assert.equal(repairs, 1);
+  assert.equal(rec.runs.filter((r) => r === 'echo ok').length, 2);
+  assert.equal(hosts.status(KEY)?.error, undefined);
+  await hosts.stop();
+});
+
+test('a link that cannot be repaired names the cause ahead of ssh\'s own error', async () => {
+  const { root } = makeBundle();
+  const { t, rec } = makeTransport({ reachable: () => false });
+  t.repairLink = async () => ({ repaired: false, note: 'Tailscale is not running on this Mac' });
+  const { deps } = makeDeps([remoteDir], t, root);
+  const hosts = new RemoteHosts(deps);
+  mock.timers.enable({ apis: ['setTimeout'] });
+  try {
+    hosts.start();
+    await waitFor(() => hosts.status(KEY)?.state === 'unreachable', 'unreachable');
+    assert.equal(hosts.status(KEY)?.error, 'Tailscale is not running on this Mac: ssh: connect to host studio port 22: Connection refused');
+    assert.equal(rec.runs.filter((r) => r === 'echo ok').length, 1, 'no second probe without a repair');
   } finally { mock.timers.reset(); }
   await hosts.stop();
 });
