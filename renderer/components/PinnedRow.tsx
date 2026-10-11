@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { Conversation } from '../../shared/types';
+import { contractTint, KEEPER_KEPT_ALIVE_LABEL, KEEPER_STALLED_LABEL, KEEPER_TICK_COLOR } from '../lib/contract';
 import { statusDotClass } from '../lib/status';
 import { useUIState } from '../lib/ui-state';
 import ProviderIcon, { providerName } from './ProviderIcon';
@@ -173,6 +174,23 @@ export default function PinnedRow({ conv, onAttach, onSaveTitle, onMarkDone, onA
         {failed
           ? <span className="min-w-0 max-w-[28rem] truncate text-xs text-err mr-1">{conv.description}</span>
           : !ready && <span className="shrink-0 text-xs text-muted italic mr-1">starting…</span>}
+        {conv.keeper?.stalled && (
+          <span
+            className="shrink-0 text-[11px] font-semibold leading-none px-1.5 py-1 rounded border border-warn bg-warn/20 text-warn whitespace-nowrap"
+            title={conv.keeper.stalled}
+          >
+            {KEEPER_STALLED_LABEL}
+          </span>
+        )}
+        {conv.keeper?.keptAlive && (
+          <span
+            className="shrink-0 text-[11px] font-semibold leading-none px-1.5 py-1 rounded border whitespace-nowrap"
+            style={{ color: KEEPER_TICK_COLOR, borderColor: KEEPER_TICK_COLOR, backgroundColor: contractTint(KEEPER_TICK_COLOR, 0x33) }}
+            title="The Keeper is keeping this chat going until its work is finished"
+          >
+            {KEEPER_KEPT_ALIVE_LABEL}
+          </span>
+        )}
         {onAddTask && (
           <button
             onClick={(e) => { e.stopPropagation(); onAddTask(); }}

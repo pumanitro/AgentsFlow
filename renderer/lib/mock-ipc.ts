@@ -1,4 +1,4 @@
-import type { AccountsSnapshot, AgentProvider, AgentsFlowApi, CodexAccount, Conversation, PinnedDivider, PinnedItemRef, PinnedTodo, TrackedDirectory, SpawnRequest, GitStatusResult, FileEntry, SearchOptions, SearchResult, SearchMatchLine, WorktreeInfo } from '../../shared/types';
+import type { AccountsSnapshot, AgentProvider, AgentsFlowApi, CodexAccount, Conversation, GuardPins, GuardSnapshot, KeeperSnapshot, PinnedDivider, PinnedItemRef, PinnedTodo, TrackedDirectory, SpawnRequest, GitStatusResult, FileEntry, SearchOptions, SearchResult, SearchMatchLine, WorktreeInfo } from '../../shared/types';
 import { forkTitle } from '../../shared/fork-title';
 import type { Routine, RoutineRun, RoutinesSnapshot } from '../../shared/routines';
 import { validateRoutineInput } from '../../shared/routine-schedule';
@@ -114,6 +114,69 @@ function insertRefAtEndOfFirstSection(state: MockShape, ref: PinnedItemRef) {
     ref,
     ...state.pinnedOrder.slice(insertAt),
   ];
+}
+
+// ---- Keeper / memory guard samples ------------------------------------------
+// A static, realistic picture for the browser demo: two chats being kept alive,
+// one the Keeper is deliberately leaving alone, one spawn waiting for memory;
+// three containers with mixed verdicts; the guard in dry-run.
+let mockPins: GuardPins = { version: 1, keep: ['postgres-arrow'], mode: 'dry-run', idleMinutes: 120 };
+
+function mockKeeperSnapshot(state: MockShape): KeeperSnapshot {
+  const now = Date.now();
+  const ago = (min: number) => new Date(now - min * 60_000).toISOString();
+  // Borrow real mock rows where there are some, so clicking through works.
+  const row = (i: number, title: string, peer: string) => {
+    const c = state.conversations[i];
+    return { conversationId: c?.id ?? `mock-keeper-${i}`, title: c?.title || title, peer: c?.displayName || peer };
+  };
+  const a = row(0, 'Migrate the billing tests to the new runner', 'atlas');
+  const b = row(1, 'Daily routine: triage the inbox every hour', 'ops');
+  const c = row(2, 'Refactor the import pipeline', 'influence');
+  return {
+    at: new Date(now).toISOString(),
+    enabled: true,
+    paused: null,
+    items: [
+      { ...a, contract: 'until-done', contractSource: 'chip', status: 'kept-alive', detail: 'stopped short twice — told to continue', lastNudgeAt: ago(4), lastNudgeReason: 'stopped-short', nudgesLeftThisHour: 4 },
+      { ...b, contract: 'forever', contractSource: 'skill', status: 'kept-alive', detail: 'daemon died — relaunched', lastNudgeAt: ago(27), lastNudgeReason: 'daemon-dead', nudgesLeftThisHour: 5 },
+      { ...c, contract: 'until-done', contractSource: 'inferred', status: 'stalled', detail: 'asked you a question at 09:41', lastNudgeAt: null, lastNudgeReason: null, nudgesLeftThisHour: 6 },
+    ],
+    deferred: [
+      { file: '/Users/demo/.claude/locks/mem-deferred/abc12345-1760170860000.json', sessionId: 'abc12345-0000', conversationId: a.conversationId, title: a.title, cwd: '/Users/demo/code/atlas', at: ago(2), what: 'spawn: test-runner', waitingFor: 'memory' },
+    ],
+    recent: [
+      { at: ago(4), conversationId: a.conversationId, title: a.title, cause: 'stopped-short', ok: true, detail: 'typed "continue"' },
+      { at: ago(27), conversationId: b.conversationId, title: b.title, cause: 'daemon-dead', ok: true, detail: 'relaunched in the background' },
+      { at: ago(58), conversationId: a.conversationId, title: a.title, cause: 'killed-workload', ok: true, detail: 'vitest run was stopped to protect memory — told to rerun' },
+    ],
+  };
+}
+
+function mockGuardSnapshot(): GuardSnapshot {
+  const now = Date.now();
+  const ago = (min: number) => new Date(now - min * 60_000).toISOString();
+  const pinned = (name: string) => mockPins.keep.includes(name);
+  return {
+    at: new Date(now).toISOString(),
+    level: 'warn',
+    levelSince: ago(3),
+    reasons: ['compressed 36.2 GB > 32 GB', 'swap 18.5 GB > 8 GB'],
+    sample: { at: now, pressure: 2, compressedGB: 36.2, swapUsedGB: 18.5, availGB: 24.1 },
+    swapGrowthGBper5min: 0.3,
+    mode: mockPins.mode,
+    idleMinutes: mockPins.idleMinutes,
+    admissionClosed: false,
+    containers: [
+      { name: 'postgres-arrow', project: 'arrow', projectDir: '/Users/demo/code/arrow', autoRemove: false, pinned: pinned('postgres-arrow'), running: true, cpuPct: 0.4, memMB: 212, publishedPorts: [5432], establishedConns: 0, lastActiveAt: ago(190), idleMinutes: 190, verdict: pinned('postgres-arrow') ? 'keep-pinned' : 'stop-candidate', note: pinned('postgres-arrow') ? 'pinned by you' : 'idle 3h10m, project arrow' },
+      { name: 'customer-ui', project: 'vitaminology', projectDir: '/Users/demo/code/nutrable', autoRemove: false, pinned: pinned('customer-ui'), running: true, cpuPct: 11.8, memMB: 1480, publishedPorts: [55423], establishedConns: 2, lastActiveAt: ago(0), idleMinutes: 0, verdict: pinned('customer-ui') ? 'keep-pinned' : 'keep-active', note: pinned('customer-ui') ? 'pinned by you' : '2 open connections on :55423' },
+      { name: 'redis', project: null, projectDir: null, autoRemove: false, pinned: pinned('redis'), running: true, cpuPct: 0.1, memMB: 38, publishedPorts: [6379], establishedConns: 0, lastActiveAt: ago(133), idleMinutes: 133, verdict: pinned('redis') ? 'keep-pinned' : 'stop-candidate', note: pinned('redis') ? 'pinned by you' : 'idle 2h13m, no project — would get a 60 s notice first' },
+    ],
+    recent: [
+      { at: ago(58), by: 'memguard-system', kind: 'process-group', name: 'vitest', dry: false, reason: 'critical: compressed 61.0 GB', pgid: 48213, family: 'vitest', cwd: '/Users/demo/code/atlas' },
+      { at: ago(57), by: 'peersflow-guard', kind: 'container', name: 'redis', dry: true, reason: 'WOULD-STOP: idle 1h16m, no project', },
+    ],
+  };
 }
 
 export function createMockApi(): AgentsFlowApi {
@@ -493,6 +556,7 @@ export function createMockApi(): AgentsFlowApi {
         intent: req.prompt,
         createdAt: new Date().toISOString(),
         lastPrompt: req.prompt,
+        ...(req.contract ? { contract: req.contract, contractSource: 'chip' as const } : {}),
       };
       state.conversations = [conv, ...state.conversations];
       insertRefAtEndOfFirstSection(state, { kind: 'conversation', id: conv.id });
@@ -809,6 +873,40 @@ export function createMockApi(): AgentsFlowApi {
     // subscribing is a no-op rather than a missing method (the renderer treats
     // absence as "old preload" and would keep working either way).
     onConversationsPatched: () => () => undefined,
+    // Run contracts, the Keeper and the memory guard. No main process here, so
+    // the contract is real mock state and the two snapshots are a fixed sample.
+    setConversationContract: async (id, contract) => {
+      state.conversations = state.conversations.map((c) =>
+        c.id === id
+          ? {
+              ...c,
+              contract,
+              contractSource: 'chip',
+              keeper: contract === 'once' && c.keeper ? { ...c.keeper, keptAlive: false, stalled: null } : c.keeper,
+            }
+          : c,
+      );
+      save(state);
+      fire(state);
+    },
+    getKeeperSnapshot: async () => mockKeeperSnapshot(state),
+    onKeeperUpdated: () => () => undefined,
+    getGuardSnapshot: async () => mockGuardSnapshot(),
+    setGuardPins: async (patch) => {
+      const keep = new Set(mockPins.keep);
+      if (patch.keep) {
+        if (patch.keep.keep) keep.add(patch.keep.name);
+        else keep.delete(patch.keep.name);
+      }
+      mockPins = {
+        version: 1,
+        keep: Array.from(keep).sort(),
+        mode: patch.mode ?? mockPins.mode,
+        idleMinutes: patch.idleMinutes ?? mockPins.idleMinutes,
+      };
+      return mockPins;
+    },
+    onGuardUpdated: () => () => undefined,
     // No real bridge in the browser mock — nothing ever asks to open a file.
     onOpenFile: () => () => undefined,
 

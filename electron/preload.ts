@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer, IpcRendererEvent } from 'electron';
-import type { TrackedDirectory, AccountsSnapshot, AgentsFlowApi, Conversation, OpenFileNavPayload, PinnedDivider, PinnedItemRef, PinnedTodo, RemoteHostStatus, RotationStatus, SpawnRequest, WorktreeInfo } from '../shared/types';
+import type { TrackedDirectory, AccountsSnapshot, AgentsFlowApi, Conversation, GuardSnapshot, KeeperSnapshot, OpenFileNavPayload, PinnedDivider, PinnedItemRef, PinnedTodo, RemoteHostStatus, RotationStatus, SpawnRequest, WorktreeInfo } from '../shared/types';
 import { ROUTINES_IPC, type RoutinesSnapshot } from '../shared/routines';
 
 const api: AgentsFlowApi = {
@@ -112,6 +112,21 @@ const api: AgentsFlowApi = {
     const listener = (_e: IpcRendererEvent, changed: Conversation[]) => cb(changed);
     ipcRenderer.on('conversations:patched', listener);
     return () => ipcRenderer.removeListener('conversations:patched', listener);
+  },
+  // Run contracts, the Keeper and the memory guard (electron/keeper, electron/guard).
+  setConversationContract: (id, contract) => ipcRenderer.invoke('convs:setContract', id, contract),
+  getKeeperSnapshot: () => ipcRenderer.invoke('keeper:snapshot'),
+  onKeeperUpdated: (cb) => {
+    const listener = (_e: IpcRendererEvent, snapshot: KeeperSnapshot) => cb(snapshot);
+    ipcRenderer.on('keeper:updated', listener);
+    return () => ipcRenderer.removeListener('keeper:updated', listener);
+  },
+  getGuardSnapshot: () => ipcRenderer.invoke('guard:snapshot'),
+  setGuardPins: (patch) => ipcRenderer.invoke('guard:setPins', patch),
+  onGuardUpdated: (cb) => {
+    const listener = (_e: IpcRendererEvent, snapshot: GuardSnapshot) => cb(snapshot);
+    ipcRenderer.on('guard:updated', listener);
+    return () => ipcRenderer.removeListener('guard:updated', listener);
   },
   onOpenFile: (cb) => {
     const listener = (_e: IpcRendererEvent, payload: OpenFileNavPayload) => cb(payload);
