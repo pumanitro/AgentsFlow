@@ -1,10 +1,11 @@
 import { CSSProperties, ReactNode, useCallback, useEffect, useRef, useState } from 'react';
 
-// The bottom utility cluster shared by both sidebars: Accounts, Usage, Notes —
-// in that order, Notes last, always on screen.
+// The bottom utility cluster shared by both sidebars: Accounts, Usage, Keeper
+// (where the view passes one), Notes — in that order, Notes last, always on
+// screen.
 //
 // Why this is measured rather than left to flexbox. Each pane caps its own body
-// in viewport units (45vh + 30vh + 25vh), so on any normal window the three of
+// in viewport units (45vh + 30vh + 30vh + 25vh), so on any normal window all of
 // them together ask for more than the whole column. Flex-shrink heuristics were
 // tried first and kept losing the last pane by a few pixels: a pane can refuse
 // to shrink (a one-line Usage error has nothing to give), fractional chrome
@@ -16,12 +17,12 @@ import { CSSProperties, ReactNode, useCallback, useEffect, useRef, useState } fr
 // The contract, in order of who gives way first:
 //   1. the top region (peers list / file tree) shrinks to TOP_REGION_MIN and
 //      scrolls inside itself,
-//   2. then the OPEN Accounts/Usage bodies shrink and scroll inside themselves,
-//      splitting what is left, down to header-only,
+//   2. then the OPEN Accounts/Usage/Keeper bodies shrink and scroll inside
+//      themselves, splitting what is left, down to header-only,
 //   3. Notes never gives way.
 //
-// The one degenerate case — a column too short even for Notes plus three
-// headers — is covered by --dock-notes-max, which lets the Notes LIST scroll
+// The one degenerate case — a column too short even for Notes plus the other
+// panes' headers — is covered by --dock-notes-max, which lets the Notes LIST scroll
 // rather than letting the pane be clipped. Its header is never lost.
 
 // How much of the top region (peer list / file tree) must survive. The panels'
@@ -44,7 +45,7 @@ export const DOCK_TOP_MIN_VAR = '--dock-top-min';
 // epsilon keeps sub-pixel rounding from flipping that count.
 const OPEN_EPSILON = 3;
 // Only used before the first measurement, or if a pane ever renders without a
-// header element: the three panes' headers are all one `px-2 py-2` row.
+// header element: every pane's header is one `px-2 py-2` row.
 const FALLBACK_HEADER = 34;
 
 type ElRef = { readonly current: HTMLElement | null };
@@ -66,6 +67,9 @@ interface Props {
   topRegionMin?: number;
   accounts: ReactNode;
   usage: ReactNode;
+  // Optional: a view that does not pass one gets the three-pane cluster exactly
+  // as before.
+  keeper?: ReactNode;
   notes: ReactNode;
 }
 
@@ -89,11 +93,11 @@ function px(el: HTMLElement, ...props: Array<keyof CSSStyleDeclaration & string>
 }
 
 interface Budget {
-  // Ceiling for an open Accounts/Usage body, or null while unmeasured (the
+  // Ceiling for an open Accounts/Usage/Keeper body, or null while unmeasured (the
   // panes then use their own viewport-unit caps, exactly as before).
   bodyMax: number | null;
   // Ceiling for the Notes list. Only set in the degenerate case where the
-  // column cannot even fit Notes plus three headers.
+  // column cannot even fit Notes plus the other panes' headers.
   notesMax: number | null;
   topMin: number;
 }
@@ -108,21 +112,24 @@ export interface DockMeasurements {
   // are not part of its list.
   inset: number;
   topRegionMin: number;
-  // Cluster padding + border + the gaps between its three children.
+  // Cluster padding + border + the gaps between its children.
   clusterExtra: number;
   accountsHeader: number;
   usageHeader: number;
+  // 0 when the cluster has no Keeper pane.
+  keeperHeader: number;
   notesHeader: number;
   // Notes at its natural height — header plus its list, already capped at 25vh.
   notesHeight: number;
-  // How many of Accounts/Usage are expanded: 0, 1 or 2.
+  // How many of Accounts/Usage/Keeper are expanded: 0 to 3.
   openPanes: number;
 }
 
 // The budget, in one place and free of the DOM so it can be reasoned about and
 // exercised directly.
 //
-//   clusterFloor = notesHeight + accountsHeader + usageHeader + clusterExtra
+//   headers      = accountsHeader + usageHeader + keeperHeader
+//   clusterFloor = notesHeight + headers + clusterExtra
 //   topMin       = clamp(topRegionMin + inset, 0, columnInner − chrome − clusterFloor)
 //   available    = max(0, columnInner − chrome − topMin)
 //   slack        = available − clusterFloor
@@ -141,7 +148,8 @@ export interface DockMeasurements {
 export const DOCK_SAFETY = 10;
 
 export function computeDockBudget(m: DockMeasurements): Budget {
-  const clusterFloor = m.notesHeight + m.accountsHeader + m.usageHeader + m.clusterExtra;
+  const headers = m.accountsHeader + m.usageHeader + m.keeperHeader;
+  const clusterFloor = m.notesHeight + headers + m.clusterExtra;
   const usable = m.columnInner - DOCK_SAFETY;
   // The top region's floor is itself given up — last — when the column is too
   // short to pay for both it and the cluster floor.
@@ -153,7 +161,7 @@ export function computeDockBudget(m: DockMeasurements): Budget {
     // Only when even the floor does not fit: cap the Notes LIST so it scrolls
     // inside itself instead of being clipped off the bottom of the column.
     notesMax: slack < 0
-      ? Math.max(m.notesHeader, Math.floor(available - m.accountsHeader - m.usageHeader - m.clusterExtra))
+      ? Math.max(m.notesHeader, Math.floor(available - headers - m.clusterExtra))
       : null,
     topMin: Math.round(topMin),
   };
@@ -166,6 +174,7 @@ export default function DockedPanes({
   topRegionMin = TOP_REGION_MIN,
   accounts,
   usage,
+  keeper,
   notes,
 }: Props) {
   const clusterRef = useRef<HTMLDivElement | null>(null);
@@ -202,7 +211,11 @@ export default function DockedPanes({
 
     const kids = Array.from(cluster.children) as HTMLElement[];
     if (kids.length < 3) return;
-    const [accountsEl, usageEl, notesEl] = kids;
+    // Notes is always the last child; the Keeper, when the view passes one,
+    // sits between Usage and it.
+    const [accountsEl, usageEl] = kids;
+    const keeperEl = kids.length > 3 ? kids[2] : null;
+    const notesEl = kids[kids.length - 1];
     const headerOf = (el: HTMLElement) => {
       const head = el.firstElementChild as HTMLElement | null;
       return head ? head.getBoundingClientRect().height : FALLBACK_HEADER;
@@ -210,6 +223,7 @@ export default function DockedPanes({
     const heightOf = (el: HTMLElement) => el.getBoundingClientRect().height;
     const accountsHeader = headerOf(accountsEl);
     const usageHeader = headerOf(usageEl);
+    const keeperHeader = keeperEl ? headerOf(keeperEl) : 0;
     const notesHeader = headerOf(notesEl);
     const notesHeight = heightOf(notesEl);
     const isOpen = (el: HTMLElement, header: number) => {
@@ -217,10 +231,11 @@ export default function DockedPanes({
       if (declared !== undefined) return declared === '1';
       return heightOf(el) > header + OPEN_EPSILON;
     };
-    const openPanes = (isOpen(accountsEl, accountsHeader) ? 1 : 0) + (isOpen(usageEl, usageHeader) ? 1 : 0);
+    const openPanes = (isOpen(accountsEl, accountsHeader) ? 1 : 0)
+      + (isOpen(usageEl, usageHeader) ? 1 : 0)
+      + (keeperEl && isOpen(keeperEl, keeperHeader) ? 1 : 0);
 
-    // The cluster's own padding, border and the two gaps between its three
-    // children — constant, but read from the stylesheet rather than guessed.
+    // The cluster's own padding, border and the gaps between its children — constant, but read from the stylesheet rather than guessed.
     const gaps = (parseFloat(getComputedStyle(cluster).rowGap) || 0) * (kids.length - 1);
     const clusterExtra = px(cluster, 'paddingTop', 'paddingBottom', 'borderTopWidth', 'borderBottomWidth') + gaps;
 
@@ -232,6 +247,7 @@ export default function DockedPanes({
       clusterExtra,
       accountsHeader,
       usageHeader,
+      keeperHeader,
       notesHeader,
       notesHeight,
       openPanes,
@@ -294,6 +310,7 @@ export default function DockedPanes({
     >
       {accounts}
       {usage}
+      {keeper}
       {notes}
     </div>
   );

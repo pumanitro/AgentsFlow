@@ -3,7 +3,7 @@ import * as os from 'os';
 import * as path from 'path';
 import { performance } from 'node:perf_hooks';
 import { app } from 'electron';
-import { Account, CodexAccount, Conversation, PinnedDivider, PinnedItemRef, PinnedTodo, RotationPolicy, TrackedDirectory } from '../shared/types';
+import { Account, CodexAccount, Conversation, KeeperConvState, PinnedDivider, PinnedItemRef, PinnedTodo, RotationPolicy, TrackedDirectory } from '../shared/types';
 import { DEFAULT_POLICY } from './rotation';
 import { placePinnedRefAfter, placePinnedRefAtEndOfFirstSection } from './pinned-order';
 import { makeIndexer } from './conv-index';
@@ -92,6 +92,26 @@ function migrateLegacyStoreIfNeeded(newPath: string): void {
   }
 }
 
+const RUN_CONTRACTS = new Set(['once', 'until-done', 'forever']);
+const CONTRACT_SOURCES = new Set(['chip', 'skill', 'inferred', 'default']);
+const KEEPER_CAUSES = new Set(['stopped-short', 'daemon-dead', 'memory-deferred', 'killed-workload', 'rate-limit']);
+
+// The Keeper's per-chat bookkeeping, carried across a restart so the hourly
+// nudge cap survives one. Anything that is not the expected shape is dropped
+// whole: a missing record just means "never nudged".
+function sanitizeKeeperState(k: any): KeeperConvState | undefined {
+  if (!k || typeof k !== 'object' || !Array.isArray(k.nudgesAt)) return undefined;
+  const out: KeeperConvState = {
+    nudgesAt: k.nudgesAt.filter((n: unknown): n is number => typeof n === 'number' && Number.isFinite(n)),
+  };
+  if (typeof k.lastNudgeAt === 'string') out.lastNudgeAt = k.lastNudgeAt;
+  if (KEEPER_CAUSES.has(k.lastNudgeReason)) out.lastNudgeReason = k.lastNudgeReason;
+  if (typeof k.stalled === 'string' || k.stalled === null) out.stalled = k.stalled;
+  if (typeof k.keptAlive === 'boolean') out.keptAlive = k.keptAlive;
+  if (typeof k.completedAt === 'string') out.completedAt = k.completedAt;
+  return out;
+}
+
 function migrateConversation(c: any): Conversation {
   const isLegacy = c.title === undefined && c.summary !== undefined;
   let title: string = isLegacy ? (c.description ?? '') : (c.title ?? '');
@@ -119,6 +139,9 @@ function migrateConversation(c: any): Conversation {
     // Which remote peer host this chat runs on; dropping it would route a
     // remote session's stop/attach to the local CLI.
     host: typeof c.host === 'string' ? c.host : undefined,
+    contract: RUN_CONTRACTS.has(c.contract) ? c.contract : undefined,
+    contractSource: CONTRACT_SOURCES.has(c.contractSource) ? c.contractSource : undefined,
+    keeper: sanitizeKeeperState(c.keeper),
     handover: lostInSwitch ? undefined : handover,
     sessionId: c.sessionId ?? '',
     daemonShort: c.daemonShort ?? '',

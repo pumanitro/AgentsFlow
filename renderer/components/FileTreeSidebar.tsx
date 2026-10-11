@@ -6,6 +6,7 @@ import SearchModal from './SearchModal';
 import NotesPanel from './NotesPanel';
 import UsagePanel from './UsagePanel';
 import AccountsPanel from './AccountsPanel';
+import KeeperPanel from './KeeperPanel';
 import DockedPanes, { TOP_REGION_MIN } from './DockedPanes';
 import {
   TreeFile,
@@ -1081,6 +1082,7 @@ export default function FileTreeSidebar({ dirPath, conversationId, worktreePath,
         topRegionRef={treeRef}
         accounts={<AccountsPanel />}
         usage={<UsagePanel />}
+        keeper={<KeeperPanel />}
         notes={<NotesPanel dirPath={dirPath} onFileOpen={onFileOpen} openedFilePath={openedFilePath} />}
       />
       {menu && (
