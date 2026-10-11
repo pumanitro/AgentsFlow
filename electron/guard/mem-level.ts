@@ -16,6 +16,12 @@ export const WARN_COMPRESSED_GB = 32;
 export const WARN_SWAP_GB = 8;
 export const CRIT_COMPRESSED_GB = 60;
 export const CRIT_SWAP_GROWTH_GB_PER_5MIN = 2;
+// Swap over the line but growing slower than this, with the compressor and the
+// kernel both calm, is a leftover: pages written out during an earlier squeeze
+// that macOS only reads back when their owner touches them. On 2026-10-11 such
+// a leftover (10.7 GB, draining 0.1 GB / 10 min) kept sub-agents closed for
+// hours with 63 GB available.
+export const STALE_SWAP_MAX_GROWTH_GB_PER_5MIN = 0.5;
 export const WARN_SUSTAINED_MS = 5 * 60_000;
 export const CRIT_CONFIRM_TICKS = 2;
 export const OK_CONFIRM_TICKS = 2;
@@ -107,7 +113,8 @@ function gb(n: number): string {
 
 /**
  * critical: pressure===4 || compressedGB>60 || growth>2, after CRIT_CONFIRM_TICKS consecutive;
- * warn: pressure===2 || compressed>32 || swap>8; closed: warn sustained ≥ WARN_SUSTAINED_MS;
+ * warn: pressure===2 || compressed>32 || swap>8 (unless it is a leftover: not growing, compressor
+ * and kernel calm); closed: warn sustained ≥ WARN_SUSTAINED_MS;
  * ok: none of the above for OK_CONFIRM_TICKS; unknown: sample null.
  *
  * A level that is only being HELD while a change confirms is never 'critical':
@@ -130,7 +137,10 @@ export function nextLevel(prev: LevelState, s: MemSample | null, samples: MemSam
   const warn: string[] = [];
   if (s.pressure === 2) warn.push('kernel memory pressure warn');
   if (s.compressedGB > WARN_COMPRESSED_GB && s.compressedGB <= CRIT_COMPRESSED_GB) warn.push(`compressed ${gb(s.compressedGB)} GB > ${WARN_COMPRESSED_GB}`);
-  if (s.swapUsedGB > WARN_SWAP_GB) warn.push(`swap ${gb(s.swapUsedGB)} GB > ${WARN_SWAP_GB}`);
+  // Unknown growth (the first five minutes) counts as live swap, not a leftover.
+  const staleSwap = s.pressure !== 2 && s.pressure !== 4 && s.compressedGB <= WARN_COMPRESSED_GB
+    && growth !== null && growth <= STALE_SWAP_MAX_GROWTH_GB_PER_5MIN;
+  if (s.swapUsedGB > WARN_SWAP_GB && !staleSwap) warn.push(`swap ${gb(s.swapUsedGB)} GB > ${WARN_SWAP_GB}`);
 
   if (crit.length === 0 && warn.length === 0) {
     const okTicks = prev.okTicks + 1;

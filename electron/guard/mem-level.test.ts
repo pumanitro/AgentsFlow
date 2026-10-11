@@ -127,6 +127,24 @@ test('ladder: each warn signal alone is warn at once — kernel 2, compressed > 
   assert.equal(walk(start('ok'), [{ compressedGB: 32, swapUsedGB: 8 }, { compressedGB: 32, swapUsedGB: 8 }])[1].level, 'ok');
 });
 
+test('ladder: leftover swap — over the line, not growing, compressor and kernel calm — is not a reason', () => {
+  // 2026-10-11 afternoon: the 28 GB model was unloaded, 10.7 GB of swap stayed behind.
+  const history: MemSample[] = [];
+  for (let i = 0; i <= 12; i++) history.push(sample(T0 + i * TICK, { swapUsedGB: 10.9 - i * 0.01 }));
+  const now = T0 + 12 * TICK;
+  const calm = history[history.length - 1];
+  const closed = { ...start('closed'), warnSince: T0 };
+  const a = nextLevel(closed, calm, history, now);
+  assert.equal(a.level, 'closed');
+  assert.deepEqual(a.reasons, ['clearing (1/2)']);
+  assert.equal(nextLevel(a, calm, history, now).level, 'ok');
+  // the same swap with a full compressor, a kernel warn, or still growing is live
+  assert.deepEqual(nextLevel(closed, { ...calm, compressedGB: 33 }, history, now).reasons.length, 2);
+  assert.equal(nextLevel(closed, { ...calm, pressure: 2 }, history, now).reasons.length, 2);
+  const growing = history.map((h, i) => ({ ...h, swapUsedGB: 9 + i * 0.1 }));
+  assert.deepEqual(nextLevel(closed, growing[12], growing, now).reasons, ['swap 10.2 GB > 8']);
+});
+
 test('ladder: the 2026-10-11 morning — avail 22–36 GB is never a reason, compressed 56.8 is warn', () => {
   const [low] = walk(start('ok'), [{ availGB: 2 }, { availGB: 2 }]).slice(-1);
   assert.equal(low.level, 'ok');
@@ -211,7 +229,7 @@ test('ladder: critical easing to warn signals reads closed, and re-entering crit
 });
 
 test('ladder: closed holds through one clean tick, then ok clears the warn clock', () => {
-  const overs: Array<Partial<MemSample>> = [...Array.from({ length: 11 }, () => ({ swapUsedGB: 9 })), {}, {}, { swapUsedGB: 9 }];
+  const overs: Array<Partial<MemSample>> = [...Array.from({ length: 11 }, () => ({ compressedGB: 33 })), {}, {}, { compressedGB: 33 }];
   const states = walk(start('ok'), overs);
   assert.equal(states[10].level, 'closed');
   assert.equal(states[11].level, 'closed');
