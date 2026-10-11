@@ -15,6 +15,8 @@
  *   • open_file  — bring a file up in the app's file view (bridge only).
  *   • whoami     — this session's identity: machine, peer, conversation/session ids.
  *   • add_remote_peer — track a directory on another machine (ssh), like the app's form.
+ *   • list_routines / create_routine / update_routine / delete_routine / run_routine
+ *                — the app's Routines tab (scheduled prompts), bridge only.
  *
  * The same compiled file also runs on a REMOTE peer's host (shipped there with
  * registry.js + locale.js and started by that host's `node`). There it has no
@@ -31,6 +33,7 @@ import * as os from 'os';
 import * as path from 'path';
 import { withUtf8Locale } from '../locale';
 import {
+  ROUTINE_TOOL_OPS,
   SERVER_ID,
   TOOL_DEFS,
   buildDelegatePrompt,
@@ -178,6 +181,23 @@ async function toolWhoami(): Promise<Record<string, unknown>> {
       2,
     ),
   );
+}
+
+/**
+ * Every routine tool is one request to the app: it owns routines.json and the
+ * scheduler, and it validates the arguments, so they travel untouched. There is
+ * no headless fallback — a routine only exists inside the running app.
+ */
+async function toolRoutines(op: string, args: Record<string, unknown>): Promise<Record<string, unknown>> {
+  if (!BRIDGE_SOCK) {
+    return textContent(JSON.stringify({ status: 'failure', error: 'Routines require the Peers Flow app (this session has no app bridge).' }, null, 2), true);
+  }
+  const envelope = await bridgeRequest(
+    { type: 'routines', id: `${Date.now()}-${process.pid}`, rootConversationId: ROOT_CONVERSATION_ID, op, args },
+    60_000,
+  );
+  if (!envelope) return textContent('Peers Flow did not respond (bridge unavailable or timed out).', true);
+  return textContent(JSON.stringify(envelope, null, 2), envelope.status === 'failure');
 }
 
 interface OpenFileArgs {
@@ -602,6 +622,10 @@ async function handleToolsCall(id: JsonRpcId, params: Record<string, unknown>): 
     }
     if (name === 'open_file') {
       sendResult(id, await toolOpenFile(args as OpenFileArgs));
+      return;
+    }
+    if (Object.prototype.hasOwnProperty.call(ROUTINE_TOOL_OPS, name)) {
+      sendResult(id, await toolRoutines(ROUTINE_TOOL_OPS[name], args));
       return;
     }
     sendError(id, -32602, `Unknown tool: ${name}`);

@@ -79,7 +79,7 @@ describe('MCP server on a remote host (bridge, no store)', () => {
         if (nl < 0) return;
         const req = JSON.parse(buf.slice(0, nl)) as { type: string; id: string };
         received.push(req);
-        const envelope = req.type === 'list_peers' ? { status: 'success', markdown: '# Peers Flow — peer registry\n\nfrom the bridge' } : req.type === 'whoami' ? WHOAMI : req.type === 'add_remote_peer' ? { status: 'success', peer: { displayName: 'studio' } } : { status: 'failure', error: 'unexpected' };
+        const envelope = req.type === 'list_peers' ? { status: 'success', markdown: '# Peers Flow — peer registry\n\nfrom the bridge' } : req.type === 'whoami' ? WHOAMI : req.type === 'add_remote_peer' ? { status: 'success', peer: { displayName: 'studio' } } : req.type === 'routines' ? { status: (req as { op?: string }).op === 'delete' ? 'failure' : 'success', op: (req as { op?: string }).op } : { status: 'failure', error: 'unexpected' };
         c.end(`${JSON.stringify({ type: 'result', id: req.id, envelope })}\n`);
       });
     });
@@ -98,10 +98,10 @@ describe('MCP server on a remote host (bridge, no store)', () => {
     assert.equal((r.result!.serverInfo as { name: string }).name, 'peersflow');
   });
 
-  test('tools/list includes whoami and add_remote_peer', async () => {
+  test('tools/list includes whoami, add_remote_peer and the routine tools', async () => {
     const r = await client.call('tools/list');
     const names = (r.result!.tools as { name: string }[]).map((t) => t.name);
-    assert.deepEqual(names.sort(), ['add_remote_peer', 'delegate', 'list_peers', 'open_file', 'whoami']);
+    assert.deepEqual(names.sort(), ['add_remote_peer', 'create_routine', 'delegate', 'delete_routine', 'list_peers', 'list_routines', 'open_file', 'run_routine', 'update_routine', 'whoami']);
   });
 
   test('add_remote_peer maps snake_case args onto the bridge request', async () => {
@@ -131,6 +131,22 @@ describe('MCP server on a remote host (bridge, no store)', () => {
     assert.equal(received.length, before);
   });
 
+  test('each routine tool is one `routines` bridge request with its arguments untouched', async () => {
+    const args = { name: 'Reddit daily', prompt: '/reddit-daily-routine', time: '09:00', month_days: [1, 15] };
+    const r = textOf(await client.call('tools/call', { name: 'create_routine', arguments: args }));
+    assert.equal(r.isError, false);
+    assert.deepEqual(JSON.parse(r.text), { status: 'success', op: 'create' });
+    for (const name of ['list_routines', 'update_routine', 'run_routine']) {
+      assert.equal(textOf(await client.call('tools/call', { name, arguments: { routine: 'Reddit daily' } })).isError, false, name);
+    }
+    // A failure envelope from the app is a tool error the model can read.
+    assert.equal(textOf(await client.call('tools/call', { name: 'delete_routine', arguments: { routine: 'x' } })).isError, true);
+    const reqs = received.filter((q) => q.type === 'routines');
+    assert.deepEqual(reqs.map((q) => q.op), ['create', 'list', 'update', 'run', 'delete']);
+    assert.deepEqual(reqs[0].args, args);
+    assert.equal(reqs[0].rootConversationId, 'conv-1');
+  });
+
   test('list_peers is answered by the bridge', async () => {
     const r = textOf(await client.call('tools/call', { name: 'list_peers', arguments: {} }));
     assert.equal(r.isError, false);
@@ -156,6 +172,12 @@ describe('MCP server with no bridge', () => {
   let client: Client;
   before(() => { client = startServer({ PEERSFLOW_BRIDGE_SOCK: '', PEERSFLOW_REMOTE: '1' }); });
   after(() => { client.child.kill('SIGKILL'); });
+
+  test('a routine tool says it needs the app', async () => {
+    const r = textOf(await client.call('tools/call', { name: 'create_routine', arguments: { name: 'x', prompt: 'p', time: '09:00' } }));
+    assert.equal(r.isError, true);
+    assert.match(r.text, /Routines require the Peers Flow app/);
+  });
 
   test('whoami falls back to what the process can see', async () => {
     await client.call('initialize');
