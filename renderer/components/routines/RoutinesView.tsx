@@ -9,6 +9,7 @@ import { useRoutinesUIState } from '../../lib/routines-ui-state';
 import RoutinesSidebar from './RoutinesSidebar';
 import RoutinePreview from './RoutinePreview';
 import RoutineForm from './RoutineForm';
+import AgentFilter, { type AgentOption } from './AgentFilter';
 import WeekBoard from './WeekBoard';
 import MonthCalendar from './MonthCalendar';
 
@@ -18,7 +19,8 @@ const NAV_BTN = 'px-2 py-1 rounded-md border border-border bg-panel text-[12px] 
 
 /**
  * The Routines screen: cadence sidebar · Week / Month board · preview panel.
- * Owns selection, range, anchor, the form modal and every mutation; the
+ * Owns selection, range, anchor, the agent filter, the form modal and every
+ * mutation; the
  * children are pure renderers of `./props`.
  */
 export default function RoutinesView({ dirs, onOpenConversation }: RoutinesViewProps) {
@@ -26,6 +28,7 @@ export default function RoutinesView({ dirs, onOpenConversation }: RoutinesViewP
   const [range, setRange] = useRoutinesUIState('range');
   const [storedAnchor, setAnchor] = useRoutinesUIState('anchorMs');
   const [selectedId, setSelectedId] = useRoutinesUIState('selectedRoutineId');
+  const [agentIds, setAgentIds] = useRoutinesUIState('agentIds');
   const [highlightRunId, setHighlightRunId] = useState<string | null>(null);
   const [form, setForm] = useState<null | 'create' | 'edit'>(null);
   const [formError, setFormError] = useState<string | null>(null);
@@ -37,11 +40,43 @@ export default function RoutinesView({ dirs, onOpenConversation }: RoutinesViewP
   const selected = useMemo(() => routines.find((r) => r.id === selectedId) ?? null, [routines, selectedId]);
   const selectedRuns = useMemo(() => (selected ? runs.filter((r) => r.routineId === selected.id) : []), [runs, selected]);
 
+  // Peers that have at least one routine — the only ones the filter offers.
+  const agents = useMemo<AgentOption[]>(() => {
+    const count = new Map<string, number>();
+    for (const r of routines) count.set(r.directoryId, (count.get(r.directoryId) ?? 0) + 1);
+    return [...count]
+      .map(([id, n]) => ({ id, name: dirs.find((d) => d.id === id)?.displayName ?? 'Unknown peer', count: n }))
+      .sort((a, b) => a.name.localeCompare(b.name));
+  }, [routines, dirs]);
+
+  // Empty selection = all agents. Sidebar, board and calendar render the filtered set.
+  const activeAgentIds = useMemo(() => agentIds.filter((id) => agents.some((a) => a.id === id)), [agentIds, agents]);
+  const visibleRoutines = useMemo(
+    () => (activeAgentIds.length === 0 ? routines : routines.filter((r) => activeAgentIds.includes(r.directoryId))),
+    [routines, activeAgentIds],
+  );
+  const visibleRuns = useMemo(() => {
+    if (activeAgentIds.length === 0) return runs;
+    const ids = new Set(visibleRoutines.map((r) => r.id));
+    return runs.filter((r) => ids.has(r.routineId));
+  }, [runs, visibleRoutines, activeAgentIds]);
+
+  // A stored peer that no longer has routines leaves the selection — only once
+  // a real snapshot has landed, so a slow or failed load never wipes it.
+  useEffect(() => {
+    if (!loading && !loadError && activeAgentIds.length !== agentIds.length) setAgentIds(activeAgentIds);
+  }, [loading, loadError, activeAgentIds, agentIds, setAgentIds]);
+
   // A remembered selection whose routine is gone (deleted elsewhere) is dropped
   // once the first snapshot has landed — never while still loading.
   useEffect(() => {
     if (!loading && selectedId && !selected) setSelectedId(null);
   }, [loading, selectedId, selected, setSelectedId]);
+
+  // The previewed routine was filtered out → the preview closes.
+  useEffect(() => {
+    if (selected && !visibleRoutines.includes(selected)) { setSelectedId(null); setHighlightRunId(null); }
+  }, [selected, visibleRoutines, setSelectedId]);
 
   const showToast = useCallback((msg: string) => {
     if (toastTimer.current) clearTimeout(toastTimer.current);
@@ -106,6 +141,8 @@ export default function RoutinesView({ dirs, onOpenConversation }: RoutinesViewP
         await api().updateRoutine(selected.id, input);
       } else {
         const created = await api().createRoutine(input);
+        // A new routine on a peer the filter hides would vanish on save — back to all agents.
+        if (activeAgentIds.length > 0 && !activeAgentIds.includes(created.directoryId)) setAgentIds([]);
         select(created.id);
       }
       closeForm();
@@ -113,7 +150,7 @@ export default function RoutinesView({ dirs, onOpenConversation }: RoutinesViewP
       // The form stays open with main's validation message.
       setFormError(errorMessage(e));
     }
-  }, [form, selected, select, closeForm]);
+  }, [form, selected, select, closeForm, activeAgentIds, setAgentIds]);
 
   const onPickMark = useCallback((mark: SlotMark) => {
     select(mark.routine.id, mark.run?.id ?? null);
@@ -124,7 +161,7 @@ export default function RoutinesView({ dirs, onOpenConversation }: RoutinesViewP
   }, [onOpenConversation]);
 
   const boardProps = {
-    routines, runs, anchorMs, nowMs,
+    routines: visibleRoutines, runs: visibleRuns, anchorMs, nowMs,
     selectedRoutineId: selectedId,
     onPickMark,
   };
@@ -133,8 +170,8 @@ export default function RoutinesView({ dirs, onOpenConversation }: RoutinesViewP
     <div className="h-full flex min-h-0">
       <aside className="w-72 shrink-0 border-r border-border flex flex-col min-h-0">
         <RoutinesSidebar
-          routines={routines}
-          runs={runs}
+          routines={visibleRoutines}
+          runs={visibleRuns}
           nowMs={nowMs}
           selectedId={selectedId}
           onSelect={(id) => select(id)}
@@ -144,6 +181,7 @@ export default function RoutinesView({ dirs, onOpenConversation }: RoutinesViewP
 
       <section className="flex-1 min-w-0 flex flex-col">
         <div className="px-4 py-2 border-b border-border flex items-center gap-3">
+          <AgentFilter agents={agents} selected={activeAgentIds} onChange={setAgentIds} />
           <div role="tablist" aria-label="Board range" className={PILL.wrap}>
             <button role="tab" aria-selected={range === 'week'} onClick={() => setRange('week')} className={range === 'week' ? PILL.on : PILL.off} title="Seven days, one lane per cadence">Week</button>
             <button role="tab" aria-selected={range === 'month'} onClick={() => setRange('month')} className={range === 'month' ? PILL.on : PILL.off} title="The whole month as a calendar">Month</button>

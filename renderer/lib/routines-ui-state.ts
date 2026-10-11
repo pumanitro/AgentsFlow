@@ -2,7 +2,8 @@ import { useCallback, useEffect, useState } from 'react';
 
 /**
  * Routines-screen preferences that survive navigation and reload: which range
- * the board shows, which week/month it is parked on, and the open routine.
+ * the board shows, which week/month it is parked on, the open routine, and the
+ * agent (peer) filter.
  * Stored as a single JSON blob under `agentsflow:routines-ui`, same idiom as
  * `ui-state.ts`.
  */
@@ -10,6 +11,7 @@ export interface RoutinesUIState {
   range: 'week' | 'month';
   anchorMs: number | null;          // null = follow "now"
   selectedRoutineId: string | null;
+  agentIds: string[];               // peers the screen is filtered to; [] = all agents
 }
 
 const STORE_KEY = 'agentsflow:routines-ui';
@@ -18,6 +20,7 @@ const DEFAULT: RoutinesUIState = {
   range: 'week',
   anchorMs: null,
   selectedRoutineId: null,
+  agentIds: [],
 };
 
 const CHANGE_EVENT = 'agentsflow:routines-ui-state';
@@ -32,6 +35,9 @@ export function loadRoutinesUIState(): RoutinesUIState {
     if (next.range !== 'week' && next.range !== 'month') next.range = DEFAULT.range;
     if (next.anchorMs !== null && !Number.isFinite(next.anchorMs)) next.anchorMs = null;
     if (next.selectedRoutineId !== null && typeof next.selectedRoutineId !== 'string') next.selectedRoutineId = null;
+    next.agentIds = Array.isArray(next.agentIds)
+      ? [...new Set(next.agentIds.filter((x): x is string => typeof x === 'string' && x.length > 0))]
+      : [];
     return next;
   } catch {
     return { ...DEFAULT };

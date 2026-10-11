@@ -1,4 +1,4 @@
-import type { Routine, RoutineCadence } from '../../../shared/routines';
+import type { MarkStatus, Routine, RoutineCadence } from '../../../shared/routines';
 import type { DayCells, SlotMark } from '../../../shared/routine-board';
 
 // Pure placement for the week lanes board: which lanes exist and which marks
@@ -34,14 +34,14 @@ function marksOf(day: DayCells, cadences: RoutineCadence[]): SlotMark[] {
     else if (c === 'twiceMonthly') out.push(...day.twiceMonthly);
     else out.push(...day.monthly);
   }
-  return cadences.length > 1 ? out.sort(bySlotThenName) : out;
+  return out.sort(bySlotThenName);
 }
 
-/** DAILY always; every other lane only when a routine of its cadence exists. */
+/** A lane exists only when a routine of its cadence does. */
 export function weekLanes(routines: Routine[], days: DayCells[]): WeekLane[] {
   const present = new Set(routines.map((r) => r.schedule.cadence));
   return LANES
-    .filter((l) => l.id === 'daily' || l.cadences.some((c) => present.has(c)))
+    .filter((l) => l.cadences.some((c) => present.has(c)))
     .map((l) => ({ id: l.id, label: l.label, cadence: l.cadence, cells: days.map((d) => marksOf(d, l.cadences)) }));
 }
 
@@ -57,6 +57,15 @@ export function dayHeader(dayKey: string): { weekday: string; day: number } {
 export function slotTime(slotAt: string): string {
   const t = new Date(slotAt);
   return `${String(t.getHours()).padStart(2, '0')}:${String(t.getMinutes()).padStart(2, '0')}`;
+}
+
+const STATUS_WORD: Partial<Record<MarkStatus, string>> = {
+  running: 'running', attention: 'needs you', failed: 'failed', missed: 'missed',
+};
+
+/** The short word a card adds after its time; nothing for the obvious states. */
+export function statusWord(status: MarkStatus): string | undefined {
+  return STATUS_WORD[status];
 }
 
 /** Stable React key for a mark. */

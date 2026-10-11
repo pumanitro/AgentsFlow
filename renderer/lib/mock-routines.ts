@@ -40,17 +40,23 @@ function mockSlots(s: RoutineSchedule, fromMs: number, toMs: number): number[] {
  * Deterministic routines + 30 days of history for the browser demo
  * (mock-ipc). Every past occurrence has a run: success, every 5th failed,
  * every 11th missed; today's dailies show the live states (attention, running);
+ * the routines sit on up to three peers;
  * one manual run yesterday at 15:12.
  */
 export function buildMockRoutines(dirs: TrackedDirectory[], nowMs: number): { routines: Routine[]; runs: RoutineRun[] } {
   const createdAt = new Date(nowMs - 45 * DAY_MS).toISOString();
-  const dirAt = (i: number) => dirs[i % Math.max(dirs.length, 1)]?.id ?? '';
+  // Spread over the first three peers so the agent filter has something to
+  // filter; with fewer peers the indexes wrap onto the ones that exist.
+  const peers = dirs.slice(0, 3);
+  const dirAt = (i: number) => peers[i % Math.max(peers.length, 1)]?.id ?? '';
   const base = (id: string, name: string, dirIdx: number, prompt: string, schedule: RoutineSchedule, icon: Routine['icon']): Routine => ({
     id, name, directoryId: dirAt(dirIdx), provider: 'claude', prompt, schedule, icon,
     enabled: true, createdAt, updatedAt: createdAt, enabledAt: createdAt,
   });
   const routines: Routine[] = [
     { ...base('mock-reddit-daily', 'Reddit daily', 0, '/reddit-daily-routine', { cadence: 'daily', time: '09:00' }, 'reddit'), seedKey: 'reddit-daily' },
+    base('mock-crash-sweep', 'Crash sweep', 1, 'Sweep new crash reports and file the repeats', { cadence: 'daily', time: '08:00' }, 'bug'),
+    base('mock-telemetry-digest', 'Telemetry digest', 2, 'Digest today\'s telemetry into five lines', { cadence: 'daily', time: '18:30' }, 'chart'),
     base('mock-inbox-sweep', 'Inbox sweep', 1, 'Sweep the inbox and file what needs an answer', { cadence: 'daily', time: '18:00' }, 'mail'),
     base('mock-changelog', 'Changelog', 0, '/devlog', { cadence: 'every2days', time: '10:00', anchorDate: dayKey(new Date(nowMs - 45 * DAY_MS)) }, 'book'),
     base('mock-weekly-metrics', 'Weekly metrics', 2, 'Summarise last week\'s metrics', { cadence: 'weekly', time: '08:30', weekday: 1 }, 'chart'),

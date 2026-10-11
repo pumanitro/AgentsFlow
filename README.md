@@ -78,7 +78,8 @@ Every process is billed to its nearest `claude` ancestor, so a delegated peer se
 The home header has a **Chat | Routines** pill. Chat is the usual home; Routines is a schedule board for prompts that should run on their own.
 
 - **Sidebar** — routines grouped by cadence: Daily, Every 2 days, Weekly, Twice a month, Monthly (empty groups are hidden). **+ New routine** opens the form; clicking a row opens its preview.
-- **Week board** — Mon–Sun columns with one lane per cadence. All dailies of a day share one segmented bar; rarer routines are small cards.
+- **Agent filter** — the `All agents ▾` button in the toolbar narrows the sidebar, the week and the month to one peer or a few; the choice is remembered.
+- **Week board** — Mon–Sun columns with one lane per cadence. Every occurrence is a card with the routine name and its time, filled with its status colour.
 - **Month calendar** — a daily health bar with `x/y` per day, filled circles for every-2-days routines, and chips for weekly / twice-monthly / monthly ones. Hover or click any mark for a tooltip; click selects the routine and highlights that run in the preview. `‹ ›` and **Today** move the week or month.
 - **Preview** — schedule, next run, run history, and **Run now**, **Pause**, **Edit**, **Delete**.
 

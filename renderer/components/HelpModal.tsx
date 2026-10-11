@@ -39,6 +39,7 @@ const SHORTCUTS: { section: string; items: Shortcut[] }[] = [
     items: [
       { keys: ['Esc'], desc: 'Close the routine form, or the preview if no form is open' },
       { keys: ['click a mark'], desc: 'Select that routine and highlight the run in the preview' },
+      { keys: ['All agents ▾'], desc: 'Filter the sidebar, week and month to one agent (peer) or a few' },
       { keys: ['‹ › / Today'], desc: 'Move the week or month back / forward, or jump to the current one' },
     ],
   },

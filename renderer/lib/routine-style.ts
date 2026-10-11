@@ -18,6 +18,15 @@ export const STATUS_TEXT: Record<MarkStatus, string> = {
 export const STATUS_HEX: Record<MarkStatus, string> = {   // for inline SVG / inline styles
   success: '#4ade80', failed: '#ef4444', running: '#3b82f6', attention: '#f97316', missed: '#ef4444', scheduled: '#8c93a8',
 };
+// A Week-board card: the whole card is filled with its status, text colour included.
+export const STATUS_CARD: Record<MarkStatus, string> = {
+  success: 'bg-ok border border-ok text-bg',
+  failed: 'bg-err border border-err text-bg',
+  running: 'bg-info/20 border border-info text-text shadow-[0_0_10px_rgba(59,130,246,0.45)]',
+  attention: 'bg-orange-500 border border-orange-500 text-bg',
+  missed: 'bg-transparent border border-err text-err',
+  scheduled: 'bg-transparent border border-dashed border-subtle text-muted',
+};
 // Cadence hue — the LEFT edge of a chip, the sidebar group marker, the cadence icon's tint. Chosen away from the four status hues.
 export const CADENCE_COLOR: Record<RoutineCadence, string> = {
   daily: '#2dd4bf',        // teal
