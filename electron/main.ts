@@ -72,7 +72,7 @@ import { ensureWorkspaceTrusted } from './workspace-trust';
 import { applyRemoteJobState, getLastAgentRows, refreshNow, setPollerForeground, startPoller, stopPoller, syncWatchers, unwatchConversation, watchConversation, watcherStats } from './poller';
 import { bridgeSocketPath, buildBootstrapSystemPrompt, getMcpServerInfo, writeMcpConfigForConversation, writeRemoteMcpConfig } from './mcp-bridge';
 import { buildDelegatePrompt, buildRegistry, renderRegistryMarkdown } from './registry';
-import { startPeersBridge, type AddRemotePeerRequest, type DelegateRequest, type ListPeersRequest, type OpenFileRequest, type PeersBridge, type WhoamiRequest } from './delegation-bridge';
+import { startPeersBridge, type AddRemotePeerRequest, type DelegateRequest, type ListPeersRequest, type OpenFileRequest, type PeersBridge, type RoutinesRequest, type WhoamiRequest } from './delegation-bridge';
 import { RemoteHosts, setRemoteHosts } from './remote/remote-hosts';
 import { remoteCommand, runRemote } from './remote/remote-exec';
 import { hostKeyOf } from '../shared/remote';
@@ -80,7 +80,8 @@ import { createRoutinesStore } from './routines-store';
 import { createRoutineScheduler } from './routine-scheduler';
 import { ensureSeedRoutines } from './routines-seed';
 import type { RoutineScheduler, RoutinesStore } from './routines-api';
-import { formatSlot, validateRoutineInput } from '../shared/routine-schedule';
+import { createRoutine, handleRoutinesOp, patchRoutine } from './routines-mcp';
+import { formatSlot } from '../shared/routine-schedule';
 import { ROUTINES_IPC, type Routine, type RoutineInput, type RoutinePatch, type RoutineRun, type RoutinesSnapshot } from '../shared/routines';
 import {
   buildProbeScript,
@@ -544,6 +545,7 @@ app.whenReady().then(() => {
       onListPeers: handleListPeers,
       onWhoami: handleWhoami,
       onAddRemotePeer: handleAddRemotePeer,
+      onRoutines: handleRoutines,
     });
   } catch (err) {
     console.error('[agentsflow] failed to start peers bridge', err);
@@ -1976,40 +1978,13 @@ ipcMain.handle(ROUTINES_IPC.list, (): RoutinesSnapshot =>
   routinesStore ? routinesStore.snapshot(Date.now()) : { routines: [], runs: [], now: new Date().toISOString() });
 
 ipcMain.handle(ROUTINES_IPC.create, (_e, input: RoutineInput): Routine => {
-  const rs = requireRoutinesStore();
-  const err = validateRoutineInput(input, store.getDirectories());
-  if (err) throw new Error(err);
-  const now = new Date().toISOString();
-  const r = rs.addRoutine({
-    id: uuid(),
-    name: input.name.trim(),
-    directoryId: input.directoryId,
-    provider: input.provider ?? 'claude',
-    model: input.model || undefined,
-    prompt: input.prompt.trim(),
-    schedule: input.schedule,
-    icon: input.icon ?? 'star',
-    ...(typeof input.catchUp === 'boolean' ? { catchUp: input.catchUp } : {}),
-    enabled: true,
-    createdAt: now,
-    updatedAt: now,
-    enabledAt: now,
-  });
+  const r = createRoutine(requireRoutinesStore(), input, store.getDirectories(), new Date().toISOString(), uuid());
   broadcastRoutines();
   return r;
 });
 
 ipcMain.handle(ROUTINES_IPC.update, (_e, id: string, patch: RoutinePatch): Routine => {
-  const rs = requireRoutinesStore();
-  const cur = rs.getRoutine(id);
-  if (!cur) throw new Error('routine not found');
-  const merged = { ...cur, ...patch };
-  if (merged.enabled && !merged.directoryId) throw new Error('pick a directory before enabling');
-  if (patch.catchUp !== undefined && typeof patch.catchUp !== 'boolean') throw new Error('catch-up must be on or off');
-  const err = validateRoutineInput(merged, store.getDirectories());
-  // A plain pause of a routine whose peer has since gone must still succeed.
-  if (err && (merged.enabled || patch.schedule || patch.name !== undefined || patch.prompt !== undefined)) throw new Error(err);
-  const r = rs.updateRoutine(id, patch)!;
+  const r = patchRoutine(requireRoutinesStore(), id, patch, store.getDirectories());
   broadcastRoutines();
   return r;
 });
@@ -2023,6 +1998,23 @@ ipcMain.handle(ROUTINES_IPC.runNow, (_e, id: string): Promise<RoutineRun> => {
   if (!routineScheduler) throw new Error('routines are still starting — try again in a moment');
   return routineScheduler.runNow(id);
 });
+
+// The `*_routine` MCP tools: the same store, rules and scheduler as the tab above.
+async function handleRoutines(req: RoutinesRequest): Promise<Record<string, unknown>> {
+  const scheduler = routineScheduler;
+  if (!routinesStore || !scheduler) return { status: 'failure', error: 'routines are still starting — try again in a moment' };
+  const envelope = await handleRoutinesOp(req.op, req.args, {
+    store: routinesStore,
+    getDirectories: () => store.getDirectories(),
+    callerDirectoryId: () => store.getConversation(req.rootConversationId)?.directoryId ?? null,
+    runNow: (id) => scheduler.runNow(id),
+    now: Date.now,
+    newId: uuid,
+    onChange: broadcastRoutines,
+  });
+  console.log('[agentsflow][routines] mcp', { op: req.op, status: envelope.status, conversationId: req.rootConversationId, error: envelope.error });
+  return envelope;
+}
 
 // ----- Delegation bridge: the MCP server asks main to spawn a tracked peer ----
 

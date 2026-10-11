@@ -5,7 +5,7 @@
  * The MCP server runs as a plain Node child and cannot touch the store, poller,
  * or window broadcasts that live in main. So for anything that needs the app, it
  * connects to this unix-domain socket and asks main to do it, then waits for the
- * result. Four request types are routed by `type`:
+ * result. These request types are routed by `type`:
  *
  *   • delegate  — spawn a *tracked, attachable* peer session and run a goal.
  *   • open_file — bring a file up in the app's file view ("Preview") so the user
@@ -13,6 +13,8 @@
  *   • list_peers — the registry markdown. A remote peer's MCP server has no
  *                 store.json to read, so it asks over the forwarded socket.
  *   • whoami    — the asking session's identity (machine, peer, ids).
+ *   • add_remote_peer — track a directory on another machine.
+ *   • routines  — list / create / update / delete / run a routine (`op`).
  *
  * Protocol: newline-delimited JSON, one request per connection.
  *   → { type, id, rootConversationId, ... }
@@ -65,6 +67,16 @@ export interface AddRemotePeerRequest {
   testOnly?: boolean;
 }
 
+// The `*_routine` tools. `args` is the tool call's arguments untouched: main
+// owns the routines store, so it also owns their validation (routines-mcp.ts).
+export interface RoutinesRequest {
+  type: 'routines';
+  id: string;
+  rootConversationId: string;
+  op: string;
+  args: Record<string, unknown>;
+}
+
 export type BridgeEnvelope = Record<string, unknown>;
 
 export interface BridgeHandlers {
@@ -75,9 +87,10 @@ export interface BridgeHandlers {
   onListPeers?: (req: ListPeersRequest) => Promise<BridgeEnvelope>;
   onWhoami?: (req: WhoamiRequest) => Promise<BridgeEnvelope>;
   onAddRemotePeer?: (req: AddRemotePeerRequest) => Promise<BridgeEnvelope>;
+  onRoutines?: (req: RoutinesRequest) => Promise<BridgeEnvelope>;
 }
 
-type BridgeRequest = DelegateRequest | OpenFileRequest | ListPeersRequest | WhoamiRequest | AddRemotePeerRequest;
+type BridgeRequest = DelegateRequest | OpenFileRequest | ListPeersRequest | WhoamiRequest | AddRemotePeerRequest | RoutinesRequest;
 
 function unsupported(type: string): Promise<BridgeEnvelope> {
   return Promise.resolve({ status: 'failure', error: `${type} not supported by this Peers Flow` });
@@ -136,7 +149,12 @@ export function startPeersBridge(
           run = handlers.onWhoami ? handlers.onWhoami(req as WhoamiRequest) : unsupported('whoami');
         } else if (req.type === 'add_remote_peer') {
           run = handlers.onAddRemotePeer ? handlers.onAddRemotePeer(req as AddRemotePeerRequest) : unsupported('add_remote_peer');
-        } else run = handlers.onDelegate(req as DelegateRequest);
+        } else if (req.type === 'routines') {
+          run = handlers.onRoutines ? handlers.onRoutines(req as RoutinesRequest) : unsupported('routines');
+        } else if (req.type === undefined || req.type === 'delegate') run = handlers.onDelegate(req as DelegateRequest);
+        // A type this build does not know (a newer MCP server talking to an
+        // older app) must fail cleanly, never spawn an agent as a "delegate".
+        else run = unsupported(String((req as { type?: unknown }).type));
         run
           .then(reply)
           .catch((e) => reply({ status: 'failure', error: `bridge error: ${(e as Error).message}` }));
