@@ -3217,6 +3217,12 @@ ipcMain.handle('clipboard:copyImageData', async (_e, dataBase64: string): Promis
   }
 });
 
+// OSC 52 copy from a terminal (see AgentsFlowApi.copyTextToClipboard).
+ipcMain.handle('clipboard:writeText', (_e, text: string) => {
+  if (typeof text !== 'string') return;
+  clipboard.writeText(text);
+});
+
 ipcMain.handle('images:saveFromPaste', async (_e, dataBase64: string, mimeType: string): Promise<{ savedPath: string }> => {
   const fsMod = require('fs') as typeof import('fs');
   const pathMod = require('path') as typeof import('path');
