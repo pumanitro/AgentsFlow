@@ -11,6 +11,7 @@ import { codexResumeArgs } from './codex-resume-args';
 import { pinnedCodexCli } from './codex-cli';
 import { appendBuffer, replayText, type ReplayBuffer } from './replay-buffer';
 import { allowReattach, findChatExit, LEFT_CHAT_GRACE_MS, type ScreenWatch } from './attach-guard';
+import { liveWorkOf } from './pty-busy';
 import { getRemoteHosts } from './remote/remote-hosts';
 
 // Re-exported so the PTY layer stays the single import site for terminal argv,
@@ -299,6 +300,16 @@ async function ensurePtyCapacity(win: BrowserWindow | null, channelId: string, l
 // get a longer TTL, and "idle" requires zero output, so an actively printing
 // turn is never reaped — only a quiet, detached (very likely finished) one.
 //
+// "Quiet" is NOT "finished" for a Claude CLI that ended its turn with work
+// pending — a background Bash task parked on a watcher, a scheduled wake-up, an
+// active /goal — because the TUI paints nothing while it waits for that work.
+// Twice (2026-10-09 21:12 UTC, 2026-10-10 11:02 UTC) the reaper killed exactly
+// such a session, 11 minutes into a wait, mid-overnight loop. So before a
+// resume session is reaped its process tree is read (pty-busy.ts): a CLI with a
+// `caffeinate` child or a background shell child is working and is kept, TTL or
+// not, pressure or not — a working session is never a "safe" kill. MCP-server
+// children alone (every session has them) do not count.
+//
 // For a Codex PTY the trade is strictly cheaper still: the thread runs in the
 // app-server, so reaping the viewer is a DETACH and never a stop. The worst
 // case is a redraw on the next open.
@@ -350,6 +361,11 @@ function reapIdlePtys(opts: { pressure?: boolean } = {}): number {
   for (const [sessionId, s] of Array.from(resumeSessions.entries())) {
     if (s.subscribers.size > 0 || s.detachedAt == null) continue;
     if (now - s.detachedAt < resumeTtl || now - s.lastDataAt < resumeTtl) continue;
+    const work = liveWorkOf(s.pty.pid);
+    if (work.length > 0) {
+      console.log(`[agentsflow][pty] keeping a silent resume session: its CLI is still working${why}`, { sessionId, idleMs: now - s.lastDataAt, work });
+      continue;
+    }
     console.log(`[agentsflow][pty] reaping idle resume session${why}`, { sessionId, idleMs: now - s.lastDataAt });
     try { s.pty.kill(); } catch { /* ignore */ }
     resumeSessions.delete(sessionId);

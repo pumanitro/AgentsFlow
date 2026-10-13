@@ -927,6 +927,10 @@ export interface AgentsFlowApi {
   // back to the web clipboard API.
   copyImageDataToClipboard?: (dataBase64: string) => Promise<{ ok: true } | { ok: false; error: string }>;
 
+  // Puts text on THIS Mac's clipboard. Used for OSC 52 copies, which arrive
+  // from programs running on a remote peer, where pbcopy can't reach us.
+  copyTextToClipboard?: (text: string) => Promise<void>;
+
   // Reveals the file/dir in the OS file browser (Finder on macOS, Explorer
   // on Windows, default file manager on Linux).
   revealInFinder: (targetPath: string) => Promise<{ ok: true } | { ok: false; error: string }>;

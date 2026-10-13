@@ -100,6 +100,26 @@ describe('routines store', () => {
     assert.deepEqual(s.listRuns().map((r) => r.id), ['good']);
   });
 
+  it('custom weekdays round-trip, and a hand-edited list is tidied on load', () => {
+    const file = tmpFile();
+    const s = createRoutinesStore(file, { now: () => T0 });
+    s.addRoutine(routine('mwf', { schedule: { cadence: 'weekdays', time: '06:00', weekdays: [1, 3, 5] } }));
+    s.flushSync();
+    assert.deepEqual(createRoutinesStore(file, { now: () => T0 }).getRoutine('mwf')?.schedule, { cadence: 'weekdays', time: '06:00', weekdays: [1, 3, 5] });
+
+    const edited = tmpFile();
+    fs.writeFileSync(edited, JSON.stringify({ version: 1, runs: [], routines: [
+      routine('messy', { schedule: { cadence: 'weekdays', time: '06:00', weekdays: [5, 1, 5, 9, 'x'] as any } }),
+      routine('weekly', { schedule: { cadence: 'weekly', time: '09:00', weekday: 2 } }),
+      routine('twice', { schedule: { cadence: 'twiceMonthly', time: '12:00', monthDays: [1, 15] } }),
+    ] }));
+    const t = createRoutinesStore(edited, { now: () => T0 });
+    assert.deepEqual(t.getRoutine('messy')?.schedule, { cadence: 'weekdays', time: '06:00', weekdays: [1, 5] });
+    // The cadences that existed before are read exactly as they were written.
+    assert.deepEqual(t.getRoutine('weekly')?.schedule, { cadence: 'weekly', time: '09:00', weekday: 2 });
+    assert.deepEqual(t.getRoutine('twice')?.schedule, { cadence: 'twiceMonthly', time: '12:00', monthDays: [1, 15] });
+  });
+
   it('survives a corrupt file by starting empty', () => {
     const file = tmpFile();
     fs.writeFileSync(file, '{not json');

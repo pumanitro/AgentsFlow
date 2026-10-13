@@ -2,12 +2,13 @@ import { useEffect, useMemo, useState } from 'react';
 import { CADENCES, CADENCE_GROUP_LABEL, ROUTINE_ICONS, routineCatchesUp } from '../../../shared/routines';
 import type { AgentProvider } from '../../../shared/types';
 import type { RoutineCadence, RoutineIcon, RoutineInput, RoutineSchedule } from '../../../shared/routines';
-import { localDayKey, validateRoutineInput } from '../../../shared/routine-schedule';
+import { localDayKey, normalizeWeekdays, validateRoutineInput } from '../../../shared/routine-schedule';
 import { CLAUDE_MODELS } from '../../lib/models';
 import type { RoutineFormProps } from './props';
 import { CadenceIcon, RoutineGlyph } from './marks';
 
 const WEEKDAYS = ['Sundays', 'Mondays', 'Tuesdays', 'Wednesdays', 'Thursdays', 'Fridays', 'Saturdays'];
+const WEEKDAY_SHORT = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 const MONTH_DAYS = Array.from({ length: 28 }, (_, i) => i + 1);
 
 export function defaultIconFor(name: string): RoutineIcon {
@@ -39,6 +40,7 @@ export default function RoutineForm({ mode, initial, dirs, error, onSubmit, onCa
   const [cadence, setCadence] = useState<RoutineCadence>(initial?.schedule.cadence ?? 'daily');
   const [time, setTime] = useState(initial?.schedule.time ?? '09:00');
   const [weekday, setWeekday] = useState(initial?.schedule.weekday ?? 1);
+  const [weekdays, setWeekdays] = useState<number[]>(initial?.schedule.weekdays ?? [1, 3, 5]);
   const [day1, setDay1] = useState(initial?.schedule.monthDays?.[0] ?? 1);
   const [day2, setDay2] = useState(initial?.schedule.monthDays?.[1] ?? 15);
   const [anchorDate] = useState(initial?.schedule.anchorDate ?? localDayKey(Date.now()));
@@ -57,6 +59,7 @@ export default function RoutineForm({ mode, initial, dirs, error, onSubmit, onCa
 
   const input = useMemo((): RoutineInput => {
     const schedule: RoutineSchedule = { cadence, time };
+    if (cadence === 'weekdays') schedule.weekdays = normalizeWeekdays(weekdays);
     if (cadence === 'weekly') schedule.weekday = weekday;
     if (cadence === 'monthly') schedule.monthDays = [day1];
     if (cadence === 'twiceMonthly') schedule.monthDays = [day1, day2];
@@ -65,7 +68,7 @@ export default function RoutineForm({ mode, initial, dirs, error, onSubmit, onCa
       name: name.trim(), directoryId, prompt: prompt.trim(), schedule, provider,
       model: provider === 'claude' && model ? model : undefined, icon, catchUp,
     };
-  }, [name, directoryId, prompt, cadence, time, weekday, day1, day2, anchorDate, provider, model, icon, catchUp]);
+  }, [name, directoryId, prompt, cadence, time, weekdays, weekday, day1, day2, anchorDate, provider, model, icon, catchUp]);
 
   const problem = validateRoutineInput(input, dirs);
   // Attach the one-line message to the field it is about (best effort on its wording).
@@ -75,6 +78,9 @@ export default function RoutineForm({ mode, initial, dirs, error, onSubmit, onCa
   const peerErr = at('director', 'peer');
   const promptErr = at('prompt');
   const schedErr = at('time', 'weekday', 'day', 'schedule', 'anchor');
+  // An empty day row says so at once, not only after a save attempt.
+  const daysErr = cadence === 'weekdays' && weekdays.length === 0 ? 'Pick at least one day — a routine with no days would never run.' : null;
+  const toggleWeekday = (d: number) => setWeekdays((cur) => (cur.includes(d) ? cur.filter((x) => x !== d) : [...cur, d]));
   const placed = nameErr || peerErr || promptErr || schedErr;
   const shownGeneral = touched && problem && !placed ? problem : null;
 
@@ -144,7 +150,7 @@ export default function RoutineForm({ mode, initial, dirs, error, onSubmit, onCa
             )}
           </div>
 
-          <Field label="Cadence" error={schedErr}>
+          <Field label="Cadence" error={daysErr ? null : schedErr}>
             <div className="flex flex-wrap gap-x-4 gap-y-1.5 text-sm text-text">
               {CADENCES.map((c) => (
                 <label key={c} className="flex items-center gap-1.5 cursor-pointer">
@@ -160,6 +166,25 @@ export default function RoutineForm({ mode, initial, dirs, error, onSubmit, onCa
             <Field label="Time">
               <input type="time" value={time} onChange={(e) => setTime(e.target.value)} className={`${FIELD} w-32`} />
             </Field>
+            {cadence === 'weekdays' && (
+              <Field label="Days" error={daysErr}>
+                <div className="flex gap-1" role="group" aria-label="Days of the week">
+                  {[1, 2, 3, 4, 5, 6, 0].map((d) => {
+                    const on = weekdays.includes(d);
+                    return (
+                      <button
+                        key={d}
+                        type="button"
+                        aria-pressed={on}
+                        aria-label={WEEKDAYS[d].slice(0, -1)}
+                        onClick={() => toggleWeekday(d)}
+                        className={`h-[34px] w-11 rounded-md border text-xs font-semibold ${on ? 'border-accent bg-accent text-bg' : 'border-border text-muted hover:text-text hover:bg-panel2'}`}
+                      >{WEEKDAY_SHORT[d]}</button>
+                    );
+                  })}
+                </div>
+              </Field>
+            )}
             {cadence === 'weekly' && (
               <Field label="Weekday">
                 <select value={weekday} onChange={(e) => setWeekday(Number(e.target.value))} className={`${FIELD} w-40`}>

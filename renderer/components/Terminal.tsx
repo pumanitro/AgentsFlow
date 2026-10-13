@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { api } from '../lib/ipc';
 import { createPathLinkProvider } from '../lib/path-links';
 import { cleanTerminalCopy, type CopyRow } from '../../shared/terminal-copy';
+import { decodeOsc52 } from '../../shared/terminal-osc52';
 import type { RemoteHostStatus } from '../../shared/types';
 
 interface Props {
@@ -131,6 +132,9 @@ export default function Terminal({ conversationId, remote = false, remoteHostLab
         // injects stray characters instead, leaving the line in a state where
         // normal Backspace can't cleanly remove them.
         macOptionIsMeta: true,
+        // `claude attach` turns on mouse tracking, so a plain drag goes to the
+        // TUI. ⌥+drag still makes a native xterm selection that ⌘C copies.
+        macOptionClickForcesSelection: true,
         theme: {
           background: '#0f1115',
           foreground: '#e6e8ee',
@@ -294,8 +298,12 @@ export default function Terminal({ conversationId, remote = false, remoteHostLab
       // its quote gutter (▎), the reply's indent and the TUI's own hard wraps.
       // Capture phase runs before xterm's copy handler on its child element.
       const onCopy = (e: ClipboardEvent) => {
+        if (!e.clipboardData) return;
         const sel = term.getSelectionPosition();
-        if (!sel || !e.clipboardData) return;
+        // No xterm selection: the text came from the TUI's own selection over
+        // OSC 52 (or there is none). xterm would write an empty string here and
+        // wipe it, so keep the clipboard as it is.
+        if (!sel) { e.preventDefault(); e.stopPropagation(); return; }
         const buf = term.buffer.active;
         const rows: CopyRow[] = [];
         for (let y = sel.start.y; y <= sel.end.y; y++) {
@@ -318,6 +326,20 @@ export default function Terminal({ conversationId, remote = false, remoteHostLab
         e.stopPropagation();
       };
       containerRef.current.addEventListener('copy', onCopy, { capture: true });
+
+      // OSC 52: a program in the terminal asks for text on the clipboard. The
+      // `claude attach` TUI copies its own mouse selection this way, and on a
+      // remote peer it is the only route back to this Mac (pbcopy there fills
+      // the other machine's clipboard). Read requests are never answered.
+      const osc52 = term.parser.registerOscHandler(52, (payload: string) => {
+        const text = decodeOsc52(payload);
+        if (text) {
+          const a = api();
+          if (a.copyTextToClipboard) void a.copyTextToClipboard(text).catch(() => undefined);
+          else void navigator.clipboard?.writeText(text).catch(() => undefined);
+        }
+        return true;
+      });
 
       let cid: string;
       let replay = '';
@@ -540,6 +562,7 @@ export default function Terminal({ conversationId, remote = false, remoteHostLab
         container.removeEventListener('focusin', onFocusIn);
         container.removeEventListener('focusout', onFocusOut);
         container.removeEventListener('copy', onCopy, { capture: true } as any);
+        osc52.dispose();
         if (a11yOffTimer !== null) clearTimeout(a11yOffTimer);
         container.removeEventListener('wheel', onWheel, { capture: true } as any);
         if (channelId) api().detachTerminal(channelId).catch(() => undefined);
@@ -567,7 +590,14 @@ export default function Terminal({ conversationId, remote = false, remoteHostLab
     f();
     const raf = requestAnimationFrame(f);
     const to = window.setTimeout(f, 60);
-    const onWinFocus = () => f();
+    // Coming back to the window must not yank focus out of the shell pane (or
+    // any other field) the user was typing in: ⌘V right after copying in the
+    // browser would land in the chat. Chromium restores the previous focus on
+    // its own, so only step in when nothing ended up focused.
+    const onWinFocus = () => window.setTimeout(() => {
+      const el = document.activeElement;
+      if (!el || el === document.body) f();
+    }, 0);
     window.addEventListener('focus', onWinFocus);
     return () => {
       cancelAnimationFrame(raf);

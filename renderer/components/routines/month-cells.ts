@@ -8,7 +8,7 @@ export const MAX_CHIPS = 3;
 export interface MonthCellLayout {
   chips: SlotMark[];       // weekly / twice-monthly / monthly, at most MAX_CHIPS
   overflow: SlotMark[];    // the rest, listed in the "+n" chip's tooltip
-  circles: SlotMark[];     // every-2-days marks
+  circles: SlotMark[];     // every-2-days and custom-days marks
   dailies: SlotMark[];     // one health-bar segment each
   scoreText: string;       // 'x/y' for past days and today, 'y' for future days, '' when no dailies
   scoreIsFuture: boolean;  // future days render the score dashed-grey
@@ -28,7 +28,7 @@ export function arrangeMonthCell(cell: DayCells): MonthCellLayout {
   return {
     chips: fold ? all.slice(0, MAX_CHIPS) : all,
     overflow: fold ? all.slice(MAX_CHIPS) : [],
-    circles: cell.every2days,
+    circles: [...cell.every2days, ...cell.weekdays].sort(bySlotThenName),
     dailies: cell.dailies,
     scoreText: total === 0 ? '' : isFuture ? String(total) : `${done}/${total}`,
     scoreIsFuture: isFuture,

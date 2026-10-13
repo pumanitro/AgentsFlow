@@ -14,6 +14,7 @@ import {
   type RunStatus,
   type RunTrigger,
 } from '../shared/routines';
+import { normalizeWeekdays } from '../shared/routine-schedule';
 
 // Routines live in their own file (<userData>/routines.json) so the big
 // conversation store never has to know about them, and a corrupt routines file
@@ -41,6 +42,10 @@ function sanitizeSchedule(s: any): RoutineSchedule | null {
   if (!CADENCES.includes(s.cadence)) return null;
   const out: RoutineSchedule = { cadence: s.cadence as RoutineCadence, time: str(s.time) ?? '09:00' };
   if (Number.isInteger(s.weekday) && s.weekday >= 0 && s.weekday <= 6) out.weekday = s.weekday;
+  if (Array.isArray(s.weekdays)) {
+    const days = normalizeWeekdays(s.weekdays);
+    if (days.length) out.weekdays = days;
+  }
   if (Array.isArray(s.monthDays)) {
     const days = s.monthDays.filter((d: unknown) => Number.isInteger(d) && (d as number) >= 1 && (d as number) <= 28);
     if (days.length) out.monthDays = days;
