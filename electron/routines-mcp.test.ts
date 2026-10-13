@@ -63,6 +63,21 @@ describe('routine tools', () => {
     assert.equal(r.routine.nextRun, null);   // paused
   });
 
+  it('create takes custom weekdays as names, short names or numbers', async () => {
+    const { store, call } = setup();
+    let r = await call('create', { name: 'Standup', prompt: 'p', cadence: 'weekdays', time: '06:00', weekdays: ['friday', 'Mon', 'wednesday', 'monday'] });
+    assert.equal(r.status, 'success');
+    assert.deepEqual(store.getRoutine('r1')!.schedule, { cadence: 'weekdays', time: '06:00', weekdays: [1, 3, 5] });
+    assert.equal(r.routine.schedule, '06:00 (Mon, Wed, Fri)');
+    assert.deepEqual(r.routine.weekdays, ['monday', 'wednesday', 'friday']);
+    assert.equal(r.routine.nextRun, '12 Oct 06:00');   // T0 is a Sunday → Monday
+    r = await call('create', { name: 'Weekend', prompt: 'p', cadence: 'weekdays', time: '10:00', weekdays: [6, '0'] });
+    assert.deepEqual(store.getRoutine('r2')!.schedule, { cadence: 'weekdays', time: '10:00', weekdays: [0, 6] });
+    assert.equal(r.routine.schedule, '10:00 (Sat, Sun)');
+    r = await call('create', { name: 'Solo', prompt: 'p', cadence: 'weekdays', time: '10:00', weekdays: 'tue' });
+    assert.deepEqual(store.getRoutine('r3')!.schedule, { cadence: 'weekdays', time: '10:00', weekdays: [2] });
+  });
+
   it('create refuses bad input and stores nothing', async () => {
     const { store, seen, call } = setup();
     const cases: [Record<string, unknown>, RegExp][] = [
@@ -72,6 +87,14 @@ describe('routine tools', () => {
       [{ name: 'x', prompt: ' ', time: '09:00' }, /prompt is required/],
       [{ name: 'x', prompt: 'p', time: '09:00', cadence: 'hourly' }, /cadence must be one of/],
       [{ name: 'x', prompt: 'p', time: '09:00', cadence: 'weekly', weekday: 'someday' }, /weekday must be/],
+      [{ name: 'x', prompt: 'p', time: '09:00', cadence: 'weekdays' }, /`weekdays` is required for cadence "weekdays"/],
+      [{ name: 'x', prompt: 'p', time: '09:00', cadence: 'weekdays', weekdays: [] }, /weekdays must list at least one day/],
+      [{ name: 'x', prompt: 'p', time: '09:00', cadence: 'weekdays', weekdays: ['monday', 'someday'] }, /weekdays: "someday" is not a day/],
+      [{ name: 'x', prompt: 'p', time: '09:00', cadence: 'weekdays', weekdays: [1, 7] }, /weekdays: 7 is not a day/],
+      [{ name: 'x', prompt: 'p', time: '09:00', cadence: 'weekdays', weekdays: [null] }, /weekdays: null is not a day/],
+      [{ name: 'x', prompt: 'p', time: '09:00', cadence: 'weekdays', weekdays: 3 }, /weekdays must be an array/],
+      [{ name: 'x', prompt: 'p', time: '09:00', cadence: 'weekly', weekdays: ['monday'] }, /`weekdays` only goes with cadence "weekdays", not "weekly".*use `weekday`/],
+      [{ name: 'x', prompt: 'p', time: '09:00', weekdays: ['monday'] }, /`weekdays` only goes with cadence "weekdays", not "daily"/],
       [{ name: 'x', prompt: 'p', time: '09:00', cadence: 'monthly', month_days: [31] }, /month days must be 1–28/],
       [{ name: 'x', prompt: 'p', time: '09:00', cadence: 'twiceMonthly', month_days: [5] }, /two different days/],
       [{ name: 'x', prompt: 'p', time: '09:00', directory: 'nope' }, /Unknown peer "nope"/],
@@ -110,6 +133,25 @@ describe('routine tools', () => {
     r = await call('update', { routine: 'Reddit', enabled: false });
     assert.equal(store.getRoutine('r1')!.enabled, false);
     assert.equal(r.routine.nextRun, null);
+  });
+
+  it('update switches to custom weekdays, replaces the days, and leaves them behind again', async () => {
+    const { store, call } = setup();
+    await call('create', { name: 'A', prompt: 'p', time: '09:00' });
+    assert.match((await call('update', { routine: 'A', cadence: 'weekdays' })).error, /`weekdays` is required/);
+    assert.match((await call('update', { routine: 'A', weekdays: ['monday'] })).error, /only goes with cadence "weekdays", not "daily"/);
+    assert.deepEqual(store.getRoutine('r1')!.schedule, { cadence: 'daily', time: '09:00' });
+    let r = await call('update', { routine: 'A', cadence: 'weekdays', weekdays: ['mon', 'wed', 'fri'], time: '06:00' });
+    assert.equal(r.routine.schedule, '06:00 (Mon, Wed, Fri)');
+    // The days alone, or the time alone, on a routine that is already custom-weekdays.
+    r = await call('update', { routine: 'A', weekdays: ['tuesday', 'thursday'] });
+    assert.deepEqual(store.getRoutine('r1')!.schedule, { cadence: 'weekdays', time: '06:00', weekdays: [2, 4] });
+    await call('update', { routine: 'A', time: '07:00' });
+    assert.deepEqual(store.getRoutine('r1')!.schedule, { cadence: 'weekdays', time: '07:00', weekdays: [2, 4] });
+    assert.match((await call('update', { routine: 'A', weekdays: [] })).error, /at least one day/);
+    assert.deepEqual(store.getRoutine('r1')!.schedule, { cadence: 'weekdays', time: '07:00', weekdays: [2, 4] });
+    await call('update', { routine: 'A', cadence: 'weekly', weekday: 'sat' });
+    assert.deepEqual(store.getRoutine('r1')!.schedule, { cadence: 'weekly', time: '07:00', weekday: 6 });
   });
 
   it('update refuses an unknown routine, an empty patch and a bad schedule', async () => {

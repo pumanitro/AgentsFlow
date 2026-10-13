@@ -2,7 +2,7 @@ import { describe, it } from 'node:test';
 import * as assert from 'node:assert/strict';
 import {
   addDays, cadenceLabel, dayDistance, dayKeyStartMs, defaultSchedule, formatSlot, localDayKey,
-  nextOccurrence, occurrencesBetween, parseTime, routineFloorMs, validateRoutineInput,
+  nextOccurrence, normalizeWeekdays, occurrencesBetween, parseTime, routineFloorMs, validateRoutineInput,
 } from '../shared/routine-schedule';
 import type { RoutineInput, RoutineSchedule } from '../shared/routines';
 
@@ -76,6 +76,30 @@ describe('occurrencesBetween', () => {
     assert.deepEqual(keys(occurrencesBetween(sun, at(2026, 10, 1), at(2026, 10, 20))), ['2026-10-04', '2026-10-11', '2026-10-18']);
   });
 
+  it('weekdays fires on each chosen day, across a week boundary', () => {
+    const mwf: RoutineSchedule = { cadence: 'weekdays', time: '06:00', weekdays: [1, 3, 5] };
+    // Thu 1 Oct .. Tue 13 Oct: Fri, then Mon/Wed/Fri of the next week, then Mon.
+    assert.deepEqual(keys(occurrencesBetween(mwf, at(2026, 10, 1), at(2026, 10, 13))), ['2026-10-02', '2026-10-05', '2026-10-07', '2026-10-09', '2026-10-12']);
+    // Every slot sits at the routine's time of day.
+    assert.deepEqual(occurrencesBetween(mwf, at(2026, 10, 9), at(2026, 10, 13)), [iso(2026, 10, 9, 6), iso(2026, 10, 12, 6)]);
+    // Mon 28 Dec 2026 .. Tue 5 Jan 2027: the pattern does not notice the year.
+    assert.deepEqual(keys(occurrencesBetween(mwf, at(2026, 12, 28), at(2027, 1, 5))), ['2026-12-28', '2026-12-30', '2027-01-01', '2027-01-04']);
+  });
+
+  it('weekdays with a single day is that day every week; Sunday is 0', () => {
+    const sat: RoutineSchedule = { cadence: 'weekdays', time: '06:00', weekdays: [6] };
+    assert.deepEqual(keys(occurrencesBetween(sat, at(2026, 10, 1), at(2026, 10, 20))), ['2026-10-03', '2026-10-10', '2026-10-17']);
+    const weekend: RoutineSchedule = { cadence: 'weekdays', time: '06:00', weekdays: [0, 6] };
+    assert.deepEqual(keys(occurrencesBetween(weekend, at(2026, 10, 5), at(2026, 10, 19))), ['2026-10-10', '2026-10-11', '2026-10-17', '2026-10-18']);
+  });
+
+  it('weekdays ignores the order and repeats of a hand-written list, and never fires without days', () => {
+    const messy: RoutineSchedule = { cadence: 'weekdays', time: '06:00', weekdays: [5, 1, 5, 3] };
+    assert.deepEqual(keys(occurrencesBetween(messy, at(2026, 10, 5), at(2026, 10, 12))), ['2026-10-05', '2026-10-07', '2026-10-09']);
+    assert.deepEqual(occurrencesBetween({ cadence: 'weekdays', time: '06:00' }, at(2026, 10, 1), at(2026, 11, 1)), []);
+    assert.deepEqual(occurrencesBetween({ cadence: 'weekdays', time: '06:00', weekdays: [] }, at(2026, 10, 1), at(2026, 11, 1)), []);
+  });
+
   it('twiceMonthly defaults to the 1st and 15th', () => {
     const s: RoutineSchedule = { cadence: 'twiceMonthly', time: '12:00' };
     assert.deepEqual(keys(occurrencesBetween(s, at(2026, 10, 1), at(2026, 12, 1))), ['2026-10-01', '2026-10-15', '2026-11-01', '2026-11-15']);
@@ -133,6 +157,22 @@ describe('nextOccurrence', () => {
     assert.equal(nextOccurrence({ cadence: 'monthly', time: '07:00', monthDays: [1] }, at(2026, 10, 10)), iso(2026, 11, 1, 7));
   });
 
+  it('weekdays: the next chosen day, this week or over the week boundary', () => {
+    const mwf: RoutineSchedule = { cadence: 'weekdays', time: '06:00', weekdays: [1, 3, 5] };
+    assert.equal(nextOccurrence(mwf, at(2026, 10, 5, 5, 59)), iso(2026, 10, 5, 6));    // Monday, before its slot
+    assert.equal(nextOccurrence(mwf, at(2026, 10, 5, 6)), iso(2026, 10, 7, 6));        // strictly after → Wednesday
+    assert.equal(nextOccurrence(mwf, at(2026, 10, 6, 12)), iso(2026, 10, 7, 6));       // Tuesday → Wednesday
+    assert.equal(nextOccurrence(mwf, at(2026, 10, 9, 6)), iso(2026, 10, 12, 6));       // Friday's slot → next Monday
+    assert.equal(nextOccurrence(mwf, at(2026, 10, 11, 23, 59)), iso(2026, 10, 12, 6)); // Sunday night → Monday
+  });
+
+  it('weekdays: a single day comes round a week later; no days never comes', () => {
+    const wed: RoutineSchedule = { cadence: 'weekdays', time: '06:00', weekdays: [3] };
+    assert.equal(nextOccurrence(wed, at(2026, 10, 7, 6)), iso(2026, 10, 14, 6));
+    assert.equal(nextOccurrence(wed, at(2026, 10, 8)), iso(2026, 10, 14, 6));
+    assert.equal(nextOccurrence({ cadence: 'weekdays', time: '06:00', weekdays: [] }, at(2026, 10, 10)), null);
+  });
+
   it('is null when nothing fires within 62 days', () => {
     assert.equal(nextOccurrence({ cadence: 'monthly', time: '07:00', monthDays: [] }, at(2026, 10, 10)), null);
     assert.equal(nextOccurrence({ cadence: 'daily', time: 'bad' }, at(2026, 10, 10)), null);
@@ -143,12 +183,23 @@ describe('labels', () => {
   it('cadenceLabel speaks each cadence', () => {
     assert.equal(cadenceLabel({ cadence: 'daily', time: '09:00' }), '09:00');
     assert.equal(cadenceLabel({ cadence: 'every2days', time: '09:00', anchorDate: '2026-10-10' }), '09:00 (every 2 days)');
+    assert.equal(cadenceLabel({ cadence: 'weekdays', time: '06:00', weekdays: [1, 3, 5] }), '06:00 (Mon, Wed, Fri)');
+    assert.equal(cadenceLabel({ cadence: 'weekdays', time: '06:00', weekdays: [0, 6, 2] }), '06:00 (Tue, Sat, Sun)');   // Monday-first, Sunday last
+    assert.equal(cadenceLabel({ cadence: 'weekdays', time: '06:00', weekdays: [4] }), '06:00 (Thu)');
+    assert.equal(cadenceLabel({ cadence: 'weekdays', time: '06:00' }), '06:00 (no days)');
     assert.equal(cadenceLabel({ cadence: 'weekly', time: '09:00' }), '09:00 (Mondays)');
     assert.equal(cadenceLabel({ cadence: 'weekly', time: '18:30', weekday: 0 }), '18:30 (Sundays)');
     assert.equal(cadenceLabel({ cadence: 'twiceMonthly', time: '12:00', monthDays: [15, 1] }), '12:00 (1st and 15th)');
     assert.equal(cadenceLabel({ cadence: 'twiceMonthly', time: '12:00', monthDays: [2, 23] }), '12:00 (2nd and 23rd)');
     assert.equal(cadenceLabel({ cadence: 'monthly', time: '07:00' }), '07:00 (1st)');
     assert.equal(cadenceLabel({ cadence: 'monthly', time: '07:00', monthDays: [11] }), '07:00 (11th)');
+  });
+
+  it('normalizeWeekdays keeps valid days once, ascending', () => {
+    assert.deepEqual(normalizeWeekdays([5, 1, 5, 3]), [1, 3, 5]);
+    assert.deepEqual(normalizeWeekdays([6, 0, 7, -1, 1.5, '2', null]), [0, 6]);
+    assert.deepEqual(normalizeWeekdays(undefined), []);
+    assert.deepEqual(normalizeWeekdays('monday'), []);
   });
 
   it('formatSlot is local "d Mon HH:MM"', () => {
@@ -161,6 +212,7 @@ describe('labels', () => {
     const now = at(2026, 10, 10, 15);
     assert.deepEqual(defaultSchedule('daily', now), { cadence: 'daily', time: '09:00' });
     assert.deepEqual(defaultSchedule('every2days', now), { cadence: 'every2days', time: '09:00', anchorDate: '2026-10-10' });
+    assert.deepEqual(defaultSchedule('weekdays', now), { cadence: 'weekdays', time: '09:00', weekdays: [1, 3, 5] });
     assert.deepEqual(defaultSchedule('weekly', now), { cadence: 'weekly', time: '09:00', weekday: 1 });
     assert.deepEqual(defaultSchedule('twiceMonthly', now), { cadence: 'twiceMonthly', time: '09:00', monthDays: [1, 15] });
     assert.deepEqual(defaultSchedule('monthly', now), { cadence: 'monthly', time: '09:00', monthDays: [1] });
@@ -175,7 +227,7 @@ describe('validateRoutineInput', () => {
 
   it('accepts a valid input of every cadence', () => {
     assert.equal(v({}), null);
-    for (const c of ['daily', 'every2days', 'weekly', 'twiceMonthly', 'monthly'] as const) assert.equal(vs(defaultSchedule(c, at(2026, 10, 10))), null, c);
+    for (const c of ['daily', 'every2days', 'weekdays', 'weekly', 'twiceMonthly', 'monthly'] as const) assert.equal(vs(defaultSchedule(c, at(2026, 10, 10))), null, c);
   });
 
   it('accepts catch-up on, off or unset and rejects anything else', () => {
@@ -199,6 +251,13 @@ describe('validateRoutineInput', () => {
     assert.equal(vs({ cadence: 'daily', time: '25:00' }), 'time must be HH:MM');
     assert.equal(vs({ cadence: 'weekly', time: '09:00', weekday: 7 }), 'weekday must be 0–6');
     assert.equal(vs({ cadence: 'weekly', time: '09:00', weekday: 1.5 }), 'weekday must be 0–6');
+    assert.equal(vs({ cadence: 'weekdays', time: '09:00', weekdays: [0, 1, 2, 3, 4, 5, 6] }), null);
+    assert.equal(vs({ cadence: 'weekdays', time: '09:00', weekdays: [4] }), null);
+    assert.equal(vs({ cadence: 'weekdays', time: '09:00', weekdays: [] }), 'pick at least one day of the week');
+    assert.equal(vs({ cadence: 'weekdays', time: '09:00' }), 'pick at least one day of the week');
+    assert.equal(vs({ cadence: 'weekdays', time: '09:00', weekdays: [1, 7] }), 'weekdays must be 0–6');
+    assert.equal(vs({ cadence: 'weekdays', time: '09:00', weekdays: [1.5] }), 'weekdays must be 0–6');
+    assert.equal(vs({ cadence: 'weekdays', time: '09:00', weekdays: [1, 3, 1] }), 'weekdays must not repeat a day');
     assert.equal(vs({ cadence: 'monthly', time: '09:00', monthDays: [29] }), 'month days must be 1–28');
     assert.equal(vs({ cadence: 'twiceMonthly', time: '09:00', monthDays: [0, 15] }), 'month days must be 1–28');
     assert.equal(vs({ cadence: 'twiceMonthly', time: '09:00', monthDays: [5, 5] }), 'twice a month needs two different days');

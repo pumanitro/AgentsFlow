@@ -31,6 +31,7 @@ export const STATUS_CARD: Record<MarkStatus, string> = {
 export const CADENCE_COLOR: Record<RoutineCadence, string> = {
   daily: '#2dd4bf',        // teal
   every2days: '#a78bfa',   // violet
+  weekdays: '#7dd3fc',     // sky
   weekly: '#e879f9',       // fuchsia
   twiceMonthly: '#facc15', // yellow
   monthly: '#e2e8f0',      // pale slate

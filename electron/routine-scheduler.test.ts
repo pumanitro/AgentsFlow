@@ -246,6 +246,34 @@ describe('scheduler rule 2: catch-up switch', () => {
     assert.equal(h.spawns.length, 1, 'the caught-up slot is taken, never run twice');
   });
 
+  it('on: custom weekdays slept through run once for the newest day, older ones are missed', async () => {
+    const h = harness(at(11, 12, 0), real);   // Sunday; Mon 5, Wed 7 and Fri 9 Oct 06:00 all passed while asleep
+    addRoutine(h, { catchUp: true, schedule: { cadence: 'weekdays', time: '06:00', weekdays: [1, 3, 5] }, createdAt: isoOf(at(4, 0)) });
+    await h.sched.tick();
+    assert.deepEqual(runsOf(h).map((r) => [r.slotAt, r.status, r.trigger]), [
+      [isoOf(at(5, 6)), 'missed', 'schedule'], [isoOf(at(7, 6)), 'missed', 'schedule'], [isoOf(at(9, 6)), 'running', 'catchup'],
+    ]);
+    assert.equal(h.spawns.length, 1);
+    h.convs.set('conv-1', conv('conv-1', { state: 'done', status: 'completed' }));
+    h.setNow(at(12, 6, 0) + 1000);            // Monday's own slot, over the week boundary
+    await h.sched.tick();
+    await h.sched.tick();
+    assert.equal(h.spawns.length, 2);
+    assert.deepEqual(runsOf(h).map((r) => [r.slotAt, r.trigger]).pop(), [isoOf(at(12, 6)), 'schedule']);
+  });
+
+  it('off: custom weekdays slept through are all missed, and the next chosen day still runs', async () => {
+    const h = harness(at(11, 12, 0), real);
+    addRoutine(h, { catchUp: false, schedule: { cadence: 'weekdays', time: '06:00', weekdays: [1, 3, 5] }, createdAt: isoOf(at(4, 0)) });
+    await h.sched.tick();
+    assert.equal(h.spawns.length, 0);
+    assert.deepEqual(runsOf(h).map((r) => [r.slotAt, r.status]), [[isoOf(at(5, 6)), 'missed'], [isoOf(at(7, 6)), 'missed'], [isoOf(at(9, 6)), 'missed']]);
+    h.setNow(at(12, 6, 0) + 1000);
+    await h.sched.tick();
+    assert.equal(h.spawns.length, 1);
+    assert.equal(h.spawns[0].run.slotAt, isoOf(at(12, 6)));
+  });
+
   it('on: a monthly slot missed 10 days ago still runs', async () => {
     const h = harness(at(11, 12, 0), real);
     addRoutine(h, { schedule: { cadence: 'monthly', time: '09:00', monthDays: [1] }, createdAt: isoOf(new Date(2026, 7, 20).getTime()) });

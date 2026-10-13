@@ -22,7 +22,7 @@ import {
   type RoutineRun,
   type RoutineSchedule,
 } from '../shared/routines';
-import { cadenceLabel, formatSlot, localDayKey, nextOccurrence, validateRoutineInput } from '../shared/routine-schedule';
+import { cadenceLabel, formatSlot, localDayKey, nextOccurrence, normalizeWeekdays, validateRoutineInput } from '../shared/routine-schedule';
 import type { RoutinesStore } from './routines-api';
 
 export type RoutinesOp = 'list' | 'create' | 'update' | 'delete' | 'run';
@@ -67,7 +67,7 @@ export function patchRoutine(store: RoutinesStore, id: string, patch: RoutinePat
 // ---- tool arguments → routine fields ----
 
 const WEEKDAYS = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
-const SCHEDULE_KEYS = ['cadence', 'time', 'weekday', 'month_days', 'start_date'] as const;
+const SCHEDULE_KEYS = ['cadence', 'time', 'weekday', 'weekdays', 'month_days', 'start_date'] as const;
 
 type Args = Record<string, unknown>;
 
@@ -82,6 +82,20 @@ function parseWeekday(v: unknown): number {
   return i;
 }
 
+/** `weekdays`: an array (or a comma-separated string) of day names / 0–6, returned distinct and ascending. */
+function parseWeekdays(v: unknown): number[] {
+  const list = typeof v === 'string' ? v.split(',').filter((s) => s.trim()) : v;
+  if (!Array.isArray(list)) throw new Error('weekdays must be an array of day names (e.g. ["monday", "wednesday", "friday"]) or numbers 0–6 with 0 = Sunday');
+  if (list.length === 0) throw new Error('weekdays must list at least one day');
+  const days = list.map((d) => {
+    let n = NaN;
+    try { if (typeof d === 'string' || typeof d === 'number') n = parseWeekday(d); } catch { /* reported below, naming the entry */ }
+    if (!(Number.isInteger(n) && n >= 0 && n <= 6)) throw new Error(`weekdays: ${JSON.stringify(d)} is not a day — use a day name (e.g. "monday") or 0–6 with 0 = Sunday`);
+    return n;
+  });
+  return normalizeWeekdays(days);
+}
+
 /**
  * The schedule the flat tool arguments describe, laid over `base` (the
  * routine's current schedule on an update). Only the fields the cadence uses
@@ -93,8 +107,15 @@ export function scheduleFromArgs(args: Args, base: RoutineSchedule | null, nowMs
   const time = str(args.time) ?? base?.time;
   if (!time) throw new Error('`time` is required (HH:MM, 24 h, local time)');
   const kept = base && base.cadence === cadence ? base : null;
+  if (args.weekdays !== undefined && cadence !== 'weekdays') {
+    throw new Error(`\`weekdays\` only goes with cadence "weekdays", not "${cadence}" — pass cadence: "weekdays"${cadence === 'weekly' ? ', or use `weekday` for one day a week' : ''}`);
+  }
   const out: RoutineSchedule = { cadence, time };
-  if (cadence === 'weekly') {
+  if (cadence === 'weekdays') {
+    const days = args.weekdays !== undefined ? parseWeekdays(args.weekdays) : kept?.weekdays;
+    if (!days?.length) throw new Error('`weekdays` is required for cadence "weekdays": the days it runs on, e.g. ["monday", "wednesday", "friday"]');
+    out.weekdays = days;
+  } else if (cadence === 'weekly') {
     const w = args.weekday !== undefined ? parseWeekday(args.weekday) : kept?.weekday;
     if (w !== undefined) out.weekday = w;
   } else if (cadence === 'monthly' || cadence === 'twiceMonthly') {
@@ -164,6 +185,7 @@ function describeRoutine(r: Routine, deps: RoutinesToolDeps): Record<string, unk
     model: r.model ?? null,
     icon: r.icon,
     cadence: r.schedule.cadence,
+    ...(r.schedule.cadence === 'weekdays' ? { weekdays: normalizeWeekdays(r.schedule.weekdays).map((d) => WEEKDAYS[d]) } : {}),
     schedule: cadenceLabel(r.schedule),
     enabled: r.enabled,
     catchUp: routineCatchesUp(r),

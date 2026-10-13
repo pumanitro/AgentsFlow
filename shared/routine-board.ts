@@ -5,7 +5,7 @@ import { addDays, dayKeyStartMs, localDayKey, occurrencesBetween, routineFloorMs
 export interface SlotMark { routine: Routine; slotAt: string; status: MarkStatus; run?: RoutineRun }
 export interface DayCells {
   dayKey: string; isToday: boolean; isPast: boolean;
-  dailies: SlotMark[]; every2days: SlotMark[]; weekly: SlotMark[]; twiceMonthly: SlotMark[]; monthly: SlotMark[];
+  dailies: SlotMark[]; every2days: SlotMark[]; weekdays: SlotMark[]; weekly: SlotMark[]; twiceMonthly: SlotMark[]; monthly: SlotMark[];
   score: { done: number; total: number };   // dailies: success count / dailies due that day
 }
 
@@ -45,8 +45,8 @@ export function markStatusFor(run: RoutineRun | undefined, slotMs: number, nowMs
   return rule.catchUp || nowMs - slotMs <= CATCHUP_OFF_GRACE_MS ? 'scheduled' : 'missed';
 }
 
-const BUCKET: Record<RoutineCadence, 'dailies' | 'every2days' | 'weekly' | 'twiceMonthly' | 'monthly'> = {
-  daily: 'dailies', every2days: 'every2days', weekly: 'weekly', twiceMonthly: 'twiceMonthly', monthly: 'monthly',
+const BUCKET: Record<RoutineCadence, 'dailies' | 'every2days' | 'weekdays' | 'weekly' | 'twiceMonthly' | 'monthly'> = {
+  daily: 'dailies', every2days: 'every2days', weekdays: 'weekdays', weekly: 'weekly', twiceMonthly: 'twiceMonthly', monthly: 'monthly',
 };
 
 // Runs are joined on the slot's instant, not its string, so an ISO written
@@ -62,7 +62,7 @@ export function buildDayCells(routines: Routine[], runs: RoutineRun[], dayKeys: 
       dayKey,
       isToday: dayKey === today,
       isPast: dayKey < today,
-      dailies: [], every2days: [], weekly: [], twiceMonthly: [], monthly: [],
+      dailies: [], every2days: [], weekdays: [], weekly: [], twiceMonthly: [], monthly: [],
       score: { done: 0, total: 0 },
     });
   }
@@ -123,7 +123,7 @@ export function buildDayCells(routines: Routine[], runs: RoutineRun[], dayKeys: 
   }
 
   for (const cell of cells.values()) {
-    for (const bucket of [cell.dailies, cell.every2days, cell.weekly, cell.twiceMonthly, cell.monthly]) {
+    for (const bucket of [cell.dailies, cell.every2days, cell.weekdays, cell.weekly, cell.twiceMonthly, cell.monthly]) {
       bucket.sort((a, b) => Date.parse(a.slotAt) - Date.parse(b.slotAt) || a.routine.name.localeCompare(b.routine.name));
     }
     // The health bar has one segment per daily ROUTINE, so a manual re-run of

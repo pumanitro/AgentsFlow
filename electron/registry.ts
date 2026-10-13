@@ -176,16 +176,17 @@ export const TOOL_DEFS = [
     title: 'Create a routine',
     description:
       'Add a routine to the Peers Flow Routines tab, exactly like its "New routine" form: from then on Peers Flow starts a fresh, unattended chat in the chosen peer at each scheduled time and sends it `prompt` as the first message. That chat shares NONE of your conversation context, so `prompt` must be self-contained (a slash command of that peer, e.g. "/reddit-daily-routine", or a full brief). Only call this when the user asks for something to run on a schedule, and tell them the name, peer and schedule you set.',
-    usage: 'create_routine({ name, prompt, time, cadence?, directory?, weekday?, month_days?, start_date?, provider?, model?, icon?, catch_up?, enabled? })',
+    usage: 'create_routine({ name, prompt, time, cadence?, directory?, weekday?, weekdays?, month_days?, start_date?, provider?, model?, icon?, catch_up?, enabled? })',
     inputSchema: {
       type: 'object',
       properties: {
         name: { type: 'string', description: 'Short name shown in the Routines tab, at most 60 characters.' },
         prompt: { type: 'string', description: 'The first message of every run, verbatim. Self-contained: the run knows nothing about this conversation.' },
         directory: { type: 'string', description: 'Peer the routine runs in: its name, absolute path or id, as shown by list_peers. Defaults to the peer this session is rooted in.' },
-        cadence: { type: 'string', enum: ['daily', 'every2days', 'weekly', 'twiceMonthly', 'monthly'], description: 'How often it runs. Default "daily".' },
+        cadence: { type: 'string', enum: ['daily', 'every2days', 'weekdays', 'weekly', 'twiceMonthly', 'monthly'], description: 'How often it runs. Default "daily". "weekdays" = every week on the days listed in `weekdays` (e.g. Monday, Wednesday, Friday); "weekly" = one day a week.' },
         time: { type: 'string', description: 'Time of day as "HH:MM", 24-hour, in the LOCAL time of the machine Peers Flow runs on, e.g. "09:00".' },
         weekday: { type: 'string', description: 'weekly only: the day name ("monday") or 0–6 with 0 = Sunday. Default Monday.' },
+        weekdays: { type: 'array', items: { type: 'string' }, description: 'weekdays only, and required for it: the days of the week it runs on, as day names or 0–6 with 0 = Sunday, e.g. ["monday", "wednesday", "friday"]. At least one day.' },
         month_days: { type: 'array', items: { type: 'number' }, description: 'monthly: one day, e.g. [1]. twiceMonthly: two different days, e.g. [1, 15]. Each 1–28.' },
         start_date: { type: 'string', description: 'every2days only: "YYYY-MM-DD" of a day it runs on; it then runs every second day from there. Default today.' },
         provider: { type: 'string', enum: ['claude', 'codex'], description: 'Agent that runs it. Default "claude".' },
@@ -203,7 +204,7 @@ export const TOOL_DEFS = [
     title: 'Change a routine',
     description:
       'Change an existing routine: rename it, replace its prompt, move it to another peer, reschedule it, or pause / resume it with `enabled`. Pass only the fields to change. Only call this when the user asks.',
-    usage: 'update_routine({ routine, name?, prompt?, directory?, cadence?, time?, weekday?, month_days?, start_date?, provider?, model?, icon?, catch_up?, enabled? })',
+    usage: 'update_routine({ routine, name?, prompt?, directory?, cadence?, time?, weekday?, weekdays?, month_days?, start_date?, provider?, model?, icon?, catch_up?, enabled? })',
     inputSchema: {
       type: 'object',
       properties: {
@@ -211,9 +212,10 @@ export const TOOL_DEFS = [
         name: { type: 'string', description: 'New name, at most 60 characters.' },
         prompt: { type: 'string', description: 'New first message for every run.' },
         directory: { type: 'string', description: 'Peer to run in from now on: name, absolute path or id.' },
-        cadence: { type: 'string', enum: ['daily', 'every2days', 'weekly', 'twiceMonthly', 'monthly'], description: 'How often it runs.' },
+        cadence: { type: 'string', enum: ['daily', 'every2days', 'weekdays', 'weekly', 'twiceMonthly', 'monthly'], description: 'How often it runs. "weekdays" = every week on the days listed in `weekdays`; "weekly" = one day a week.' },
         time: { type: 'string', description: 'Time of day as "HH:MM", 24-hour, in the LOCAL time of the machine Peers Flow runs on, e.g. "09:00".' },
         weekday: { type: 'string', description: 'weekly only: the day name ("monday") or 0–6 with 0 = Sunday. Default Monday.' },
+        weekdays: { type: 'array', items: { type: 'string' }, description: 'weekdays only: the days of the week it runs on, as day names or 0–6 with 0 = Sunday, e.g. ["monday", "wednesday", "friday"]. Replaces the whole list; required when switching to the weekdays cadence.' },
         month_days: { type: 'array', items: { type: 'number' }, description: 'monthly: one day, e.g. [1]. twiceMonthly: two different days, e.g. [1, 15]. Each 1–28.' },
         start_date: { type: 'string', description: 'every2days only: "YYYY-MM-DD" of a day it runs on; it then runs every second day from there. Default today.' },
         provider: { type: 'string', enum: ['claude', 'codex'], description: 'Agent that runs it.' },

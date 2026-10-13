@@ -14,6 +14,7 @@ const NEXT_SEARCH_DAYS = 62;
 // (e.g. monthDays: []) cannot spin forever.
 const MAX_SCAN_DAYS = 40_000;
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+const WEEKDAYS_SHORT = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 const WEEKDAYS_PLURAL = ['Sundays', 'Mondays', 'Tuesdays', 'Wednesdays', 'Thursdays', 'Fridays', 'Saturdays'];
 const DEFAULT_MONTH_DAYS: Record<'monthly' | 'twiceMonthly', number[]> = { monthly: [1], twiceMonthly: [1, 15] };
 // An every-2-days schedule without an anchor should not happen (defaultSchedule
@@ -73,6 +74,8 @@ function firesOn(schedule: RoutineSchedule, key: string, date: Date): boolean {
       // Days before the anchor give negative distances; JS % keeps the sign.
       return ((d % 2) + 2) % 2 === 0;
     }
+    case 'weekdays':
+      return (schedule.weekdays ?? []).includes(date.getDay());
     case 'weekly':
       return date.getDay() === (schedule.weekday ?? 1);
     case 'twiceMonthly':
@@ -81,6 +84,13 @@ function firesOn(schedule: RoutineSchedule, key: string, date: Date): boolean {
     default:
       return false;
   }
+}
+
+/** The valid days of a weekdays list (integers 0..6), each once, ascending. */
+export function normalizeWeekdays(days: unknown): number[] {
+  if (!Array.isArray(days)) return [];
+  const valid = days.filter((d): d is number => Number.isInteger(d) && d >= 0 && d <= 6);
+  return [...new Set(valid)].sort((a, b) => a - b);
 }
 
 /** Slots of `schedule` with fromMs ≤ slot < toMs, ascending ISO (UTC) strings. Local-time construction (new Date(y,m,d,hh,mm)) so DST days are right. Hard cap 400. */
@@ -113,7 +123,7 @@ function ordinal(n: number): string {
   return `${n}${suffix}`;
 }
 
-/** '09:00' | '09:00 (every 2 days)' | '09:00 (Mondays)' | '12:00 (1st and 15th)' | '07:00 (1st)' */
+/** '09:00' | '09:00 (every 2 days)' | '06:00 (Mon, Wed, Fri)' | '09:00 (Mondays)' | '12:00 (1st and 15th)' | '07:00 (1st)' */
 export function cadenceLabel(schedule: RoutineSchedule): string {
   const time = schedule.time;
   switch (schedule.cadence) {
@@ -121,6 +131,11 @@ export function cadenceLabel(schedule: RoutineSchedule): string {
       return time;
     case 'every2days':
       return `${time} (every 2 days)`;
+    case 'weekdays': {
+      // Monday first, like the boards; Sunday closes the week.
+      const days = normalizeWeekdays(schedule.weekdays).sort((a, b) => ((a + 6) % 7) - ((b + 6) % 7));
+      return days.length ? `${time} (${days.map((d) => WEEKDAYS_SHORT[d]).join(', ')})` : `${time} (no days)`;
+    }
     case 'weekly':
       return `${time} (${WEEKDAYS_PLURAL[schedule.weekday ?? 1] ?? WEEKDAYS_PLURAL[1]})`;
     case 'twiceMonthly':
@@ -141,12 +156,14 @@ export function formatSlot(slotIso: string): string {
   return `${d.getDate()} ${MONTHS[d.getMonth()]} ${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
 }
 
-/** time '09:00', weekday 1, monthDays [1]/[1,15], anchorDate = localDayKey(nowMs). */
+/** time '09:00', weekday 1, weekdays [1, 3, 5], monthDays [1]/[1,15], anchorDate = localDayKey(nowMs). */
 export function defaultSchedule(cadence: RoutineCadence, nowMs: number): RoutineSchedule {
   const time = '09:00';
   switch (cadence) {
     case 'every2days':
       return { cadence, time, anchorDate: localDayKey(nowMs) };
+    case 'weekdays':
+      return { cadence, time, weekdays: [1, 3, 5] };
     case 'weekly':
       return { cadence, time, weekday: 1 };
     case 'twiceMonthly':
@@ -166,7 +183,7 @@ function isDayKey(key: string): boolean {
   return dt.getFullYear() === y && dt.getMonth() === mo - 1 && dt.getDate() === d;
 }
 
-/** null = ok, else a one-line human message. Checks: name 1..60 after trim; directoryId ∈ dirs; prompt non-empty; catchUp undefined or boolean; schedule shape per cadence (time parses; weekday 0..6; monthDays 1..28, 1 or 2 distinct entries; anchorDate 'YYYY-MM-DD'). */
+/** null = ok, else a one-line human message. Checks: name 1..60 after trim; directoryId ∈ dirs; prompt non-empty; catchUp undefined or boolean; schedule shape per cadence (time parses; weekday 0..6; weekdays 1..7 distinct entries, each 0..6; monthDays 1..28, 1 or 2 distinct entries; anchorDate 'YYYY-MM-DD'). */
 export function validateRoutineInput(input: RoutineInput, dirs: Pick<TrackedDirectory, 'id'>[]): string | null {
   const name = (input.name ?? '').trim();
   if (!name) return 'name is required';
@@ -182,6 +199,11 @@ export function validateRoutineInput(input: RoutineInput, dirs: Pick<TrackedDire
       return null;
     case 'every2days':
       if (s.anchorDate !== undefined && !isDayKey(s.anchorDate)) return 'start date must be YYYY-MM-DD';
+      return null;
+    case 'weekdays':
+      if (!Array.isArray(s.weekdays) || s.weekdays.length === 0) return 'pick at least one day of the week';
+      if (!s.weekdays.every((d) => Number.isInteger(d) && d >= 0 && d <= 6)) return 'weekdays must be 0–6';
+      if (new Set(s.weekdays).size !== s.weekdays.length) return 'weekdays must not repeat a day';
       return null;
     case 'weekly':
       if (s.weekday !== undefined && !(Number.isInteger(s.weekday) && s.weekday >= 0 && s.weekday <= 6)) return 'weekday must be 0–6';

@@ -42,6 +42,14 @@ export function CadenceIcon({ cadence, size = 12, className }: { cadence: Routin
       </svg>
     );
   }
+  if (cadence === 'weekdays') { // a week strip with three of its days picked
+    return (
+      <svg {...common}>
+        <path d="M1.5 3v6 M6 3v6 M10.5 3v6" strokeWidth={1.6} />
+        <path d="M3.75 5.5v1 M8.25 5.5v1" />
+      </svg>
+    );
+  }
   if (cadence === 'weekly') { // a strip of 7 vertical bars
     return (
       <svg {...common}>

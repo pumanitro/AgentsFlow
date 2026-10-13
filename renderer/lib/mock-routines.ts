@@ -25,6 +25,7 @@ function mockSlots(s: RoutineSchedule, fromMs: number, toMs: number): number[] {
         fires = ((dist % 2) + 2) % 2 === 0;
         break;
       }
+      case 'weekdays': fires = (s.weekdays ?? []).includes(day.getDay()); break;
       case 'weekly': fires = day.getDay() === (s.weekday ?? 1); break;
       case 'monthly': fires = (s.monthDays ?? [1]).includes(day.getDate()); break;
       case 'twiceMonthly': fires = (s.monthDays ?? [1, 15]).includes(day.getDate()); break;
@@ -60,6 +61,7 @@ export function buildMockRoutines(dirs: TrackedDirectory[], nowMs: number): { ro
     // The one fixture with "run later if missed" switched off.
     { ...base('mock-inbox-sweep', 'Inbox sweep', 1, 'Sweep the inbox and file what needs an answer', { cadence: 'daily', time: '18:00' }, 'mail'), catchUp: false },
     base('mock-changelog', 'Changelog', 0, '/devlog', { cadence: 'every2days', time: '10:00', anchorDate: dayKey(new Date(nowMs - 45 * DAY_MS)) }, 'book'),
+    base('mock-standup-notes', 'Standup notes', 0, 'Write the standup notes from the last two days', { cadence: 'weekdays', time: '06:00', weekdays: [1, 3, 5] }, 'clock'),
     base('mock-weekly-metrics', 'Weekly metrics', 2, 'Summarise last week\'s metrics', { cadence: 'weekly', time: '08:30', weekday: 1 }, 'chart'),
     base('mock-invoice-run', 'Invoice run', 1, 'Prepare the invoices', { cadence: 'twiceMonthly', time: '12:00', monthDays: [1, 15] }, 'coin'),
     base('mock-dependency-audit', 'Dependency audit', 2, 'Audit dependencies for known issues', { cadence: 'monthly', time: '07:00', monthDays: [1] }, 'shield'),

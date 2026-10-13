@@ -1,15 +1,16 @@
 import type { AgentProvider, Conversation } from './types';
 
-export type RoutineCadence = 'daily' | 'every2days' | 'weekly' | 'twiceMonthly' | 'monthly';
-export const CADENCES: RoutineCadence[] = ['daily', 'every2days', 'weekly', 'twiceMonthly', 'monthly'];
+export type RoutineCadence = 'daily' | 'every2days' | 'weekdays' | 'weekly' | 'twiceMonthly' | 'monthly';
+export const CADENCES: RoutineCadence[] = ['daily', 'every2days', 'weekdays', 'weekly', 'twiceMonthly', 'monthly'];
 export const CADENCE_GROUP_LABEL: Record<RoutineCadence, string> = {
-  daily: 'DAILY', every2days: 'EVERY 2 DAYS', weekly: 'WEEKLY', twiceMonthly: 'TWICE A MONTH', monthly: 'MONTHLY',
+  daily: 'DAILY', every2days: 'EVERY 2 DAYS', weekdays: 'CUSTOM DAYS', weekly: 'WEEKLY', twiceMonthly: 'TWICE A MONTH', monthly: 'MONTHLY',
 };
 
 export interface RoutineSchedule {
   cadence: RoutineCadence;
   time: string;            // 'HH:MM' 24 h, LOCAL time
   weekday?: number;        // weekly: 0..6 (0 = Sunday, Date#getDay). Default 1 (Monday)
+  weekdays?: number[];     // weekdays: the days it runs on, each 0..6 (0 = Sunday), at least one, distinct, ascending. No default: without it the routine never fires
   monthDays?: number[];    // monthly: [d]; twiceMonthly: [d1, d2]; each 1..28. Defaults [1] / [1, 15]
   anchorDate?: string;     // every2days: 'YYYY-MM-DD' local; fires on days whose calendar-day distance from it is even. Default: createdAt's local date
 }

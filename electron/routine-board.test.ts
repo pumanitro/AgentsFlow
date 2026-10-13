@@ -177,15 +177,17 @@ describe('buildDayCells', () => {
     const rs = [
       routine('d', daily()),
       routine('e', { cadence: 'every2days', time: '09:00', anchorDate: '2026-10-05' }),
+      routine('c', { cadence: 'weekdays', time: '06:00', weekdays: [1, 3, 5] }),
       routine('w', { cadence: 'weekly', time: '09:00', weekday: 3 }),
       routine('t', { cadence: 'twiceMonthly', time: '09:00', monthDays: [1, 8] }),
       routine('m', { cadence: 'monthly', time: '09:00', monthDays: [9] }),
     ];
     const cells = buildDayCells(rs, [], week, now);
-    const count = (b: 'dailies' | 'every2days' | 'weekly' | 'twiceMonthly' | 'monthly') =>
+    const count = (b: 'dailies' | 'every2days' | 'weekdays' | 'weekly' | 'twiceMonthly' | 'monthly') =>
       week.map((k) => cell(cells, k)[b].length).join('');
     assert.equal(count('dailies'), '1111111');
     assert.equal(count('every2days'), '1010101');
+    assert.equal(count('weekdays'), '1010100');
     assert.equal(count('weekly'), '0010000');
     assert.equal(count('twiceMonthly'), '0001000');
     assert.equal(count('monthly'), '0000100');
