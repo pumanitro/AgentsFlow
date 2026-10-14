@@ -26,7 +26,9 @@ export interface RoutineSchedulerDeps {
   spawn: (routine: Routine, run: RoutineRun) => Promise<{ conversationId: string }>;
   /** A run looks finished although the daemon never wrote a terminal state (main.ts has the transcript heuristic). Return a summary to settle it as success, null to keep waiting. Optional. */
   settleQuietRun?: (conv: Conversation, run: RoutineRun) => Promise<{ summary: string } | null>;
-  onChange: () => void;                                                  // routines/runs changed → broadcast
+  /** The chat's session died before it ever started (no transcript): restart it in place with the same prompt. Resolves true when it is back. Optional. */
+  restartNeverStarted?: (conv: Conversation) => Promise<boolean>;
+  onChange: () => void;                                                 // routines/runs changed → broadcast
   log: (msg: string, detail?: Record<string, unknown>) => void;
   occurrencesBetween?: typeof occurrencesBetween;                        // test seam; default = shared impl
 }

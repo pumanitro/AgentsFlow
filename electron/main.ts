@@ -64,6 +64,7 @@ import {
   removeAgent as cliRemove,
   readJobState,
   hasLiveDaemon,
+  respawnAgent,
   jobStateMtimeMs,
   resumeBackground,
   type ClaudeAgentJsonRow,
@@ -1937,6 +1938,7 @@ function startRoutines(): void {
       return { conversationId: r.conversationId };
     },
     settleQuietRun: settleQuietRoutineRun,
+    restartNeverStarted,
     onChange: broadcastRoutines,
     log: (m, d) => console.log(`[agentsflow][routines] ${m}`, d ?? {}),
   });
@@ -2441,6 +2443,30 @@ function transcriptExists(cwd: string, sessionId: string): boolean {
 }
 
 /**
+ * A background job that died before its session started (the daemon's
+ * "… before init" verdict — e.g. macOS killed the worker mid-exec) leaves a chat
+ * that can't be opened: no daemon to attach to and no transcript to --resume
+ * ("No conversation found"). `claude respawn` starts that same job again with
+ * the flags and prompt it was spawned with. Resolves true once it is resident.
+ */
+async function restartNeverStarted(conv: Conversation): Promise<boolean> {
+  if (conv.host || conv.provider === 'codex' || conv.forkFromSessionId || !conv.daemonShort || !conv.sessionId) return false;
+  if (transcriptExists(conv.directoryPath, conv.sessionId)) return false;
+  if (await hasLiveDaemon(conv.daemonShort)) return false;
+  const ok = await respawnAgent(conv.daemonShort);
+  console.log('[agentsflow] respawned never-started session', { conversationId: conv.id, daemonShort: conv.daemonShort, detail: conv.description, ok });
+  if (!ok) return false;
+  for (let i = 0; i < 40; i++) {
+    if (await hasLiveDaemon(conv.daemonShort)) {
+      store.updateConversation(conv.id, { state: 'working', status: 'busy', description: conv.intent || conv.lastPrompt || '' });
+      return true;
+    }
+    await new Promise((r) => setTimeout(r, 250));
+  }
+  return false;
+}
+
+/**
  * The peer-awareness flags a session needs when it is (re)started *in this
  * process* — `claude --resume` / `--fork-session`.
  *
@@ -2645,7 +2671,8 @@ ipcMain.handle('term:attach', async (_e, conversationId: string, cols: number, r
   // errors: a `--resume` of a live session forks its transcript, whereas an
   // attach that finds no daemon just replays and exits, after which the renderer
   // shows Reopen/Back rather than bouncing home.
-  const live = await hasLiveDaemon(attachId);
+  let live = await hasLiveDaemon(attachId);
+  if (!live && await restartNeverStarted(conv)) live = true;
   let replay = '';
   if (live) {
     console.log('[agentsflow] spawning pty for claude attach', { attachId, sessionId: conv.sessionId, channelId, state: conv.state });

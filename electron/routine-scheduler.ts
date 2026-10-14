@@ -21,6 +21,11 @@ const CONV_GRACE_MS = 60_000;
 const QUIET_MIN_AGE_MS = 2 * 60_000;
 const QUIET_TICKS = 3;
 const SPAWN_HANG_MS = 2 * 60_000;
+// After a restart the poller needs a beat to replace the chat's stale 'failed' state.
+const RESTART_GRACE_MS = 60_000;
+
+/** The daemon's verdict for a worker that died before its session started: nothing ran, so it is safe to start again. */
+export const isPreInitCrash = (detail: string | undefined) => /\bbefore init\b/.test(detail || '');
 
 const isLive = (r: RoutineRun) => (r.status === 'running' || r.status === 'attention') && !r.endedAt;
 
@@ -39,6 +44,8 @@ export function createRoutineScheduler(deps: RoutineSchedulerDeps): RoutineSched
   // runId → consecutive ticks the chat sat in state 'working' with no busy daemon.
   const quietTicks = new Map<string, number>();
   const settling = new Set<string>();
+  // runId → when its never-started chat was restarted. One restart per run.
+  const restarted = new Map<string, number>();
 
   const iso = (ms: number) => new Date(ms).toISOString();
 
@@ -50,6 +57,7 @@ export function createRoutineScheduler(deps: RoutineSchedulerDeps): RoutineSched
 
   function endRun(run: RoutineRun, status: 'success' | 'failed', nowMs: number, extra: Partial<RoutineRun>): void {
     quietTicks.delete(run.id);
+    restarted.delete(run.id);
     write({ ...run, ...extra, status, endedAt: iso(nowMs) });
     deps.log('run ended', { routineId: run.routineId, runId: run.id, status, error: extra.error });
   }
@@ -124,6 +132,16 @@ export function createRoutineScheduler(deps: RoutineSchedulerDeps): RoutineSched
       return;
     }
     const s = runStatusFromConversation(conv);
+    const restartedAt = restarted.get(run.id);
+    if (s === 'failed' && restartedAt !== undefined && nowMs - restartedAt < RESTART_GRACE_MS) return;
+    if (s === 'failed' && restartedAt === undefined && deps.restartNeverStarted && isPreInitCrash(conv.description)) {
+      // e.g. macOS killed the worker mid-exec while two routines started at once. The
+      // session never began, so start it again in place (same chat, same prompt).
+      restarted.set(run.id, nowMs);
+      const ok = await deps.restartNeverStarted(conv).catch(() => false);
+      deps.log('restart never-started chat', { runId: run.id, conversationId: conv.id, detail: conv.description, ok });
+      if (ok) return;
+    }
     if (s === 'success' || s === 'failed') {
       const summary = (conv.lastResult || conv.description || '').trim().slice(0, 200);
       endRun(run, s, nowMs, {

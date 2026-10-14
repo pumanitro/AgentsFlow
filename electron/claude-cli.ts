@@ -603,6 +603,17 @@ export async function stopAgent(daemonShort: string, host?: string): Promise<voi
   await runCmd(['stop', daemonShort], { timeoutMs: 5000 });
 }
 
+/**
+ * Restart a background session with the flags and prompt it was spawned with.
+ * The one way back for a job that died before init: it has no transcript, so
+ * `--resume` answers "No conversation found" and `attach` finds no daemon.
+ */
+export async function respawnAgent(daemonShort: string): Promise<boolean> {
+  if (!daemonShort) return false;
+  const r = await runCmd(['respawn', daemonShort], { timeoutMs: 20_000 });
+  return r.code === 0 && !r.timedOut;
+}
+
 export async function removeAgent(daemonShort: string, host?: string): Promise<void> {
   if (!daemonShort) return;
   if (host) {

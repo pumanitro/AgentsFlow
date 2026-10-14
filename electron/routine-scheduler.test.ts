@@ -399,6 +399,63 @@ describe('scheduler rule 4: live run tracking', () => {
     assert.ok(r.error);
   });
 
+  // 2026-10-14 06:00: two routines fired together; one worker was SIGKILLed by
+  // macOS while still exec-ing ("SIGKILL (137) before init") and the run was
+  // written off although the session had never started.
+  it('a chat killed before init is restarted once, not failed', async () => {
+    const restarts: string[] = [];
+    const h = harness(at(10, 9, 0) + 1000, {
+      restartNeverStarted: async (c) => { restarts.push(c.id); return true; },
+    });
+    addRoutine(h);
+    await h.sched.tick();
+    const runId = runsOf(h)[0].id;
+    h.convs.set('conv-1', conv('conv-1', { state: 'failed', status: '', description: 'SIGKILL (137) before init' }));
+    h.setNow(at(10, 9, 2));
+    await h.sched.tick();
+    assert.deepEqual(restarts, ['conv-1']);
+    assert.equal(h.store.getRun(runId)?.status, 'running');
+    // The poller has not caught up yet: the stale 'failed' must not end the run inside the grace.
+    h.setNow(at(10, 9, 2) + 30_000);
+    await h.sched.tick();
+    assert.equal(h.store.getRun(runId)?.status, 'running');
+    assert.equal(restarts.length, 1);
+    h.convs.set('conv-1', conv('conv-1', { state: 'done', status: 'idle', lastResult: 'perf verdict saved' }));
+    h.setNow(at(10, 9, 30));
+    await h.sched.tick();
+    assert.equal(h.store.getRun(runId)?.status, 'success');
+  });
+
+  it('a second pre-init crash after the restart fails the run', async () => {
+    const restarts: string[] = [];
+    const h = harness(at(10, 9, 0) + 1000, {
+      restartNeverStarted: async (c) => { restarts.push(c.id); return true; },
+    });
+    addRoutine(h);
+    await h.sched.tick();
+    const runId = runsOf(h)[0].id;
+    h.convs.set('conv-1', conv('conv-1', { state: 'failed', status: '', description: 'SIGKILL (137) before init' }));
+    h.setNow(at(10, 9, 2));
+    await h.sched.tick();
+    h.setNow(at(10, 9, 10));
+    await h.sched.tick();
+    assert.equal(restarts.length, 1);
+    assert.equal(h.store.getRun(runId)?.status, 'failed');
+  });
+
+  it('a crash after init is not restarted', async () => {
+    const restarts: string[] = [];
+    const h = harness(at(10, 9, 0) + 1000, {
+      restartNeverStarted: async (c) => { restarts.push(c.id); return true; },
+    });
+    addRoutine(h);
+    await h.sched.tick();
+    h.convs.set('conv-1', conv('conv-1', { state: 'failed', status: '', description: 'exit 1 ×3' }));
+    await h.sched.tick();
+    assert.equal(restarts.length, 0);
+    assert.equal(runsOf(h)[0].status, 'failed');
+  });
+
   it('a chat that disappears fails the run after 60 s, not before', async () => {
     const h = await started();
     h.convs.delete('conv-1');
