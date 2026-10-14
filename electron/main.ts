@@ -83,7 +83,7 @@ import { ensureSeedRoutines } from './routines-seed';
 import type { RoutineScheduler, RoutinesStore } from './routines-api';
 import { createRoutine, handleRoutinesOp, patchRoutine } from './routines-mcp';
 import { formatSlot } from '../shared/routine-schedule';
-import { ROUTINES_IPC, type Routine, type RoutineInput, type RoutinePatch, type RoutineRun, type RoutinesSnapshot } from '../shared/routines';
+import { ROUTINES_IPC, markRunDone, type Routine, type RoutineInput, type RoutinePatch, type RoutineRun, type RoutinesSnapshot } from '../shared/routines';
 import {
   buildProbeScript,
   delegationLooksFinished,
@@ -1999,6 +1999,16 @@ ipcMain.handle(ROUTINES_IPC.remove, (_e, id: string): void => {
 ipcMain.handle(ROUTINES_IPC.runNow, (_e, id: string): Promise<RoutineRun> => {
   if (!routineScheduler) throw new Error('routines are still starting — try again in a moment');
   return routineScheduler.runNow(id);
+});
+
+ipcMain.handle(ROUTINES_IPC.markRunDone, (_e, runId: string): RoutineRun => {
+  const store = requireRoutinesStore();
+  const run = store.getRun(runId);
+  if (!run) throw new Error('run not found');
+  const done = store.upsertRun(markRunDone(run, new Date().toISOString()));
+  console.log('[agentsflow][routines] run marked done', { routineId: run.routineId, runId, was: run.status, error: run.error });
+  broadcastRoutines();
+  return done;
 });
 
 // The `*_routine` MCP tools: the same store, rules and scheduler as the tab above.

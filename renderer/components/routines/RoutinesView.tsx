@@ -123,6 +123,10 @@ export default function RoutinesView({ dirs, onOpenConversation }: RoutinesViewP
     if (run) setHighlightRunId(run.id);
   }, [selected, act]);
 
+  const onMarkRunDone = useCallback((run: RoutineRun) => {
+    void act(() => api().markRoutineRunDone(run.id));
+  }, [act]);
+
   const onTogglePaused = useCallback(() => {
     if (!selected) return;
     void act(() => api().updateRoutine(selected.id, { enabled: !selected.enabled }));
@@ -225,6 +229,7 @@ export default function RoutinesView({ dirs, onOpenConversation }: RoutinesViewP
             onEdit={() => { setFormError(null); setForm('edit'); }}
             onDelete={() => { void onDelete(); }}
             onOpenRun={onOpenRun}
+            onMarkRunDone={onMarkRunDone}
             onClose={() => select(null)}
           />
         </aside>

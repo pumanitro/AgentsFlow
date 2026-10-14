@@ -7,7 +7,7 @@ import { createRoutinesStore } from './routines-store';
 import { createRoutineScheduler } from './routine-scheduler';
 import type { RoutineSchedulerDeps } from './routines-api';
 import type { Conversation, TrackedDirectory } from '../shared/types';
-import { CATCHUP_LOOKBACK_MS, CATCHUP_OFF_GRACE_MS } from '../shared/routines';
+import { CATCHUP_LOOKBACK_MS, CATCHUP_OFF_GRACE_MS, markRunDone } from '../shared/routines';
 import type { Routine, RoutineRun, RoutineSchedule } from '../shared/routines';
 
 const MIN = 60_000;
@@ -567,5 +567,33 @@ describe('scheduler rule 7: logging', () => {
     await new Promise((r) => setImmediate(r));
     assert.ok(h.logs.length >= 3);
     assert.ok(h.logs.every((l) => !l.includes('secret-prompt-text')));
+  });
+});
+
+describe('marking a run done by hand', () => {
+  it('a failed run becomes a success that keeps its error and is never re-run', async () => {
+    const h = harness(at(10, 9, 0) + 1000);
+    addRoutine(h);
+    await h.sched.tick();
+    h.convs.set('conv-1', conv('conv-1', { state: 'failed', status: '', description: 'exit 1 ×3' }));
+    await h.sched.tick();
+    const failed = runsOf(h)[0];
+    assert.equal(failed.status, 'failed');
+    const done = h.store.upsertRun(markRunDone(failed, isoOf(at(10, 10))));
+    assert.equal(done.status, 'success');
+    assert.equal(done.error, failed.error);
+    assert.equal(done.endedAt, failed.endedAt);
+    assert.equal(done.markedDoneAt, isoOf(at(10, 10)));
+    h.setNow(at(10, 11));
+    await h.sched.tick();
+    assert.equal(h.spawns.length, 1);
+    assert.equal(runsOf(h).length, 1);
+  });
+
+  it('a missed run can be marked done; a running or successful one cannot', () => {
+    const base = { id: 'x', routineId: 'r1', slotAt: isoOf(at(10, 9)), trigger: 'schedule' as const, startedAt: isoOf(at(10, 9)) };
+    assert.equal(markRunDone({ ...base, status: 'missed', endedAt: isoOf(at(10, 9)) }, isoOf(at(10, 10))).status, 'success');
+    assert.throws(() => markRunDone({ ...base, status: 'running' }, isoOf(at(10, 10))), /only a failed or missed run/);
+    assert.throws(() => markRunDone({ ...base, status: 'success' }, isoOf(at(10, 10))), /only a failed or missed run/);
   });
 });

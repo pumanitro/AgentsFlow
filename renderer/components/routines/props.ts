@@ -18,6 +18,7 @@ export interface RoutinePreviewProps {
   highlightRunId: string | null;        // the run a board click picked
   onRunNow: () => void; onTogglePaused: () => void; onToggleCatchUp: () => void; onEdit: () => void; onDelete: () => void;
   onOpenRun: (run: RoutineRun) => void; onClose: () => void;
+  onMarkRunDone: (run: RoutineRun) => void;   // failed/missed → success (the problem was fixed some other way)
 }
 export interface RoutineFormProps {
   mode: 'create' | 'edit';

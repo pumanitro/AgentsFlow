@@ -1,6 +1,7 @@
 import type { AccountsSnapshot, AgentProvider, AgentsFlowApi, CodexAccount, Conversation, GuardPins, GuardSnapshot, KeeperSnapshot, PinnedDivider, PinnedItemRef, PinnedTodo, TrackedDirectory, SpawnRequest, GitStatusResult, FileEntry, SearchOptions, SearchResult, SearchMatchLine, WorktreeInfo } from '../../shared/types';
 import { forkTitle } from '../../shared/fork-title';
 import type { Routine, RoutineRun, RoutinesSnapshot } from '../../shared/routines';
+import { markRunDone } from '../../shared/routines';
 import { validateRoutineInput } from '../../shared/routine-schedule';
 import { buildMockRoutines } from './mock-routines';
 
@@ -814,6 +815,14 @@ export function createMockApi(): AgentsFlowApi {
         fireRoutines();
       }, 4000);
       return run;
+    },
+    markRoutineRunDone: async (runId) => {
+      const run = routineState.runs.find((x) => x.id === runId);
+      if (!run) throw new Error('run not found');
+      const done = markRunDone(run, new Date().toISOString());
+      routineState.runs = routineState.runs.map((x) => (x.id === runId ? done : x));
+      fireRoutines();
+      return done;
     },
     onRoutinesUpdated: (cb) => { listeners.routines.add(cb); return () => listeners.routines.delete(cb); },
 

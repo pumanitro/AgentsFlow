@@ -167,6 +167,7 @@ const api: AgentsFlowApi = {
   updateRoutine: (id, patch) => ipcRenderer.invoke(ROUTINES_IPC.update, id, patch),
   removeRoutine: (id) => ipcRenderer.invoke(ROUTINES_IPC.remove, id),
   runRoutineNow: (id) => ipcRenderer.invoke(ROUTINES_IPC.runNow, id),
+  markRoutineRunDone: (runId) => ipcRenderer.invoke(ROUTINES_IPC.markRunDone, runId),
   onRoutinesUpdated: (cb) => {
     const listener = (_e: IpcRendererEvent, snapshot: RoutinesSnapshot) => cb(snapshot);
     ipcRenderer.on(ROUTINES_IPC.updated, listener);

@@ -854,6 +854,7 @@ export interface AgentsFlowApi {
   updateRoutine: (id: string, patch: RoutinePatch) => Promise<Routine>;        // 'routines:update' — same validation on the merged routine; enabling with directoryId '' rejects
   removeRoutine: (id: string) => Promise<void>;                                 // 'routines:remove'
   runRoutineNow: (id: string) => Promise<RoutineRun>;                           // 'routines:runNow'
+  markRoutineRunDone: (runId: string) => Promise<RoutineRun>;                   // 'routines:markRunDone' — failed/missed → success, error kept; rejects otherwise
   onRoutinesUpdated: (cb: (snapshot: RoutinesSnapshot) => void) => () => void; // 'routines:updated' — full snapshot on every change
 
   gitStatus: (dirPath: string) => Promise<GitStatusResult>;

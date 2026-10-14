@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { routineCatchesUp } from '../../../shared/routines';
+import { canMarkRunDone, routineCatchesUp } from '../../../shared/routines';
 import { cadenceLabel, formatSlot, nextOccurrence } from '../../../shared/routine-schedule';
 import { STATUS_LABEL, STATUS_TEXT } from '../../lib/routine-style';
 import type { RoutinePreviewProps } from './props';
@@ -8,7 +8,7 @@ import { RoutineGlyph, StatusMark } from './marks';
 const BTN = 'px-3 py-1 text-[11px] uppercase tracking-wider rounded-md border border-border bg-panel text-muted hover:text-text hover:bg-panel2 disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-panel disabled:hover:text-muted';
 
 export default function RoutinePreview(props: RoutinePreviewProps) {
-  const { routine, runs, dir, nowMs, busy, highlightRunId, onRunNow, onTogglePaused, onToggleCatchUp, onEdit, onDelete, onOpenRun, onClose } = props;
+  const { routine, runs, dir, nowMs, busy, highlightRunId, onRunNow, onTogglePaused, onToggleCatchUp, onEdit, onDelete, onOpenRun, onClose, onMarkRunDone } = props;
   const [confirming, setConfirming] = useState(false);
   const highlightRef = useRef<HTMLElement | null>(null);
 
@@ -86,7 +86,7 @@ export default function RoutinePreview(props: RoutinePreviewProps) {
         {history.length === 0 && <li className="px-2 py-2 text-xs text-subtle">No runs yet.</li>}
         {history.map((run) => {
           const highlighted = run.id === highlightRunId;
-          const detail = run.error ?? run.summary;
+          const detail = run.markedDoneAt ? (run.error ? `Marked done · was: ${run.error}` : run.summary) : run.error ?? run.summary;
           const body = (
             <>
               <span className="shrink-0 text-xs text-text tabular-nums">{formatSlot(run.slotAt)}</span>
@@ -95,12 +95,15 @@ export default function RoutinePreview(props: RoutinePreviewProps) {
               {run.trigger !== 'schedule' && (
                 <span className="shrink-0 text-[10px] uppercase tracking-wider text-subtle border border-border rounded px-1">{run.trigger}</span>
               )}
+              {run.markedDoneAt && (
+                <span className="shrink-0 text-[10px] uppercase tracking-wider text-subtle border border-border rounded px-1" title={`Marked done ${formatSlot(run.markedDoneAt)}`}>marked</span>
+              )}
               {detail && <span className="min-w-0 flex-1 truncate text-xs text-muted" title={detail}>{detail}</span>}
             </>
           );
-          const cls = `w-full flex items-center gap-2 px-2 py-1.5 rounded-md text-left ${highlighted ? 'bg-accent/15' : ''}`;
+          const cls = `min-w-0 flex-1 flex items-center gap-2 px-2 py-1.5 rounded-md text-left ${highlighted ? 'bg-accent/15' : ''}`;
           return (
-            <li key={run.id}>
+            <li key={run.id} className="flex items-center gap-1">
               {run.conversationId ? (
                 <button
                   ref={highlighted ? (el) => { highlightRef.current = el; } : undefined}
@@ -110,6 +113,14 @@ export default function RoutinePreview(props: RoutinePreviewProps) {
                 >{body}</button>
               ) : (
                 <div ref={highlighted ? (el) => { highlightRef.current = el; } : undefined} className={cls}>{body}</div>
+              )}
+              {canMarkRunDone(run) && (
+                <button
+                  className="shrink-0 px-2 py-1 text-[10px] uppercase tracking-wider rounded-md border border-border bg-panel text-muted hover:text-ok hover:border-ok disabled:opacity-40 disabled:cursor-not-allowed"
+                  disabled={busy}
+                  onClick={() => onMarkRunDone(run)}
+                  title="It's fixed — count this run as done"
+                >✓ Done</button>
               )}
             </li>
           );

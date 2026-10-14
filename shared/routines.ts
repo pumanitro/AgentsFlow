@@ -50,6 +50,7 @@ export interface RoutineRun {
   conversationId?: string;    // the Peers Flow chat this run IS; absent for missed runs and dispatches that died before a row existed
   summary?: string;           // one line (≤ 200 chars): the chat's final description / result
   error?: string;             // failed: why
+  markedDoneAt?: string;      // ISO: the owner marked a failed/missed run done by hand (status became 'success'; error kept as the history)
 }
 
 export interface RoutineInput {
@@ -76,8 +77,22 @@ export const ROUTINES_IPC = {
   update: 'routines:update',
   remove: 'routines:remove',
   runNow: 'routines:runNow',
+  markRunDone: 'routines:markRunDone',
   updated: 'routines:updated',
 } as const;
+
+/** Only a run that ended badly can be marked done; a live or already-successful one cannot. */
+export const canMarkRunDone = (run: Pick<RoutineRun, 'status'>) => run.status === 'failed' || run.status === 'missed';
+
+/**
+ * The owner says this run's work is done after all (e.g. its chat was restarted
+ * and finished, or the fix landed some other way). The run counts as a success
+ * from now on; the original error stays on it so the history still says what went wrong.
+ */
+export function markRunDone(run: RoutineRun, nowIso: string): RoutineRun {
+  if (!canMarkRunDone(run)) throw new Error(`only a failed or missed run can be marked done (this one is ${run.status})`);
+  return { ...run, status: 'success', markedDoneAt: nowIso, endedAt: run.endedAt ?? nowIso, summary: 'Marked done by you' };
+}
 
 export const SCHEDULER_TICK_MS = 15_000;
 export const CATCHUP_OFF_GRACE_MS = 5 * 60 * 1000;      // catch-up off: a slot noticed later than this is missed, never run
