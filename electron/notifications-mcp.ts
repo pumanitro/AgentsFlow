@@ -1,7 +1,10 @@
 /**
  * Notifications as raised by an agent: the main-process half of the `notify`
- * MCP tool, plus the rules the drawer's IPC applies to a notice (answer a
- * question, tick a to-do, dismiss) so the tool and the UI can never disagree.
+ * MCP tool, plus the rules the IPC applies to a notice (mark read, dismiss) so
+ * the tool and the UI can never disagree. A notice is only a pointer to its
+ * chat: the agent writes its questions / to-dos as plain text in its own chat
+ * reply, and the user answers there by typing. Nothing is answered in the app's
+ * notification UI.
  *
  * Dependency-free on purpose (no `electron`): the bridge hands
  * `buildNotificationFromArgs` the raw tool arguments, everything is validated
@@ -9,14 +12,9 @@
  */
 import {
   NOTIFICATION_LIMITS,
-  canDismiss,
-  missingForDismiss,
   type NotificationFile,
   type NotificationLevel,
-  type NotificationQuestion,
   type NotificationSource,
-  type NotificationTodo,
-  type QuestionKind,
   type Routine,
   type RoutineRun,
   type UserNotification,
@@ -27,7 +25,6 @@ export interface NotifyContext { id: string; now: string; source: NotificationSo
 type Args = Record<string, unknown>;
 
 const LEVELS: NotificationLevel[] = ['warn', 'action'];
-const KINDS: QuestionKind[] = ['yesno', 'choice', 'text'];
 
 const isObj = (v: unknown): v is Args => !!v && typeof v === 'object' && !Array.isArray(v);
 
@@ -53,14 +50,6 @@ function list(v: unknown, what: string, max: number): unknown[] {
   return v;
 }
 
-/** A provided id wins; a repeated one gets `-2`, `-3`, … so answers can never land on the wrong question. */
-function uniqueId(wanted: string, taken: Set<string>): string {
-  let id = wanted;
-  for (let i = 2; taken.has(id); i++) id = `${wanted}-${i}`;
-  taken.add(id);
-  return id;
-}
-
 /** Raw `notify` arguments → a UserNotification. Throws Error with ONE human line. */
 export function buildNotificationFromArgs(raw: unknown, ctx: NotifyContext): UserNotification {
   if (!isObj(raw)) throw new Error('notify needs an object of arguments');
@@ -69,6 +58,11 @@ export function buildNotificationFromArgs(raw: unknown, ctx: NotifyContext): Use
   if (!LEVELS.includes(raw.level as NotificationLevel)) throw new Error('level must be "warn" or "action"');
   const level = raw.level as NotificationLevel;
   const body = optText(raw.body, '`body`', L.body);
+  // The in-app question / to-do UI is gone: an agent still sending them would
+  // believe the user sees them, so say where they belong instead.
+  if (raw.questions !== undefined || raw.todos !== undefined) {
+    throw new Error('notify takes no `questions` or `todos`: write them as plain text in your chat reply, then call notify with a short pointer `body`');
+  }
 
   const files: NotificationFile[] = list(raw.files, 'files', L.files).map((f, i) => {
     if (!isObj(f)) throw new Error(`file ${i + 1}: must be an object with a \`path\``);
@@ -77,40 +71,7 @@ export function buildNotificationFromArgs(raw: unknown, ctx: NotifyContext): Use
     return label ? { path: ctx.resolvePath(p), label } : { path: ctx.resolvePath(p) };
   });
 
-  const qIds = new Set<string>();
-  const questions: NotificationQuestion[] = list(raw.questions, 'questions', L.questions).map((q, i) => {
-    const n = i + 1;
-    if (!isObj(q)) throw new Error(`question ${n}: must be an object with \`text\` and \`kind\``);
-    const text = reqText(q.text, `question ${n}: \`text\``, L.body);
-    if (!KINDS.includes(q.kind as QuestionKind)) throw new Error(`question ${n}: kind must be "yesno", "choice" or "text"`);
-    const kind = q.kind as QuestionKind;
-    const out: NotificationQuestion = { id: uniqueId(optText(q.id, `question ${n}: \`id\``, 100) ?? `q${n}`, qIds), text, kind };
-    if (kind === 'choice') {
-      const choices = Array.isArray(q.choices)
-        ? q.choices.map((c) => (typeof c === 'string' ? c.trim() : '')).filter(Boolean)
-        : [];
-      if (choices.length < 2 || choices.length > L.choices || choices.length !== (q.choices as unknown[]).length) {
-        throw new Error(`question ${n}: kind "choice" needs 2 to ${L.choices} choices`);
-      }
-      if (new Set(choices).size !== choices.length) throw new Error(`question ${n}: choices must all be different`);
-      out.choices = choices;
-    }
-    const hint = optText(q.hint, `question ${n}: \`hint\``, L.body);
-    if (hint) out.hint = hint;
-    return out;
-  });
-
-  const todos: NotificationTodo[] = list(raw.todos, 'todos', L.todos).map((t, i) => {
-    if (!isObj(t)) throw new Error(`to-do ${i + 1}: must be an object with \`text\``);
-    return { id: `t${i + 1}`, text: reqText(t.text, `to-do ${i + 1}: \`text\``, L.body), done: false };
-  });
-
-  // A warning closes with one click, so nothing on it could ever hold the user to an answer.
-  if (level === 'warn' && (questions.length || todos.length)) {
-    throw new Error('questions and to-dos need level "action"');
-  }
-
-  const n: UserNotification = { id: ctx.id, level, title, source: ctx.source, createdAt: ctx.now, files, questions, todos };
+  const n: UserNotification = { id: ctx.id, level, title, source: ctx.source, createdAt: ctx.now, files };
   if (body) n.body = body;
   return n;
 }
@@ -122,50 +83,10 @@ export function describeForTool(n: UserNotification): Record<string, unknown> {
     id: n.id,
     level: n.level,
     title: n.title,
-    questions: n.questions.length,
-    todos: n.todos.length,
     files: n.files.length,
-    note: n.questions.length
-      ? 'The user will see this in the bell. Answers arrive in this chat as a new message — end your turn now.'
+    note: n.level === 'action'
+      ? 'The bell points the user to this chat. They read your questions / to-dos in your chat reply and answer by typing in this chat — end your turn now.'
       : 'The user will see this in the bell.',
-  };
-}
-
-function findQuestion(n: UserNotification, questionId: string): NotificationQuestion {
-  const q = n.questions.find((x) => x.id === questionId);
-  if (!q) throw new Error(`question "${questionId}" not found`);
-  return q;
-}
-
-/** Validate one answer and store it. Throws a one-line human message on a bad answer. */
-export function applyAnswer(n: UserNotification, questionId: string, answer: string, now: string): UserNotification {
-  const q = findQuestion(n, questionId);
-  const raw = typeof answer === 'string' ? answer.trim() : '';
-  let value: string;
-  if (q.kind === 'yesno') {
-    value = raw.toLowerCase();
-    if (value !== 'yes' && value !== 'no') throw new Error('answer "yes" or "no"');
-  } else if (q.kind === 'choice') {
-    const choices = q.choices ?? [];
-    if (!choices.includes(raw)) throw new Error(`pick one of: ${choices.join(', ')}`);
-    value = raw;
-  } else {
-    if (!raw) throw new Error('the answer is empty');
-    if (raw.length > NOTIFICATION_LIMITS.answer) throw new Error(`the answer is longer than ${NOTIFICATION_LIMITS.answer} characters`);
-    value = raw;
-  }
-  return { ...n, questions: n.questions.map((x) => (x.id === q.id ? { ...x, answer: value, answeredAt: now } : x)) };
-}
-
-export function applyTodo(n: UserNotification, todoId: string, done: boolean, now: string): UserNotification {
-  if (!n.todos.some((t) => t.id === todoId)) throw new Error(`to-do "${todoId}" not found`);
-  return {
-    ...n,
-    todos: n.todos.map((t) => {
-      if (t.id !== todoId) return t;
-      const { doneAt: _drop, ...rest } = t;
-      return done ? { ...rest, done: true, doneAt: now } : { ...rest, done: false };
-    }),
   };
 }
 
@@ -174,26 +95,9 @@ export function markRead(n: UserNotification, now: string): UserNotification {
   return n.readAt ? n : { ...n, readAt: now };
 }
 
+/** Always allowed: the drawer notice is only a pointer. */
 export function dismissNotification(n: UserNotification, now: string): UserNotification {
-  if (!canDismiss(n)) throw new Error(missingForDismiss(n).join(', '));
   return n.dismissedAt ? n : { ...n, dismissedAt: now };
-}
-
-const shownAnswer = (q: NotificationQuestion): string => {
-  if (!q.answer) return '(no answer)';
-  if (q.kind === 'yesno') return q.answer === 'yes' ? 'Yes' : q.answer === 'no' ? 'No' : q.answer;
-  return q.answer;
-};
-
-/** The message that carries the user's answers back into the source chat. The agent reads this. */
-export function formatAnswersMessage(n: UserNotification): string {
-  const lines = [`[Peers Flow] The user answered your notification "${n.title}":`];
-  n.questions.forEach((q, i) => lines.push(`${i + 1}. ${q.text} — ${shownAnswer(q)}`));
-  if (n.todos.length) {
-    lines.push(`To-dos the user keeps for themselves: ${n.todos.map((t) => `${t.text} (${t.done ? 'done' : 'not done yet'})`).join('; ')}.`);
-  }
-  lines.push("Continue the work with these answers. Do not do the user's to-dos.");
-  return lines.join('\n');
 }
 
 /** The app's own warning for a run that failed or was missed. */
@@ -216,7 +120,7 @@ export function buildRunWarning(
   if (run.conversationId) source.conversationId = run.conversationId;
   if (routine?.directoryId) source.directoryId = routine.directoryId;
   if (peerName) source.peerName = peerName;
-  return { id, level: 'warn', title, body, source, createdAt: now, files: [], questions: [], todos: [] };
+  return { id, level: 'warn', title, body, source, createdAt: now, files: [] };
 }
 
 /** A macOS banner only for something that needs the user, and only when they are not looking at the app. */

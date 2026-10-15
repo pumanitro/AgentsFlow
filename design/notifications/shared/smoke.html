@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>App shell smoke — Peers Flow notifications</title>
+<meta name="description" content="The three Peers Flow screens the notification designs are drawn on, at full size.">
+<link rel="stylesheet" href="../shared/tokens.css">
+<link rel="stylesheet" href="../shared/app-shell.css">
+<script src="../shared/scenario.js"></script>
+<script src="../shared/app-shell.js"></script>
+<script src="../shared/gallery.js"></script>
+<style>
+  .sm-page{ padding:16px; max-width:1312px; }
+  .sm-page h1{ font-size:18px; margin:0 0 4px; }
+  .sm-page h2{ font-size:14px; margin:24px 0 8px; font-weight:600; }
+  .sm-page p{ margin:0 0 8px; font-size:13px; color:var(--g-muted); }
+  .sm-scroller{ overflow-x:auto; max-width:100%; }
+  .sm-scroller > .pf-frame{ border:1px solid var(--g-border); border-radius:8px; }
+</style>
+</head>
+<body>
+<div class="sm-page">
+  <h1>The app, drawn as a page</h1>
+  <p>The three real Peers Flow screens, rebuilt at full size from the scenario data. Every notification design is placed on top of these.</p>
+  <h2>1 · Home — the Abilitie timesheet row carries a demo “needs you” badge</h2>
+  <div class="sm-scroller" id="f-home"></div>
+  <h2>2 · Routines — week board; the Crash sweep card is switched to “running” to prove recolouring works</h2>
+  <div class="sm-scroller" id="f-routines"></div>
+  <h2>3 · Inside the timesheet chat</h2>
+  <div class="sm-scroller" id="f-session"></div>
+</div>
+<script>
+  var home = PF.renderAppShell(document.getElementById('f-home'), { view: 'home' });
+  home.setRowBadge('c-timesheet', 'needs you', 'attention');
+  var routines = PF.renderAppShell(document.getElementById('f-routines'), { view: 'routines' });
+  routines.setRunStatus('run-cs-1015', 'running');
+  var session = PF.renderAppShell(document.getElementById('f-session'), { view: 'session', conversationId: 'c-timesheet' });
+  // idempotency: rendering twice into the same host replaces, never duplicates
+  session = PF.renderAppShell(document.getElementById('f-session'), { view: 'session', conversationId: 'c-timesheet' });
+  if (document.querySelectorAll('#f-session .pf-frame').length !== 1) throw new Error('renderAppShell duplicated a frame');
+  // kit smoke: the full checklist inside a modal in the session frame
+  var n = PF_SCENARIO.notifications[0];
+  var cl = PF.checklist(n);
+  session.overlay.appendChild(
+    PF.el('div', { class: 'pf-modal', style: 'position:absolute;right:16px;top:58px;width:420px;max-height:680px' }, [
+      PF.el('div', { class: 'pf-modal-header' }, [PF.el('span', { style: 'display:flex;align-items:center;gap:8px' }, [PF.dot('attention', true), n.title]), PF.badge('Needs you', 'attention')]),
+      PF.el('div', { class: 'pf-modal-body' }, cl.el)
+    ]));
+  cl.fillSample();
+  PF.toast(session.frame, 'Opened October timesheet (PDF) in Preview', { level: 'ok', ms: 0 });
+</script>
+</body>
+</html>

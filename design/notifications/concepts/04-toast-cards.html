@@ -1,0 +1,488 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Toasts + sticky cards — Peers Flow notifications</title>
+<meta name="description" content="One of six notification designs for Peers Flow, shown on the Abilitie timesheet scenario.">
+<link rel="stylesheet" href="../shared/tokens.css">
+<link rel="stylesheet" href="../shared/app-shell.css">
+<link rel="stylesheet" href="../shared/gallery.css">
+<script src="../shared/scenario.js"></script>
+<script src="../shared/app-shell.js"></script>
+<script src="../shared/gallery.js"></script>
+<script src="./04-toast-cards.meta.js"></script>
+<style>
+/* ── the stack in the bottom-right corner ── */
+.c04-stack{ position:absolute; right:16px; bottom:16px; display:flex; flex-direction:column; align-items:flex-end; gap:8px; z-index:60; pointer-events:none; }
+.c04-stack > *{ pointer-events:auto; }
+.c04-toast{ width:300px; position:relative; overflow:hidden; display:flex; gap:10px; align-items:flex-start; padding:10px 12px 12px; border-radius:8px; border:1px solid var(--pf-border); background:var(--pf-panel2); box-shadow:0 10px 25px -5px rgba(0,0,0,.55); font-size:12px; line-height:16px; color:var(--pf-text); }
+.c04-toast--info{ border-color:rgba(59,130,246,.55); }
+.c04-toast--warn{ border-color:rgba(251,191,36,.6); }
+.c04-glyph{ flex:0 0 auto; width:18px; height:18px; display:grid; place-items:center; font-size:14px; line-height:1; }
+.c04-tbody{ flex:1 1 auto; min-width:0; }
+.c04-ttitle{ font-weight:600; font-size:13px; line-height:18px; }
+.c04-tsub{ color:var(--pf-muted); margin-top:2px; }
+.c04-tmeta{ display:flex; align-items:center; gap:8px; margin-top:6px; font-size:11px; color:var(--pf-subtle); }
+.c04-x{ flex:0 0 auto; width:22px; height:22px; border-radius:4px; display:grid; place-items:center; color:var(--pf-muted); }
+.c04-x:hover{ background:var(--pf-panel); color:var(--pf-text); }
+.c04-x:focus-visible, .c04-pill:focus-visible, .c04-link:focus-visible{ outline:2px solid var(--pf-accent); outline-offset:1px; }
+.c04-fade{ position:absolute; left:0; right:0; bottom:0; height:3px; background:rgba(59,130,246,.18); }
+.c04-fade > i{ display:block; height:100%; background:var(--pf-info); transform-origin:left center; animation:c04-shrink 6s linear forwards; }
+.c04-fade--loop > i{ animation-iteration-count:infinite; }
+@keyframes c04-shrink{ from{ transform:scaleX(1); } to{ transform:scaleX(0); } }
+.c04-link{ font-size:11px; color:var(--pf-accent); white-space:nowrap; }
+.c04-link:hover{ text-decoration:underline; }
+
+/* ── the sticky action card ── */
+.c04-card{ width:420px; border-radius:8px; border:1px solid var(--pf-border); border-left:4px solid var(--pf-attention); background:var(--pf-panel); box-shadow:0 20px 40px -10px rgba(0,0,0,.65); color:var(--pf-text); font-size:13px; line-height:18px; overflow:hidden; }
+.c04-card--enter{ animation:c04-rise .45s cubic-bezier(.2,.8,.2,1) both, c04-glow 1.4s ease-out .45s 2; }
+@keyframes c04-rise{ from{ transform:translateY(40px); opacity:0; } to{ transform:none; opacity:1; } }
+@keyframes c04-glow{ 0%{ box-shadow:0 0 0 0 rgba(249,115,22,.7), 0 20px 40px -10px rgba(0,0,0,.65); } 100%{ box-shadow:0 0 0 14px rgba(249,115,22,0), 0 20px 40px -10px rgba(0,0,0,.65); } }
+.c04-prog{ height:3px; background:rgba(249,115,22,.18); }
+.c04-prog > i{ display:block; height:100%; background:var(--pf-attention); transition:width .25s; }
+.c04-chead{ display:flex; align-items:flex-start; gap:8px; padding:10px 10px 8px 12px; }
+.c04-chead .pf-dot{ margin-top:6px; }
+.c04-ctitle{ font-weight:600; font-size:14px; line-height:20px; }
+.c04-csub{ display:flex; flex-wrap:wrap; align-items:center; gap:6px; font-size:11px; line-height:16px; color:var(--pf-subtle); margin-top:1px; }
+.c04-count{ margin-left:auto; font-size:11px; color:var(--pf-muted); white-space:nowrap; font-variant-numeric:tabular-nums; }
+.c04-cbody{ padding:4px 12px 10px; display:flex; flex-direction:column; gap:8px; }
+.c04-steplabel{ font-size:10px; line-height:14px; text-transform:uppercase; letter-spacing:.05em; color:var(--pf-muted); }
+.c04-cbody .pf-question{ border-top:0; padding:0; }
+.c04-cfoot{ display:flex; align-items:center; gap:8px; padding:8px 12px; border-top:1px solid rgba(58,65,89,.6); background:rgba(34,38,54,.35); flex-wrap:wrap; }
+.c04-cfoot .c04-spacer{ flex:1 1 auto; }
+.c04-missing{ font-size:11px; color:var(--pf-subtle); width:100%; }
+.c04-sent{ font-size:11px; color:var(--pf-ok); }
+.c04-intro{ color:var(--pf-muted); }
+
+/* ── the folded pill ── */
+.c04-pill{ display:inline-flex; align-items:center; gap:6px; height:30px; padding:0 12px; border-radius:999px; border:1px solid rgba(249,115,22,.7) !important; background:rgba(249,115,22,.16) !important; color:#fdba74 !important; font-size:12px !important; font-weight:600; box-shadow:0 8px 20px -6px rgba(0,0,0,.6); }
+.c04-stack--mini{ transform:scale(2.2); transform-origin:bottom right; }
+.c04-pill:hover{ background:rgba(249,115,22,.26) !important; }
+
+/* ── page pieces ── */
+.c04-hero-grid{ display:grid; grid-template-columns:minmax(0,1fr) 300px; gap:20px; align-items:center; }
+@media (max-width:720px){ .c04-hero-grid{ grid-template-columns:minmax(0,1fr); } }
+.c04-svg{ width:100%; height:auto; display:block; }
+.c04-hero-grid > svg{ max-width:300px; }
+.c04-svg text{ fill:var(--g-text); font-family:var(--pf-font); }
+.c04-svg .c04-sm{ fill:var(--g-muted); }
+.c04-hint{ font-size:13px; color:var(--g-muted); margin:6px 0 0; }
+.c04-stage.pf-frame{ width:auto; height:auto; min-height:190px; padding:16px; border-radius:10px; align-items:flex-end; justify-content:flex-end; overflow:hidden; }
+.c04-stage .c04-card, .c04-stage .c04-toast{ width:100%; max-width:420px; }
+.c04-rule{ font-size:13px; margin:10px 0 0; }
+.c04-rule b{ display:block; font-size:11px; text-transform:uppercase; letter-spacing:.06em; color:var(--g-muted); margin-bottom:2px; }
+.c04-flow-wrap{ overflow-x:auto; -webkit-overflow-scrolling:touch; }
+.c04-flow-wrap svg{ min-width:560px; }
+.c04-total{ font-size:15px; margin:8px 0 0; }
+</style>
+</head>
+<body>
+<nav id="pf-nav" data-current="04"></nav>
+<main class="g-page">
+  <section class="g-hero">
+    <p class="g-eyebrow">Design 04 of 6</p>
+    <div class="c04-hero-grid">
+      <div>
+        <h1>Toasts + sticky cards</h1>
+        <p class="g-lede">Small notices pop up in the bottom-right corner, the way chat apps do. Quick news fades away by itself; anything that needs you stays as a card you work through one step at a time — and if you fold it away, a small orange pill keeps reminding you on every screen.</p>
+        <ul class="g-badges">
+          <li class="g-badge g-badge--accent" data-tip="Floating over the bottom-right corner — above the prompt box on the chat list"><b>Where it lives</b> Bottom-right corner, every screen</li>
+          <li class="g-badge" data-tip="6 small steps inside the card: the PDF, 4 questions, 1 to-do"><b>How you answer</b> One step at a time inside the card</li>
+          <li class="g-badge" data-tip="Interruption 3 out of 5: it slides up and glows but never blocks the screen"><b>How it gets your attention</b> Slides up, glows, then waits</li>
+        </ul>
+      </div>
+      <svg class="c04-svg" viewBox="0 0 300 196" role="img" aria-label="Where it lives: the bottom-right corner of the app window">
+        <rect x="1" y="1" width="298" height="194" rx="8" fill="#0f1115" stroke="#3a4159"/>
+        <rect x="1" y="1" width="298" height="20" rx="8" fill="#181b25" data-tip="Header with the Chat | Routines switch — nothing added here"/>
+        <rect x="1" y="21" width="70" height="174" fill="#181b25" stroke="#3a4159" stroke-width=".5" data-tip="Left column: projects and the docked panes — unchanged"/>
+        <rect x="80" y="30" width="210" height="12" rx="3" fill="#222636"/>
+        <rect x="80" y="48" width="210" height="12" rx="3" fill="#222636"/>
+        <rect x="80" y="66" width="210" height="12" rx="3" fill="#222636"/>
+        <rect x="71" y="170" width="228" height="25" fill="#181b25" stroke="#3a4159" stroke-width=".5" data-tip="Prompt box — the stack sits 16 px above it on the chat list"/>
+        <g data-tip="The notice stack: up to 3 notices, newest on top, 16 px from the right edge">
+          <rect x="196" y="90" width="96" height="44" rx="4" fill="#181b25" stroke="#f97316" stroke-width="2"/>
+          <rect x="196" y="90" width="4" height="44" fill="#f97316"/>
+          <rect x="226" y="139" width="66" height="12" rx="3" fill="#222636" stroke="#3b82f6"/>
+          <rect x="226" y="155" width="66" height="12" rx="3" fill="#222636" stroke="#fbbf24"/>
+        </g>
+        <text x="204" y="106" font-size="9" style="fill:#f1f3f8">● Needs you</text>
+        <text x="204" y="120" font-size="8" style="fill:#b2b8cc">Question 1 of 4</text>
+        <text x="190" y="150" font-size="10" text-anchor="end" class="c04-sm">notices here →</text>
+      </svg>
+    </div>
+  </section>
+
+  <section id="pf-main-frame" class="g-section">
+    <h2>Try it</h2>
+    <p>Press the steps, or use the card yourself. You can also click <b>Chat</b> / <b>Routines</b> inside the window or “Open chat ›” on the card — the card follows you to every screen.</p>
+    <div class="g-step-rail" id="rail"></div>
+    <div class="pf-frame-wrap"><div id="frame"></div></div>
+    <p class="g-caption" id="caption"></p>
+  </section>
+
+  <section class="g-section" id="everywhere">
+    <h2>You can see it from everywhere</h2>
+    <p>Folded away, the card becomes a small orange pill in the corner. It stays on every screen until the timesheet is dealt with; clicking it opens the card again.</p>
+    <div class="g-grid-3">
+      <div><p class="g-mini-label">Chat list</p><div class="pf-frame-wrap g-mini"><div id="mini-home"></div></div></div>
+      <div><p class="g-mini-label">Routines</p><div class="pf-frame-wrap g-mini"><div id="mini-routines"></div></div></div>
+      <div><p class="g-mini-label">Inside a chat</p><div class="pf-frame-wrap g-mini"><div id="mini-session"></div></div></div>
+    </div>
+  </section>
+
+  <section class="g-section" id="levels">
+    <h2>Three kinds of notices</h2>
+    <p>The colour and how a notice goes away tell you how much it matters.</p>
+    <div class="g-grid-3">
+      <div><div class="pf-frame c04-stage" id="lv-info"></div><p class="c04-rule" id="rule-info"></p></div>
+      <div><div class="pf-frame c04-stage" id="lv-warn"></div><p class="c04-rule" id="rule-warn"></p></div>
+      <div><div class="pf-frame c04-stage" id="lv-action"></div><p class="c04-rule" id="rule-action"></p></div>
+    </div>
+  </section>
+
+  <section class="g-section" id="flow">
+    <h2>Your path through it</h2>
+    <p>Every click from the moment the card arrives until it is gone, using the sample answers. Hover or tap a box for the detail.</p>
+    <div class="c04-flow-wrap">
+      <svg class="c04-svg" viewBox="0 0 700 250" role="img" aria-label="The user's path: 10 stops, 14 clicks in total">
+        <defs><marker id="c04Arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0 L10 5 L0 10z" fill="var(--g-muted)"/></marker></defs>
+        <g fill="none" stroke="var(--g-muted)" stroke-width="1.6" marker-end="url(#c04Arrow)">
+          <path d="M122 55 H140"/><path d="M262 55 H280"/><path d="M402 55 H420"/><path d="M542 55 H560"/>
+          <path d="M620 82 V110 H70 V138"/>
+          <path d="M122 165 H140"/><path d="M262 165 H280"/><path d="M402 165 H420"/><path d="M542 165 H560"/>
+        </g>
+        <g font-size="13" text-anchor="middle">
+          <g data-tip="The card arrives (09:04) · 0 clicks · running total 0"><rect x="6" y="28" width="116" height="54" rx="8" fill="var(--g-surface2)" stroke="var(--pf-attention)"/><text x="64" y="52">Card arrives</text><text x="64" y="70" font-size="11" class="c04-sm">0 · total 0</text></g>
+          <g data-tip="Press “Start” on the card · 1 click · running total 1"><rect x="146" y="28" width="116" height="54" rx="8" fill="var(--g-surface2)" stroke="var(--g-border)"/><text x="204" y="52">Start</text><text x="204" y="70" font-size="11" class="c04-sm">+1 · total 1</text></g>
+          <g data-tip="Open the PDF (“Open ›” on the file) · 1 click · running total 2"><rect x="286" y="28" width="116" height="54" rx="8" fill="var(--g-surface2)" stroke="var(--g-border)"/><text x="344" y="52">Open the PDF</text><text x="344" y="70" font-size="11" class="c04-sm">+1 · total 2</text></g>
+          <g data-tip="Next, then answer “No” to days off · 2 clicks · running total 4"><rect x="426" y="28" width="116" height="54" rx="8" fill="var(--g-surface2)" stroke="var(--g-border)"/><text x="484" y="52">Q1 Days off?</text><text x="484" y="70" font-size="11" class="c04-sm">+2 · total 4</text></g>
+          <g data-tip="Next, then answer “No” to work handed over · 2 clicks · running total 6"><rect x="566" y="28" width="116" height="54" rx="8" fill="var(--g-surface2)" stroke="var(--g-border)"/><text x="624" y="52">Q2 Handed over?</text><text x="624" y="70" font-size="11" class="c04-sm">+2 · total 6</text></g>
+          <g data-tip="Next, then pick “Only 10 Oct” for the vacation days · 2 clicks · running total 8"><rect x="6" y="138" width="116" height="54" rx="8" fill="var(--g-surface2)" stroke="var(--g-border)"/><text x="64" y="162">Q3 Vacation</text><text x="64" y="180" font-size="11" class="c04-sm">+2 · total 8</text></g>
+          <g data-tip="Next, then click the box and type the change (typing counted as 1) · 2 clicks · running total 10"><rect x="146" y="138" width="116" height="54" rx="8" fill="var(--g-surface2)" stroke="var(--g-border)"/><text x="204" y="162">Q4 Any edits?</text><text x="204" y="180" font-size="11" class="c04-sm">+2 · total 10</text></g>
+          <g data-tip="Next, then tick “Send the email yourself” · 2 clicks · running total 12"><rect x="286" y="138" width="116" height="54" rx="8" fill="var(--g-surface2)" stroke="var(--g-border)"/><text x="344" y="162">To-do ticked</text><text x="344" y="180" font-size="11" class="c04-sm">+2 · total 12</text></g>
+          <g data-tip="Send answers to the agent · 1 click · running total 13"><rect x="426" y="138" width="116" height="54" rx="8" fill="var(--g-surface2)" stroke="var(--g-border)"/><text x="484" y="162">Send answers</text><text x="484" y="180" font-size="11" class="c04-sm">+1 · total 13</text></g>
+          <g data-tip="Dismiss — the card is gone · 1 click · total 14 clicks"><rect x="566" y="138" width="116" height="54" rx="8" fill="var(--g-surface2)" stroke="var(--pf-ok)"/><text x="624" y="162">Dismiss</text><text x="624" y="180" font-size="11" class="c04-sm">+1 · total 14</text></g>
+        </g>
+        <text x="350" y="232" font-size="13" text-anchor="middle" class="c04-sm" data-tip="14 clicks in total from arrival to dismissal">Total: 14 clicks · the email itself you still send by hand</text>
+      </svg>
+    </div>
+    <p class="c04-total"><b data-tip="14 clicks, counted on the window above">14 clicks</b> from “it arrives” to “it is gone”.</p>
+  </section>
+
+  <section class="g-section" id="verdict">
+    <h2>Good and not so good</h2>
+    <div class="g-grid-2">
+      <div class="g-card"><h3>Good</h3><ul class="g-pros" id="pros"></ul></div>
+      <div class="g-card"><h3>Not so good</h3><ul class="g-cons" id="cons"></ul></div>
+    </div>
+    <div id="chart" style="margin-top:16px"></div>
+  </section>
+
+  <details class="g-details" id="build">
+    <summary>How it would be built (for the engineer)</summary>
+    <p>All six designs share one back end: the routine's chat calls a new <code>notify</code> tool, the app stores the notice in <code>notifications.json</code> and pushes it to the window; answers go back into the source chat as one message. The full shared story is on the <a href="../index.html#build">overview page</a>.</p>
+    <p>What this design adds:</p>
+    <ul>
+      <li><code>renderer/components/notifications/ToastStack.tsx</code> — mounted once in <code>_app.tsx</code>, <code>position:fixed; right:16px; z-index:60</code>; bottom offset = <code>calc(var(--spawnbar-h, 0px) + 16px)</code>. <code>SpawnBar.tsx</code> publishes <code>--spawnbar-h</code> on <code>document.documentElement</code> via a <code>ResizeObserver</code> and clears it on unmount, so other screens get 16 px.</li>
+      <li>Max three visible, newest on top; the rest wait in a queue (FIFO by <code>createdAt</code>). <code>action</code> notices always take a slot first.</li>
+      <li><code>info</code>: 300 px toast, removed after 6000 ms (paused while hovered), progress bar driven by a CSS animation. <code>warn</code>: 300 px toast with ✕ → <code>dismissNotification(id)</code>.</li>
+      <li><code>StickyActionCard.tsx</code> (420 px, orange left edge, no close button): pages = files → questions → to-dos/send/dismiss; progress = opened files + answered questions + ticked to-dos. Every Next calls <code>answerNotificationQuestion</code>, so answers survive a restart.</li>
+      <li>Fold state: <code>localStorage["pf.notif.folded." + id]</code> (try/catch); folded = the pill <code>● N needs you ▸</code>, N = open <code>action</code> notices.</li>
+      <li>Dismiss button disabled until <code>canDismiss(n) &amp;&amp; n.answersSentAt</code>; its title lists what is missing. The routine run stays <code>attention</code> until then.</li>
+      <li>Opening the file reuses the existing <code>open_file</code> route; “Open chat ›” navigates to <code>/session?id=&lt;conversationId&gt;</code>.</li>
+    </ul>
+  </details>
+</main>
+<script>
+(function () {
+  var S = window.PF_SCENARIO, META = window.PF_CONCEPTS['04'];
+  var NT = S.notifications.filter(function (n) { return n.id === 'n-timesheet'; })[0];
+  var NR = S.notifications.filter(function (n) { return n.id === 'n-reddit'; })[0];
+  var NC = S.notifications.filter(function (n) { return n.id === 'n-crash'; })[0];
+  var LV = S.levels;
+  function find(list, id) { return list.filter(function (x) { return x.id === id; })[0] || {}; }
+  var CONV = find(S.conversations, NT.source.conversationId);
+  var ROUTINE = find(S.routines, NT.source.routineId);
+  var PEER = find(S.peers, NT.source.peerId);
+  var TOTAL = 1 + NT.questions.length + NT.todos.length;   // file + questions + to-do = 6
+  var LAST = 1 + NT.questions.length + 1;                   // page index of the to-do / send page
+  var el = PF.el;
+
+  /* ── per-notification card state ── */
+  function cardState() { return { page: 0, opened: false, answers: {}, todo: false, sent: false, folded: false, dismissed: false }; }
+  function filled(v) { return v !== undefined && v !== null && String(v).trim() !== ''; }
+  function answeredCount(c) { return NT.questions.filter(function (q) { return filled(c.answers[q.id]); }).length; }
+  function doneCount(c) { return (c.opened ? 1 : 0) + answeredCount(c) + (c.todo ? 1 : 0); }
+  function missing(c) {
+    var out = [], left = NT.questions.length - answeredCount(c);
+    if (left) out.push(left + (left === 1 ? ' question' : ' questions') + ' unanswered');
+    if (!c.todo) out.push('the to-do is not ticked');
+    if (!c.sent) out.push('answers not sent to the agent yet');
+    return out;
+  }
+
+  /* ── info + warn toasts ── */
+  function infoToast(m, loop) {
+    var elapsed = loop ? 0 : Math.max(0, Date.now() - m.redditAt);
+    var left = Math.max(0, Math.ceil((NR.autoDismissMs - elapsed) / 1000));
+    var count = el('span', { 'data-tip': 'Fades by itself in ' + left + ' s (6 s in total)' }, 'fades in ' + left + ' s');
+    var bar = el('i');
+    bar.style.animationDelay = '-' + elapsed + 'ms';
+    var t = el('div', { class: 'c04-toast c04-toast--info', role: 'status' }, [
+      el('span', { class: 'c04-glyph', style: 'color:var(--pf-info)', 'aria-hidden': 'true' }, LV.info.glyph),
+      el('div', { class: 'c04-tbody' }, [
+        el('div', { class: 'c04-ttitle' }, NR.title),
+        el('div', { class: 'c04-tsub' }, NR.body),
+        el('div', { class: 'c04-tmeta' }, [el('span', {}, PF.formatTime(NR.createdAt)), el('span', {}, '·'), loop ? el('span', { 'data-tip': 'Fades by itself after 6 s' }, 'fades after 6 s') : count])
+      ]),
+      el('div', { class: 'c04-fade' + (loop ? ' c04-fade--loop' : ''), 'data-tip': 'Time left before it fades: 6 s in total' }, bar)
+    ]);
+    t.countEl = count;
+    return t;
+  }
+  function warnToast(onClose, onOpen) {
+    return el('div', { class: 'c04-toast c04-toast--warn', role: 'alert' }, [
+      el('span', { class: 'c04-glyph', style: 'color:var(--pf-warn)', 'aria-hidden': 'true' }, LV.warn.glyph),
+      el('div', { class: 'c04-tbody' }, [
+        el('div', { class: 'c04-ttitle' }, NC.title),
+        el('div', { class: 'c04-tsub' }, NC.body),
+        el('div', { class: 'c04-tmeta' }, [el('span', {}, PF.formatTime(NC.createdAt)), el('span', {}, '·'),
+          el('button', { type: 'button', class: 'c04-link', on: { click: function () { if (onOpen) onOpen(NC.source.conversationId); } } }, 'Open chat ›')])
+      ]),
+      el('button', { type: 'button', class: 'c04-x', 'aria-label': 'Close this notice', title: 'Close (one click)', on: { click: function () { if (onClose) onClose(); } } }, PF.icon('x', 13))
+    ]);
+  }
+
+  /* ── the sticky action card ── */
+  function actionCard(c, env) {
+    var card = el('section', { class: 'c04-card', 'aria-label': NT.title });
+    var progBar = el('i'), count = el('span', { class: 'c04-count' });
+    var prog = el('div', { class: 'c04-prog' }, progBar);
+    var body = el('div', { class: 'c04-cbody' }), foot = el('div', { class: 'c04-cfoot' });
+    var head = el('div', { class: 'c04-chead' }, [
+      PF.dot('attention', true),
+      el('div', { style: 'flex:1 1 auto;min-width:0' }, [
+        el('div', { class: 'c04-ctitle' }, NT.title),
+        el('div', { class: 'c04-csub' }, [
+          el('span', {}, 'From the routine ' + ROUTINE.name + ' · ' + PEER.name + ' · ' + PF.formatTime(NT.createdAt)),
+          el('button', { type: 'button', class: 'c04-link', on: { click: function () { if (env.onOpenChat) env.onOpenChat(NT.source.conversationId); } } }, 'Open chat ›')
+        ])
+      ]),
+      el('button', { type: 'button', class: 'c04-x', 'aria-label': 'Fold into the corner', title: 'Fold into the corner (it keeps waiting)', on: { click: function () { c.folded = true; env.changed('fold'); } } }, '—')
+    ]);
+    card.appendChild(prog); card.appendChild(head); card.appendChild(body); card.appendChild(foot);
+
+    function progress() {
+      var d = doneCount(c);
+      progBar.style.width = (d / TOTAL * 100) + '%';
+      count.textContent = d + ' of ' + TOTAL + ' done';
+      count.setAttribute('data-tip', d + ' of ' + TOTAL + ' steps done (PDF, ' + NT.questions.length + ' questions, ' + NT.todos.length + ' to-do)');
+      prog.setAttribute('data-tip', d + ' of ' + TOTAL + ' steps done');
+      if (card.refreshButtons) card.refreshButtons();
+    }
+    function go(p) { c.page = p; render(); var f = body.querySelector('button, input'); if (f && env.focus) f.focus({ preventScroll: true }); }
+    function navFoot(extra) {
+      foot.appendChild(PF.button('‹ Back', { small: true, disabled: c.page <= 1, on: function () { go(c.page - 1); } }));
+      foot.appendChild(el('span', { class: 'c04-spacer' }));
+      if (extra) foot.appendChild(extra);
+      foot.appendChild(count);
+      foot.appendChild(PF.button('Next ›', { small: true, variant: 'primary', on: function () { go(c.page + 1); } }));
+    }
+    function render() {
+      body.innerHTML = ''; foot.innerHTML = ''; card.refreshButtons = null;
+      if (c.page === 0) {
+        body.appendChild(el('p', { class: 'c04-intro' }, NT.body));
+        body.appendChild(el('div', { class: 'c04-steplabel' }, TOTAL + ' small steps: the PDF · ' + NT.questions.length + ' questions · ' + NT.todos.length + ' to-do'));
+        foot.appendChild(el('span', { class: 'c04-spacer' }));
+        foot.appendChild(count);
+        foot.appendChild(PF.button('Start ›', { variant: 'primary', on: function () { go(1); } }));
+      } else if (c.page === 1) {
+        body.appendChild(el('div', { class: 'c04-steplabel' }, 'Step 1 of ' + TOTAL + ' · Open the PDF'));
+        NT.files.forEach(function (f) {
+          var chip = PF.fileChip(f);
+          if (c.opened) chip.classList.add('pf-file-chip--opened');
+          chip.addEventListener('pf-open', function () { c.opened = true; progress(); });
+          body.appendChild(chip);
+          card.fileChip = chip;
+        });
+        navFoot();
+      } else if (c.page <= 1 + NT.questions.length) {
+        var qi = c.page - 2, q = NT.questions[qi];
+        body.appendChild(el('div', { class: 'c04-steplabel' }, 'Step ' + c.page + ' of ' + TOTAL + ' · Question ' + (qi + 1) + ' of ' + NT.questions.length));
+        var w = PF.question(q, { onAnswer: function (v) { c.answers[q.id] = v; progress(); } });
+        if (filled(c.answers[q.id])) w.setAnswer(c.answers[q.id]);
+        body.appendChild(w.el);
+        card.question = w;
+        navFoot(el('button', { type: 'button', class: 'c04-link', title: 'Fill in all four sample answers at once', on: { click: function () { NT.questions.forEach(function (x) { c.answers[x.id] = x.sampleAnswer; }); if (w) w.setAnswer(q.sampleAnswer); progress(); } } }, 'Fill sample answers'));
+      } else {
+        body.appendChild(el('div', { class: 'c04-steplabel' }, 'Step ' + TOTAL + ' of ' + TOTAL + ' · Yours to do by hand'));
+        NT.todos.forEach(function (t) {
+          var td = PF.todo({ id: t.id, text: t.text, done: c.todo }, { onToggle: function (v) { c.todo = v; progress(); } });
+          body.appendChild(td.el); card.todo = td;
+        });
+        var send = PF.button('Send answers to the agent', { variant: 'primary', small: true, on: function () {
+          if (send.disabled) return;
+          c.sent = true;
+          PF.toast(env.frame(), 'Sent to the chat ‘' + CONV.title + '’', { level: 'ok' });
+          progress();
+        } });
+        var dismiss = PF.button('Dismiss', { variant: 'ok', small: true, on: function () { if (dismiss.disabled) return; c.dismissed = true; env.changed('dismiss'); } });
+        var sentNote = el('span', { class: 'c04-sent' });
+        var miss = el('div', { class: 'c04-missing' });
+        card.sendButton = send; card.dismissButton = dismiss;
+        foot.appendChild(PF.button('‹ Back', { small: true, on: function () { go(c.page - 1); } }));
+        foot.appendChild(el('span', { class: 'c04-spacer' }));
+        foot.appendChild(count);
+        foot.appendChild(send);
+        foot.appendChild(dismiss);
+        foot.appendChild(sentNote);
+        foot.appendChild(miss);
+        card.refreshButtons = function () {
+          var allAnswered = answeredCount(c) === NT.questions.length;
+          send.disabled = !allAnswered || c.sent;
+          send.title = c.sent ? 'Already sent' : allAnswered ? 'Post the answers into the chat' : 'Answer every question first';
+          var m = missing(c);
+          dismiss.disabled = m.length > 0;
+          dismiss.title = m.length ? 'Still missing: ' + m.join(', ') : 'Everything is done — remove the card';
+          sentNote.textContent = c.sent ? '✓ Sent to the chat ‘' + CONV.title + '’' : '';
+          miss.textContent = m.length ? 'Dismiss unlocks when done. Still missing: ' + m.join(', ') + '.' : '';
+        };
+      }
+      progress();
+    }
+    render();
+    card.go = go;
+    return card;
+  }
+
+  /* ── one stack per frame ── */
+  function mountStack(h, m, env) {
+    var old = h.overlay.querySelector('.c04-stack'); if (old) old.remove();
+    var bottom = 16;
+    if (h.composer) bottom = (h.composer.offsetHeight || 63) + 16;
+    var stack = el('div', { class: 'c04-stack', style: 'bottom:' + bottom + 'px' });
+    h.overlay.appendChild(stack);
+    env.frame = function () { return h.frame; };
+    var refs = {};
+    function render() {
+      stack.innerHTML = '';
+      if (!m.arrived) return;
+      var c = m.card, items = [];
+      if (!c.dismissed && !c.folded) {
+        refs.card = actionCard(c, env);
+        if (m.animate) { refs.card.classList.add('c04-card--enter'); m.animate = false; }
+        items.push(refs.card);
+      } else refs.card = null;
+      if (m.reddit) { refs.reddit = infoToast(m); items.push(refs.reddit); } else refs.reddit = null;
+      if (m.crash) items.push(warnToast(function () { m.crash = false; env.changed('crash'); }, env.onOpenChat));
+      if (!c.dismissed && c.folded) {
+        refs.pill = el('button', { type: 'button', class: 'c04-pill', 'aria-label': '1 notification needs you — open it', 'data-tip': '1 notice needs you · click to open the card' }, [PF.dot('attention', true), '1 needs you', el('span', { 'aria-hidden': 'true' }, '▸')]);
+        refs.pill.addEventListener('click', function () { c.folded = false; m.animate = true; env.changed('unfold'); });
+        items.push(refs.pill);
+      } else refs.pill = null;
+      items.slice(0, 3).forEach(function (n) { stack.appendChild(n); });
+      if (items.length > 3) items.slice(3).forEach(function (n) { stack.appendChild(n); });   // the pill is never hidden
+    }
+    render();
+    return { render: render, refs: refs, el: stack };
+  }
+
+  /* ── the main interactive frame ── */
+  var host = document.getElementById('frame'), cap = document.getElementById('caption');
+  var M, shell, stack, timers = [];
+  function clearTimers() { timers.forEach(function (t) { clearTimeout(t); clearInterval(t); }); timers = []; }
+  function freshModel() { return { view: 'routines', arrived: false, reddit: false, redditAt: 0, crash: false, animate: false, card: cardState() }; }
+  var env = {
+    focus: true,
+    changed: function () { renderMain(true); },
+    onOpenChat: function (id) { M.view = 'session'; M.conv = id; renderMain(true); }
+  };
+  function renderMain(keepView) {
+    shell = PF.renderAppShell(host, { view: M.view, conversationId: M.conv || 'c-timesheet', width: 1280, height: 800 });
+    if (shell.pill) {
+      var b = shell.pill.querySelectorAll('button');
+      b[0].addEventListener('click', function () { M.view = 'home'; renderMain(true); });
+      b[1].addEventListener('click', function () { M.view = 'routines'; renderMain(true); });
+    }
+    if (M.view === 'session') {
+      var back = shell.headerLeft.querySelector('.pf-back-btn');
+      if (back) back.addEventListener('click', function () { M.view = 'home'; renderMain(true); });
+    }
+    shell.setRunStatus('run-ts-1015', M.card.dismissed ? 'success' : 'attention');
+    if (shell.pinnedRows.size) shell.setRowBadge('c-timesheet', M.arrived && !M.card.dismissed ? 'needs you' : null, 'attention');
+    stack = mountStack(shell, M, env);
+  }
+  function startRedditFade() {
+    M.reddit = true; M.redditAt = Date.now();
+    timers.push(setTimeout(function () { M.reddit = false; stack.render(); }, NR.autoDismissMs));
+    timers.push(setInterval(function () {
+      var r = stack.refs.reddit; if (!r) return;
+      var left = Math.max(0, Math.ceil((NR.autoDismissMs - (Date.now() - M.redditAt)) / 1000));
+      r.countEl.textContent = 'fades in ' + left + ' s';
+      r.countEl.setAttribute('data-tip', 'Fades by itself in ' + left + ' s (6 s in total)');
+    }, 250));
+  }
+
+  var rail = PF.stepRail(document.getElementById('rail'), {
+    reset: function () { clearTimers(); M = freshModel(); renderMain(); },
+    steps: [
+      { label: 'Arrives', caption: '09:04 — three notices slide into the bottom-right corner: the timesheet card glows orange and waits for you, “Reddit daily” fades by itself in 6 seconds, “Crash sweep” waits for one click on ✕.',
+        run: function () { M.arrived = true; M.crash = true; M.animate = true; startRedditFade(); renderMain(); } },
+      { label: 'Open', caption: 'You press Start on the card. Step 1 of 6 is the PDF — clicking “Open ›” opens it in Preview. (The Reddit notice has faded away by now.)',
+        run: function () { clearTimers(); M.reddit = false; M.animate = false; M.card.page = 1; renderMain(); stack.refs.card.fileChip.openButton.click(); } },
+      { label: 'Answer', caption: 'You answer the four questions one at a time (Back / Next), tick “Send the email yourself”, then press “Send answers to the agent” — the answers land in the timesheet chat.',
+        run: function () {
+          NT.questions.forEach(function (q) { M.card.answers[q.id] = q.sampleAnswer; });
+          M.card.opened = true; M.card.todo = true; M.card.page = LAST; renderMain();
+          stack.refs.card.sendButton.click();
+        } },
+      { label: 'Done', caption: 'Everything is answered, so Dismiss unlocks. The card disappears, nothing “needs you” any more and the routine turns green on the week board. Sending the email to Abilitie is still yours to do by hand.',
+        run: function () { M.card.dismissed = true; renderMain(); } }
+    ],
+    onStep: function (n, step) { cap.textContent = step ? step.caption : 'Press a step to start.'; }
+  });
+  var want = /(?:^|[?&#])step=(\d)/.exec(location.search + location.hash);
+  rail.go(want ? +want[1] : 1);
+
+  /* ── mini frames: the folded pill everywhere ── */
+  [['mini-home', 'home'], ['mini-routines', 'routines'], ['mini-session', 'session']].forEach(function (p) {
+    var h = PF.renderAppShell(document.getElementById(p[0]), { view: p[1], conversationId: 'c-reddit', width: 1280, height: 800 });
+    h.setRunStatus('run-ts-1015', 'attention');
+    var m = { arrived: true, reddit: false, crash: false, card: cardState() };
+    m.card.folded = true;
+    var e = { changed: function () { st.render(); }, onOpenChat: function () {} };
+    var st = mountStack(h, m, e);
+    st.el.classList.add('c04-stack--mini');
+  });
+
+  /* ── three levels ── */
+  function stageEnv(id) { var stage = document.getElementById(id); return { changed: function () {}, onOpenChat: function () {}, frame: function () { return stage; } }; }
+  document.getElementById('lv-info').appendChild(infoToast({ redditAt: 0 }, true));
+  document.getElementById('lv-warn').appendChild(warnToast(function () { PF.toast(document.getElementById('lv-warn'), 'Closed — one click is all it takes', { level: 'ok', ms: 2500 }); }));
+  var demo = cardState(); demo.page = 2;
+  var demoEnv = stageEnv('lv-action');
+  demoEnv.changed = function (why) { if (why === 'fold') { demo.folded = false; PF.toast(document.getElementById('lv-action'), 'Folded into the orange pill — it cannot be closed', { level: 'attention', ms: 2500 }); } };
+  document.getElementById('lv-action').appendChild(actionCard(demo, demoEnv));
+  ['info', 'warn', 'action'].forEach(function (k) {
+    var r = document.getElementById('rule-' + k);
+    r.appendChild(el('b', { style: 'color:' + LV[k].color }, LV[k].glyph + ' ' + LV[k].label));
+    r.appendChild(document.createTextNode(LV[k].rule + '.'));
+  });
+
+  /* ── verdict ── */
+  META.pros.forEach(function (t) { document.getElementById('pros').appendChild(el('li', {}, t)); });
+  META.cons.forEach(function (t) { document.getElementById('cons').appendChild(el('li', {}, t)); });
+  PF.barChart(document.getElementById('chart'), {
+    title: 'This design in three numbers (lower is calmer)',
+    categories: [META.name],
+    series: [
+      { name: 'Clicks to finish', unit: 'clicks', color: 'var(--g-accent)', values: [META.metrics.clicksToResolve] },
+      { name: 'Screen space when idle', unit: 'px', color: 'var(--g-info)', values: [META.metrics.idleSpacePx] },
+      { name: 'Interruption, ×10 for the scale', unit: '(1–5 score ×10)', color: '#14b8a6', values: [META.metrics.interruption * 10] }
+    ]
+  });
+})();
+</script>
+</body>
+</html>

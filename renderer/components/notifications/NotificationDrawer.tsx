@@ -1,5 +1,7 @@
-import { useEffect, useLayoutEffect, useState } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useState } from 'react';
+import { useRouter } from 'next/router';
 import { formatSlot } from '../../../shared/routine-schedule';
+import { api } from '../../lib/ipc';
 import { useNotificationsUI } from '../../lib/use-notifications';
 import { BellIcon } from './NotificationBell';
 import NotificationCard, { hhmm } from './NotificationCard';
@@ -15,13 +17,14 @@ function measureHeaderBottom(): number {
 /**
  * The 400 px panel along the right edge, below the header. No backdrop: the
  * page behind stays usable, the bell toggles the panel, ✕ and Escape close it.
- * "Needs you" holds a card per open action notice; "Earlier" a row per open
- * warning, each closed with one ✕.
+ * "Needs you" holds a pointer card per open action notice (the agent's
+ * questions are plain text in its chat, answered by typing there); "Earlier" a
+ * row per open warning, each closed with one ✕.
  */
 export default function NotificationDrawer() {
   const { available, open, setOpen, list, counts, focusId, setFocusId, justCleared, actions } = useNotificationsUI();
+  const router = useRouter();
   const [top, setTop] = useState(45);
-  const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
   const [err, setErr] = useState<string | null>(null);
 
   useLayoutEffect(() => {
@@ -45,10 +48,9 @@ export default function NotificationDrawer() {
     return () => window.removeEventListener('keydown', onKey, { capture: true });
   }, [open, setOpen]);
 
-  // A focused notice (new arrival or a banner click) opens expanded and in view.
+  // A focused notice (new arrival or a banner click) scrolls into view.
   useEffect(() => {
     if (!open || !focusId) return;
-    setExpanded((cur) => (cur.has(focusId) ? cur : new Set(cur).add(focusId)));
     const t = setTimeout(() => {
       document.getElementById(`notification-${focusId}`)?.scrollIntoView({ block: 'nearest' });
       setFocusId(null);
@@ -56,15 +58,26 @@ export default function NotificationDrawer() {
     return () => clearTimeout(t);
   }, [open, focusId, setFocusId]);
 
+  // readAt is "the user has looked at it": stamped when the open drawer shows the card.
+  useEffect(() => {
+    if (!open) return;
+    for (const n of list) if (n.level === 'action' && !n.readAt) actions.markRead(n.id).catch(() => {});
+  }, [open, list, actions]);
+
+  const fileActionsFor = useMemo(() => (id: string) => ({
+    openFile: (filePath: string) => actions.openFile(id, filePath),
+    reveal: (filePath: string) => api().revealInFinder(filePath),
+  }), [actions]);
+
   if (!available || !open) return null;
 
   const needs = list.filter((n) => n.level === 'action');
   const warns = list.filter((n) => n.level === 'warn');
-  const toggle = (id: string) => setExpanded((cur) => {
-    const next = new Set(cur);
-    if (next.has(id)) next.delete(id); else next.add(id);
-    return next;
-  });
+  // Close the drawer so it does not cover the chat the user is sent to.
+  const openChat = (conversationId: string) => {
+    setOpen(false);
+    router.push({ pathname: '/session', query: { id: conversationId } });
+  };
   const dismiss = (id: string) => { setErr(null); actions.dismiss(id).catch((e) => setErr(e instanceof Error ? e.message : String(e))); };
   const clearAll = () => { warns.forEach((n) => dismiss(n.id)); };
 
@@ -95,7 +108,7 @@ export default function NotificationDrawer() {
         )}
         {needs.map((n) => (
           <div key={n.id} id={`notification-${n.id}`}>
-            <NotificationCard n={n} expanded={expanded.has(n.id)} onToggle={() => toggle(n.id)} />
+            <NotificationCard n={n} fileActions={fileActionsFor(n.id)} onOpenChat={openChat} onDismiss={() => dismiss(n.id)} />
           </div>
         ))}
 

@@ -855,17 +855,14 @@ export interface AgentsFlowApi {
   updateRoutine: (id: string, patch: RoutinePatch) => Promise<Routine>;        // 'routines:update' — same validation on the merged routine; enabling with directoryId '' rejects
   removeRoutine: (id: string) => Promise<void>;                                 // 'routines:remove'
   runRoutineNow: (id: string) => Promise<RoutineRun>;                           // 'routines:runNow'
-  markRoutineRunDone: (runId: string) => Promise<RoutineRun>;                   // 'routines:markRunDone' — failed/missed → success, error kept; rejects otherwise
+  markRoutineRunDone: (runId: string) => Promise<RoutineRun>;                   // 'routines:markRunDone' — failed/missed/attention → success, error kept; rejects otherwise
   onRoutinesUpdated: (cb: (snapshot: RoutinesSnapshot) => void) => () => void; // 'routines:updated' — full snapshot on every change
 
   // ---- Notifications: the bell + drawer (shared/notifications.ts). Optional: in dev the renderer hot-reloads ahead of
   //      a not-yet-restarted preload, and then the bell simply stays hidden. ----
   listNotifications?: () => Promise<NotificationsSnapshot>;                                            // 'notifications:list'
   markNotificationRead?: (id: string) => Promise<UserNotification>;                                   // 'notifications:markRead'
-  answerNotification?: (id: string, questionId: string, answer: string) => Promise<UserNotification>;  // 'notifications:answer'
-  setNotificationTodo?: (id: string, todoId: string, done: boolean) => Promise<UserNotification>;     // 'notifications:setTodo'
-  sendNotificationAnswers?: (id: string) => Promise<UserNotification>;                                // 'notifications:sendAnswers'
-  dismissNotification?: (id: string) => Promise<UserNotification>;                                    // 'notifications:dismiss' — rejects with missingForDismiss
+  dismissNotification?: (id: string) => Promise<UserNotification>;                                    // 'notifications:dismiss' — always allowed
   openNotificationFile?: (id: string, filePath: string) => Promise<{ status: 'success' | 'failure'; error?: string }>; // 'notifications:openFile'
   onNotificationsUpdated?: (cb: (snapshot: NotificationsSnapshot) => void) => () => void;             // push 'notifications:updated'
   onNotificationOpen?: (cb: (payload: { id: string }) => void) => () => void;                          // push 'notifications:open'

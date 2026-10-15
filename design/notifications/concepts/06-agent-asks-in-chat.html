@@ -1,0 +1,582 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Agent asks in chat — Peers Flow notifications</title>
+<meta name="description" content="One of six notification designs for Peers Flow, shown on the Abilitie timesheet scenario.">
+<link rel="stylesheet" href="../shared/tokens.css">
+<link rel="stylesheet" href="../shared/app-shell.css">
+<link rel="stylesheet" href="../shared/gallery.css">
+<script src="../shared/scenario.js"></script>
+<script src="../shared/app-shell.js"></script>
+<script src="../shared/gallery.js"></script>
+<script src="./06-agent-asks-in-chat.meta.js"></script>
+<style>
+/* ── header counter ("needs you" chip) ── */
+.c06-chip{ flex:0 0 auto; height:24px; display:inline-flex; align-items:center; gap:0; border-radius:9999px; border:1px solid rgba(249,115,22,.7) !important; background:rgba(249,115,22,.14) !important; font-size:11px !important; line-height:16px; color:var(--pf-text) !important; overflow:hidden; white-space:nowrap; }
+.c06-chip:hover{ background:rgba(249,115,22,.24) !important; }
+.c06-chip--idle{ border-color:var(--pf-border) !important; background:var(--pf-panel) !important; color:var(--pf-muted) !important; cursor:default !important; }
+.c06-chip-main{ display:inline-flex; align-items:center; gap:6px; padding:0 9px; text-transform:uppercase; letter-spacing:.05em; font-weight:600; }
+.c06-chip-n{ font-family:var(--pf-mono); font-size:12px; color:var(--pf-attention); }
+.c06-chip--idle .c06-chip-n{ color:var(--pf-muted); }
+.c06-chip-seg{ position:relative; display:inline-flex; align-items:center; gap:4px; padding:0 8px; height:100%; border-left:1px solid rgba(249,115,22,.4); font-family:var(--pf-mono); font-size:11px; }
+.c06-chip--idle .c06-chip-seg{ border-left-color:var(--pf-border); }
+.c06-chip-seg--warn{ color:var(--pf-warn); }
+.c06-chip-seg--info{ color:#60a5fa; }
+.c06-bar{ position:absolute; left:0; bottom:0; height:2px; width:100%; background:var(--pf-info); transform-origin:left; animation:c06-shrink 6000ms linear forwards; }
+@keyframes c06-shrink{ from{ transform:scaleX(1); } to{ transform:scaleX(0); } }
+/* ── home rows ── */
+.pf-frame .pf-row.pf-row--flash{ animation:c06-flash 1.1s ease-out; }
+@keyframes c06-flash{
+  0%{ background-color:rgba(255,120,71,.30); transform:translateX(0); } 12%{ transform:translateX(-4px); } 26%{ transform:translateX(4px); }
+  40%{ transform:translateX(-3px); } 54%{ transform:translateX(2px); } 68%{ transform:translateX(-1px); } 100%{ background-color:rgba(255,120,71,0); transform:translateX(0); }
+}
+.pf-frame .pf-row.c06-row-pending{ border-left-color:var(--pf-attention); background:rgba(249,115,22,.08); }
+.c06-badge-x{ margin-left:2px; padding:0 2px !important; border-radius:3px; color:inherit !important; font-size:12px !important; line-height:1; }
+.c06-badge-x:hover{ background:rgba(251,191,36,.3) !important; }
+.c06-badge-info{ position:relative; overflow:hidden; }
+.c06-badge-info .c06-bar{ height:2px; }
+.c06-gone{ opacity:0; transition:opacity .3s; }
+/* ── 6 s pop-up on home ── */
+.c06-toast{ position:absolute; left:50%; bottom:78px; transform:translateX(-50%); display:flex; align-items:center; gap:10px; padding:8px 10px 8px 12px; border-radius:6px; border:1px solid rgba(249,115,22,.7); background:var(--pf-panel2); box-shadow:0 10px 15px -3px rgba(0,0,0,.5); font-size:13px; line-height:18px; color:var(--pf-text); overflow:hidden; white-space:nowrap; }
+.c06-toast .c06-bar{ background:var(--pf-attention); }
+/* ── the "Agent asks" card at the top of the chat ── */
+.c06-card{ flex:0 0 auto; font-family:var(--pf-font); font-size:13px; line-height:18px; color:var(--pf-text); background:var(--pf-panel); border:1px solid var(--pf-border); border-left:3px solid var(--pf-attention); border-radius:8px; padding:10px 14px 12px; display:flex; flex-direction:column; gap:9px; box-shadow:0 0 0 1px rgba(249,115,22,.12); }
+.c06-card-head{ display:flex; align-items:center; gap:8px; }
+.c06-card-kicker{ font-size:10px; text-transform:uppercase; letter-spacing:.06em; color:var(--pf-attention); font-weight:700; }
+.c06-card-title{ font-weight:600; font-size:14px; }
+.c06-card-time{ margin-left:auto; font-family:var(--pf-mono); font-size:11px; color:var(--pf-subtle); }
+.c06-card-body{ color:var(--pf-muted); font-size:12.5px; }
+.c06-label{ font-size:10px; line-height:14px; text-transform:uppercase; letter-spacing:.05em; color:var(--pf-muted); display:flex; justify-content:space-between; gap:8px; }
+.c06-qs{ display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; }
+.c06-qs .pf-question{ border-top:0; padding:8px 10px; border-radius:6px; background:rgba(34,38,54,.55); border:1px solid rgba(58,65,89,.6); }
+.c06-qs .pf-question--answered{ border-color:rgba(74,222,128,.35); }
+.c06-sentsum{ display:none; font-size:12px; color:var(--pf-muted); }
+.c06-card--sent .c06-qs{ display:none; }
+.c06-card--sent .c06-sentsum{ display:block; }
+.c06-actions{ display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
+.c06-sent{ font-size:11px; color:var(--pf-ok); }
+.c06-missing{ font-size:11px; color:var(--pf-subtle); margin-left:auto; }
+.c06-dismiss-wrap{ display:inline-flex; }
+.c06-dismiss-wrap .pf-btn:disabled{ pointer-events:none; }
+.c06-sysline{ font-family:var(--pf-mono); font-size:12px; color:var(--pf-subtle); text-align:center; }
+.c06-sysline b{ color:var(--pf-muted); font-weight:500; }
+/* ── hero diagram ── */
+.c06-where{ display:block; width:100%; max-width:720px; height:auto; margin-top:8px; }
+.c06-where text{ font:12px var(--pf-font); fill:var(--g-muted); }
+.c06-where .c06-frame{ fill:var(--g-surface2); stroke:var(--g-border); stroke-width:1.5; }
+.c06-where .c06-ghost{ fill:var(--g-border); opacity:.6; }
+.c06-where .c06-hot{ fill:color-mix(in srgb, var(--g-accent) 28%, transparent); stroke:var(--g-accent); stroke-width:1.5; }
+.c06-where .c06-hot-t{ fill:var(--g-text); font-weight:600; }
+/* ── levels ── */
+.c06-level{ display:flex; flex-direction:column; gap:10px; }
+.c06-demo.pf-frame{ width:100%; height:auto; min-height:150px; border-radius:8px; border:1px solid #3a4159; padding:14px; gap:10px; justify-content:center; }
+.c06-demo .c06-sysline{ position:relative; padding:6px 8px; border-radius:6px; background:rgba(34,38,54,.45); overflow:hidden; display:flex; align-items:center; justify-content:center; gap:6px; flex-wrap:wrap; text-align:center; }
+.c06-level-rule{ font-size:14px; margin:0; }
+.c06-level-name{ display:flex; align-items:center; gap:8px; font-weight:600; margin:0; }
+.c06-again{ font:inherit; font-size:13px; color:var(--g-accent-text, var(--g-accent)); background:none; border:0; padding:0; text-decoration:underline; cursor:pointer; align-self:flex-start; }
+/* ── flow ── */
+.c06-flow{ display:block; width:100%; max-width:860px; height:auto; }
+.c06-flow text{ font:13px var(--pf-font); fill:var(--g-text); }
+.c06-flow .c06-sub{ font-size:11px; fill:var(--g-muted); }
+.c06-flow .c06-node{ fill:var(--g-surface2); stroke:var(--g-border); stroke-width:1.5; }
+.c06-flow .c06-node--start{ stroke:var(--g-info); }
+.c06-flow .c06-node--end{ stroke:var(--g-ok); }
+.c06-flow .c06-arrow{ stroke:var(--g-muted); stroke-width:1.5; fill:none; }
+.c06-flow .c06-click{ fill:var(--g-accent); }
+.c06-flow .c06-click-t{ fill:#1a0d06; font-size:11px; font-weight:700; }
+.c06-total{ display:inline-flex; align-items:baseline; gap:8px; margin-top:10px; padding:6px 12px; border-radius:8px; background:var(--g-surface2); border:1px solid var(--g-border); }
+.c06-total b{ font-size:22px; color:var(--g-accent-text, var(--g-accent)); }
+@media (max-width:720px){ .c06-total b{ font-size:18px; } }
+</style>
+</head>
+<body>
+<nav id="pf-nav" data-current="06"></nav>
+<main class="g-page">
+  <section class="g-hero">
+    <p class="g-eyebrow">Design 6 of 6</p>
+    <h1>Agent asks in chat</h1>
+    <p class="g-lede">The questions wait inside the routine's own chat, right above what the agent wrote. A small orange counter in the header — on every screen — takes you there in one click.</p>
+    <ul class="g-badges">
+      <li class="g-badge g-badge--accent" data-tip="Screen space when nothing is waiting: 0 px — the counter sits in the header that is already there"><b>Where it lives</b> A card at the top of the routine's chat, plus a counter in the header</li>
+      <li class="g-badge" data-tip="Clicks to finish the timesheet: 9 clicks"><b>How you answer</b> In that card; your answers are posted into the chat as your reply</li>
+      <li class="g-badge" data-tip="Interruption: 2 of 5 (1 = a quiet badge … 5 = takes over the screen)"><b>How it gets your attention</b> The home row flashes, a 6-second pop-up, an orange counter</li>
+    </ul>
+    <svg class="c06-where" viewBox="0 0 720 230" role="img" aria-label="Where it lives: an orange counter in the header of every screen, an orange badge on the home row, and a card at the top of the chat">
+      <!-- home -->
+      <text x="0" y="14">Home</text>
+      <rect class="c06-frame" x="0" y="22" width="340" height="200" rx="10"/>
+      <rect class="c06-ghost" x="0" y="22" width="340" height="22" rx="10"/>
+      <rect class="c06-hot" x="220" y="27" width="70" height="12" rx="6" data-tip="Header counter · “needs you 1” · on every screen · one click opens the waiting chat"/>
+      <rect class="c06-ghost" x="10" y="54" width="80" height="158" rx="4"/>
+      <rect class="c06-ghost" x="100" y="58" width="230" height="16" rx="3"/>
+      <rect class="c06-hot" x="100" y="80" width="230" height="16" rx="3" data-tip="Home row · flashes on arrival and keeps an orange badge “needs you · 4 questions”"/>
+      <rect class="c06-ghost" x="100" y="102" width="230" height="16" rx="3"/>
+      <rect class="c06-ghost" x="100" y="124" width="230" height="16" rx="3"/>
+      <rect class="c06-hot" x="160" y="168" width="110" height="16" rx="4" data-tip="6-second pop-up · “Abilitie timesheet asks you 4 questions · Open ›”"/>
+      <text class="c06-hot-t" x="255" y="37" text-anchor="middle" style="font-size:9px" pointer-events="none">needs you 1</text>
+      <!-- arrow -->
+      <path d="M350 122 H372" stroke="var(--g-accent)" stroke-width="2" marker-end="url(#c06a)"/>
+      <!-- chat -->
+      <text x="380" y="14">The timesheet chat</text>
+      <rect class="c06-frame" x="380" y="22" width="340" height="200" rx="10"/>
+      <rect class="c06-ghost" x="380" y="22" width="340" height="22" rx="10"/>
+      <rect class="c06-hot" x="600" y="27" width="70" height="12" rx="6" data-tip="Same counter, in the chat's own header"/>
+      <rect class="c06-ghost" x="390" y="54" width="70" height="158" rx="4"/>
+      <rect class="c06-hot" x="470" y="54" width="240" height="88" rx="5" data-tip="The “Agent asks” card · the PDF, 4 questions, 1 to-do, Send answers, Dismiss"/>
+      <text class="c06-hot-t" x="590" y="96" text-anchor="middle">Agent asks · 4 questions</text>
+      <rect class="c06-ghost" x="470" y="150" width="200" height="10" rx="3"/>
+      <rect class="c06-ghost" x="470" y="166" width="230" height="10" rx="3"/>
+      <rect class="c06-ghost" x="470" y="182" width="160" height="10" rx="3"/>
+      <defs><marker id="c06a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0 L10 5 L0 10z" fill="var(--g-accent)"/></marker></defs>
+    </svg>
+  </section>
+
+  <section id="pf-main-frame" class="g-section">
+    <h2>Try it on the timesheet</h2>
+    <p>Press the steps, or click inside the app yourself: the pop-up, the header counter, the home row, the PDF, the answers and the buttons all work.</p>
+    <div class="g-step-rail" id="rail"></div>
+    <div class="pf-frame-wrap"><div id="frame"></div></div>
+    <p class="g-caption" id="caption"></p>
+  </section>
+
+  <section class="g-section" id="everywhere">
+    <h2>You can see it from everywhere</h2>
+    <p>The orange counter sits in the header of all three screens. On home the row carries a badge too; on the Routines board the run is orange; inside the chat the card waits on top.</p>
+    <div class="g-grid-3">
+      <div><p class="g-mini-label" data-tip="Home · counter shows 1 · the timesheet row has an orange badge">Home</p><div class="pf-frame-wrap g-mini"><div id="mini-home"></div></div></div>
+      <div><p class="g-mini-label" data-tip="Routines · counter shows 1 · the 15 Oct 09:00 timesheet run is orange">Routines</p><div class="pf-frame-wrap g-mini"><div id="mini-routines"></div></div></div>
+      <div><p class="g-mini-label" data-tip="Inside the chat · counter shows 1 · the card with 4 questions sits on top">Inside the chat</p><div class="pf-frame-wrap g-mini"><div id="mini-session"></div></div></div>
+    </div>
+  </section>
+
+  <section class="g-section" id="levels">
+    <h2>Three kinds of notices</h2>
+    <p>Only the timesheet gets a card. The two lighter notices show up as quiet grey lines in their own chats, a badge on their home row and a small number in the header counter.</p>
+    <div class="g-grid-3" id="levels-grid"></div>
+  </section>
+
+  <section class="g-section" id="flow">
+    <h2>Your path through it</h2>
+    <p>Every click from the moment the notice arrives until it is gone, using the sample answers. Typing your note for question 4 counts as one click (into the box).</p>
+    <svg class="c06-flow" id="flow-svg" viewBox="0 0 760 250" role="img" aria-label="Path: arrives, open the chat, open the PDF, answer four questions, tick the to-do, send answers, dismiss — 9 clicks"></svg>
+    <div class="c06-total" data-tip="Clicks to finish · 9 clicks (manual path with the sample answers)"><span>Clicks to finish</span><b>9</b><span class="g-muted">clicks</span></div>
+  </section>
+
+  <section class="g-section" id="verdict">
+    <h2>Good and not so good</h2>
+    <div class="g-grid-2">
+      <div class="g-card"><h3>Good</h3><ul class="g-pros" id="pros"></ul></div>
+      <div class="g-card"><h3>Not so good</h3><ul class="g-cons" id="cons"></ul></div>
+    </div>
+    <div id="chart" style="margin-top:16px"></div>
+  </section>
+
+  <details class="g-details" id="build">
+    <summary>How it would be built (for the engineer)</summary>
+    <p>Shared part (same for all six designs): the routine's chat calls a new <code>notify</code> tool on the existing <code>peersflow</code> server; the app stores the notification in <code>notifications.json</code> and pushes it to the window. Answers go back into the source chat through <code>sendNotificationAnswers</code>, and Dismiss is refused until <code>canDismiss()</code> is true. Full story: <a href="../index.html#build">the shared build notes</a>.</p>
+    <p>What this design adds:</p>
+    <ul>
+      <li><code>renderer/components/notifications/AgentAsksCard.tsx</code> — rendered by <code>pages/session.tsx</code> above the terminal container whenever an open notification has <code>source.conversationId === conv.id</code>. The terminal keeps its size; the card takes a top band (scrolls on its own if it grows past ~45% of the height) and collapses the questions once the answers are sent.</li>
+      <li><code>renderer/components/notifications/NeedsYouChip.tsx</code> — in the home/routines header (left of the Chat|Routines pill) and in <code>.pf-session-header-actions</code>. Main number = open <code>action</code> notices; secondary counts for open <code>warn</code> and live <code>info</code>. Click → open the oldest waiting chat (<code>openConversation(source.conversationId)</code>).</li>
+      <li><code>PinnedRow.tsx</code> — a derived <code>needsYou</code> flag (no store change): orange badge “needs you · N questions” and the row highlight; on arrival the existing <code>row-just-added</code> flash is re-triggered. <code>warn</code> rows get a badge with ✕ (dismiss); <code>info</code> rows a badge with a 6 s shrinking bar.</li>
+      <li>6 s pop-up: one more consumer of the existing Routines toast line, with an “Open ›” action; only for <code>action</code>.</li>
+      <li><code>info</code>/<code>warn</code> are also written into their own chat as a muted system line (renderer-only, never sent to the model).</li>
+      <li>After <code>sendNotificationAnswers</code>, the answer text is visible in the chat as the user's message; the agent's reply comes from the agent itself, nothing is faked.</li>
+      <li>Persistence: nothing beyond C11 — <code>readAt</code> is stamped when the card first renders open; the routine run stays <code>attention</code> until dismissal.</li>
+    </ul>
+  </details>
+</main>
+<script>
+(function () {
+  'use strict';
+  var S = window.PF_SCENARIO, M = window.PF_CONCEPTS['06'];
+  var el = PF.el;
+  var NTS = S.notifications.filter(function (n) { return n.id === 'n-timesheet'; })[0];
+  var NRD = S.notifications.filter(function (n) { return n.id === 'n-reddit'; })[0];
+  var NCR = S.notifications.filter(function (n) { return n.id === 'n-crash'; })[0];
+  var CONV = S.conversations.filter(function (c) { return c.id === NTS.source.conversationId; })[0];
+  var FILE = NTS.files[0];
+  var INFO_MS = NRD.autoDismissMs;
+  var L = S.levels;
+
+  /* ───────── timers (all cleared on reset so the rail is deterministic) ───────── */
+  var timers = [];
+  function later(fn, ms) { var t = setTimeout(fn, ms); timers.push(t); return t; }
+  function clearTimers() { timers.forEach(clearTimeout); timers = []; }
+  function bar(elapsed, ms) { return el('i', { class: 'c06-bar', style: 'animation-duration:' + ms + 'ms;animation-delay:-' + Math.max(0, elapsed) + 'ms' }); }
+
+  /* ───────── the "Agent asks" card ───────── */
+  function buildCard(onChange) {
+    var c = {};
+    function changed() { update(); if (onChange) onChange(); }
+    c.file = PF.fileChip(FILE);
+    c.qs = NTS.questions.map(function (q) { return PF.question(q, { onAnswer: changed }); });
+    c.todo = PF.todo(NTS.todos[0], { onToggle: changed });
+    c.counter = el('span', {});
+    c.sentNote = el('span', { class: 'c06-sent' });
+    c.sendBtn = PF.button('Send answers to the agent', { variant: 'primary', small: true });
+    c.sendBtn.addEventListener('click', function (e) { e.stopPropagation(); c.send(); });
+    c.dismissBtn = PF.button('Dismiss', { variant: 'ok', small: true });
+    c.dismissBtn.addEventListener('click', function (e) { e.stopPropagation(); if (c.canDismiss() && c.onDismiss) c.onDismiss(); });
+    c.dismissWrap = el('span', { class: 'c06-dismiss-wrap' }, c.dismissBtn);
+    c.missing = el('span', { class: 'c06-missing' });
+    c.sentSum = el('div', { class: 'c06-sentsum' });
+    c.fill = el('button', { type: 'button', class: 'pf-link-btn', on: { click: function (e) { e.stopPropagation(); c.qs.forEach(function (q) { q.setAnswer(q.question.sampleAnswer); }); } } }, 'Fill sample answers');
+    c.el = el('div', { class: 'c06-card', role: 'region', 'aria-label': 'The agent asks you: ' + NTS.title }, [
+      el('div', { class: 'c06-card-head' }, [
+        PF.dot('attention', true),
+        el('span', { class: 'c06-card-kicker' }, 'Agent asks'),
+        el('span', { class: 'c06-card-title' }, NTS.title),
+        el('span', { class: 'c06-card-time', 'data-tip': 'Arrived ' + PF.formatDay(NTS.createdAt) + ' at ' + PF.formatTime(NTS.createdAt) }, PF.formatDay(NTS.createdAt) + ' · ' + PF.formatTime(NTS.createdAt)),
+        PF.badge(L.action.label, 'attention')
+      ]),
+      el('div', { class: 'c06-card-body' }, NTS.body),
+      c.file,
+      el('div', { class: 'c06-label' }, [el('span', {}, 'Questions from the agent'), c.counter]),
+      el('div', { class: 'c06-qs' }, c.qs.map(function (q) { return q.el; })),
+      c.sentSum,
+      el('div', { class: 'c06-label' }, [el('span', {}, 'Yours to do by hand')]),
+      c.todo.el,
+      el('div', { class: 'c06-actions' }, [c.sendBtn, c.fill, c.sentNote, c.missing, c.dismissWrap])
+    ]);
+    c.sent = false;
+    c.answered = function () { return c.qs.filter(function (q) { return q.answered(); }).length; };
+    c.allAnswered = function () { return c.answered() === c.qs.length; };
+    c.canDismiss = function () { return c.allAnswered() && c.todo.done() && c.sent; };
+    c.missingList = function () {
+      var out = [], left = c.qs.length - c.answered();
+      if (left) out.push(left + (left === 1 ? ' question' : ' questions') + ' unanswered');
+      if (!c.sent) out.push('answers not sent yet');
+      if (!c.todo.done()) out.push('to-do not ticked');
+      return out;
+    };
+    c.answerText = function () { return c.qs.map(function (q, i) { return (i + 1) + ') ' + q.value(); }).join(' · '); };
+    c.send = function () {
+      if (!c.allAnswered() || c.sent) return false;
+      c.sent = true;
+      c.sentNote.textContent = '✓ Sent to the chat ‘' + CONV.title + '’';
+      c.sentSum.textContent = '✓ ' + c.qs.length + ' answers sent: ' + c.answerText();
+      c.el.classList.add('c06-card--sent');
+      update();
+      if (c.onSend) c.onSend(c.answerText());
+      return true;
+    };
+    function update() {
+      var n = c.answered();
+      c.counter.textContent = n + ' of ' + c.qs.length + ' answered';
+      c.counter.setAttribute('data-tip', n + ' of ' + c.qs.length + ' questions answered');
+      c.sendBtn.disabled = !c.allAnswered() || c.sent;
+      c.sendBtn.title = c.sent ? 'Already sent' : c.allAnswered() ? 'Post the answers into this chat' : 'Answer every question first';
+      c.fill.style.display = c.sent ? 'none' : '';
+      var miss = c.missingList();
+      c.dismissBtn.disabled = miss.length > 0;
+      var tip = miss.length ? 'Dismiss is locked — still missing: ' + miss.join(', ') : 'Everything is done — dismiss the notification';
+      c.dismissWrap.setAttribute('data-tip', tip);
+      c.dismissBtn.title = tip;
+      c.missing.textContent = miss.length ? 'Still missing: ' + miss.join(' · ') : 'All done';
+    }
+    c.update = update;
+    update();
+    return c;
+  }
+
+  /* ───────── state ───────── */
+  var host = document.getElementById('frame');
+  var shell = null, view = 'home', st;
+  function fresh() {
+    return { arrived: false, arrivedAt: 0, infoOn: false, warnOn: false, toastOn: false, flash: false, card: null, dismissed: false, lines: [] };
+  }
+  function pending() { return st.arrived && !st.dismissed ? 1 : 0; }
+
+  /* the header counter */
+  function chip() {
+    var n = pending(), warn = st.warnOn ? 1 : 0, info = st.infoOn ? 1 : 0;
+    if (!st.arrived) return null;
+    var tip = n + ' chat needs you' + (n ? ' (' + CONV.title + ')' : '') + ' · ' + warn + ' went wrong · ' + info + ' just-so-you-know';
+    var b = el('button', { type: 'button', class: 'c06-chip' + (n ? '' : ' c06-chip--idle'), 'data-tip': tip, 'aria-label': tip }, [
+      el('span', { class: 'c06-chip-main' }, [n ? PF.dot('attention', true) : PF.dot('muted'), 'needs you', el('span', { class: 'c06-chip-n' }, String(n))])
+    ]);
+    if (warn) b.appendChild(el('span', { class: 'c06-chip-seg c06-chip-seg--warn', 'data-tip': warn + ' notice: ' + NCR.title + ' · ' + L.warn.rule }, [L.warn.glyph, ' ', String(warn)]));
+    if (info) b.appendChild(el('span', { class: 'c06-chip-seg c06-chip-seg--info', 'data-tip': info + ' notice: ' + NRD.title + ' · ' + L.info.rule }, [L.info.glyph, ' ', String(info), bar(Date.now() - st.arrivedAt, INFO_MS)]));
+    b.addEventListener('click', function () { if (pending()) openChat(); });
+    return b;
+  }
+
+  function render(v) {
+    view = v;
+    shell = PF.renderAppShell(host, { view: v, width: 1280, height: 800, conversationId: CONV.id });
+    var ch = chip();
+    if (ch) shell.headerRight.insertBefore(ch, shell.headerRight.firstChild);
+    if (v === 'home') decorateHome();
+    else if (v === 'routines') decorateRoutines();
+    else decorateSession();
+  }
+
+  function decorateHome() {
+    if (shell.pill) shell.pill.children[1].addEventListener('click', function () { render('routines'); });
+    var row = shell.pinnedRows.get(CONV.id);
+    row.addEventListener('click', function () { if (st.arrived) openChat(); });
+    if (!st.arrived) return;
+    if (!st.dismissed) {
+      row.classList.add('c06-row-pending');
+      if (st.flash) { row.classList.add('pf-row--flash'); st.flash = false; }
+      var left = st.card ? st.card.qs.length - st.card.answered() : NTS.questions.length;
+      var txt = left ? 'needs you · ' + left + (left === 1 ? ' question' : ' questions') : 'needs you';
+      var b = shell.setRowBadge(CONV.id, txt, 'attention');
+      b.setAttribute('data-tip', NTS.title + ' · ' + left + ' of ' + NTS.questions.length + ' questions still open');
+    }
+    if (st.warnOn) {
+      var wb = shell.setRowBadge(NCR.source.conversationId, L.warn.glyph + ' did not finish', 'warn');
+      wb.setAttribute('data-tip', NCR.title + ' — ' + NCR.body + ' (' + L.warn.rule + ')');
+      wb.appendChild(el('button', { type: 'button', class: 'c06-badge-x', 'aria-label': 'Close: ' + NCR.title, title: 'Close (one click)', on: { click: function (e) { e.stopPropagation(); st.warnOn = false; render(view); } } }, '✕'));
+    }
+    if (st.infoOn) {
+      var ib = shell.setRowBadge(NRD.source.conversationId, L.info.glyph + ' finished · nothing needed', 'info');
+      ib.classList.add('c06-badge-info');
+      var remain = Math.max(0, Math.ceil((INFO_MS - (Date.now() - st.arrivedAt)) / 1000));
+      ib.setAttribute('data-tip', NRD.title + ' — ' + NRD.body + ' · fades by itself in ' + remain + ' s');
+      ib.appendChild(bar(Date.now() - st.arrivedAt, INFO_MS));
+    }
+    if (st.toastOn) {
+      var t = el('div', { class: 'c06-toast', role: 'status', 'data-tip': 'Pop-up · disappears after 6 s; the counter and the row badge stay' }, [
+        PF.dot('attention', true),
+        el('span', {}, [el('b', {}, 'Abilitie timesheet'), ' asks you ' + NTS.questions.length + ' questions']),
+        PF.button('Open ›', { variant: 'primary', small: true, on: function (e) { e.stopPropagation(); openChat(); } }),
+        bar(Date.now() - st.arrivedAt, INFO_MS)
+      ]);
+      shell.overlay.appendChild(t);
+    }
+  }
+
+  function decorateRoutines() {
+    if (shell.pill) shell.pill.children[0].addEventListener('click', function () { render('home'); });
+    shell.setRunStatus(NTS.source.runId, st.dismissed ? 'success' : 'attention');
+    var card = shell.routineCards.get(NTS.source.runId);
+    if (card) {
+      card.setAttribute('data-tip', st.dismissed ? 'Abilitie timesheet · 15 Oct 09:00 · done (green)' : 'Abilitie timesheet · 15 Oct 09:00 · needs you (orange) — click to open its chat');
+      card.addEventListener('click', function () { if (pending()) openChat(); });
+    }
+  }
+
+  function decorateSession() {
+    shell.headerLeft.querySelector('.pf-back-btn').addEventListener('click', function () { render('home'); });
+    if (st.card && !st.dismissed) shell.chat.prepend(st.card.el);
+    st.lines.forEach(function (l) {
+      shell.chat.appendChild(l.sys ? el('div', { class: 'c06-sysline' }, l.text) : el('div', { class: 'pf-chat-line' + (l.who === 'you' ? ' pf-chat-line--you' : '') }, l.text));
+    });
+  }
+
+  /* ───────── actions ───────── */
+  function arrive() {
+    st.arrived = true; st.arrivedAt = Date.now();
+    st.infoOn = true; st.warnOn = true; st.toastOn = true; st.flash = true;
+    st.card = buildCard(function () { if (view === 'home') render('home'); });
+    st.card.onSend = function (answers) {
+      st.lines.push({ who: 'you', text: 'You answered: ' + answers + ' · I will send the email myself.' });
+      st.lines.push({ who: 'agent', text: 'Thanks — finalizing the PDF now. Remember to send the email.' });
+      if (view === 'session') render('session');
+    };
+    st.card.onDismiss = dismiss;
+    later(function () {
+      st.toastOn = false; st.infoOn = false;
+      if (view === 'session') replaceChip();     // never re-render under the user's typing
+      else render(view);
+    }, INFO_MS);
+    render(view);
+  }
+  function replaceChip() {
+    var old = shell.headerRight.querySelector('.c06-chip');
+    var nu = chip();
+    if (old && nu) old.replaceWith(nu);
+  }
+  function openChat() { st.toastOn = false; render('session'); }
+  function dismiss() {
+    if (!st.card || !st.card.canDismiss()) return;
+    st.dismissed = true;
+    st.lines.push({ sys: true, text: '— Notification dismissed · the email to Abilitie is still yours to send —' });
+    render(view);
+    PF.toast(shell.frame, 'Dismissed — remember to send the timesheet email yourself', { level: 'ok' });
+  }
+
+  /* ───────── step rail ───────── */
+  var cap = document.getElementById('caption');
+  var rail = PF.stepRail(document.getElementById('rail'), {
+    reset: function () { clearTimers(); st = fresh(); render('home'); },
+    steps: [
+      { label: 'Arrives', caption: '09:04 — the home row flashes and gets an orange badge, a 6-second pop-up appears, and the header counter shows “needs you 1”. The Reddit notice fades on its own; the crash notice waits for one click on ✕.',
+        run: function () { arrive(); } },
+      { label: 'Open', caption: 'One click on the pop-up (or the counter, or the row) opens the timesheet chat. The card waits on top of what the agent wrote; “Open ›” on the PDF opens it in Preview.',
+        run: function () { st.infoOn = false; openChat(); st.card.file.openButton.click(); } },   // by now the 6 s Reddit notice has faded
+      { label: 'Answer', caption: 'You answer the four questions in the card, tick the to-do, and press “Send answers”: your reply appears in the chat and the agent answers back.',
+        run: function () { st.card.qs.forEach(function (q) { q.setAnswer(q.question.sampleAnswer); }); st.card.todo.set(true); st.card.send(); } },
+      { label: 'Done', caption: 'Dismiss unlocks and you press it: the card, the row badge and the counter go to 0, and the routine turns green on the Routines board. Sending the email to Abilitie is still yours to do by hand.',
+        run: function () { dismiss(); render('routines'); PF.toast(shell.frame, 'Dismissed — remember to send the timesheet email yourself', { level: 'ok' }); } }
+    ],
+    onStep: function (n, step) { cap.textContent = step ? step.caption : 'Nothing has arrived yet — press a step.'; }
+  });
+  // ?step=N (or #step=N, since tools/shot.sh passes only a hash) opens the rail at that step
+  var qn = parseInt(new URLSearchParams(location.search).get('step') || (/step=(\d)/.exec(location.hash) || [])[1], 10);
+  rail.go(qn >= 1 && qn <= 4 ? qn : 1);
+
+  // #selftest: walks the manual 9-click path with real DOM clicks and reports any mismatch into window.__pfErrors
+  if (location.hash === '#selftest') {
+    var clicks = 0, fail = function (m) { window.__pfErrors.push('selftest: ' + m); };
+    function click(node, what) { if (!node) return fail('missing ' + what); clicks++; node.click(); }
+    click(shell.overlay.querySelector('.c06-toast .pf-btn'), 'pop-up Open');
+    if (view !== 'session' || !shell.chat.contains(st.card.el)) fail('Open did not show the card in the chat');
+    click(st.card.file.openButton, 'PDF Open');
+    if (!shell.frame.querySelector('.pf-toast-line')) fail('no “Opened” toast');
+    click(st.card.qs[0].el.querySelectorAll('.pf-q-controls button')[1], 'Q1 No');
+    click(st.card.qs[1].el.querySelectorAll('.pf-q-controls button')[1], 'Q2 No');
+    click(st.card.qs[2].el.querySelector('input[value="Only 10 Oct"]'), 'Q3 radio');
+    var inp = st.card.qs[3].el.querySelector('input'); click(inp, 'Q4 box');
+    inp.value = NTS.questions[3].sampleAnswer; inp.dispatchEvent(new Event('input'));
+    if (st.card.answered() !== 4) fail('answered ' + st.card.answered() + ' of 4');
+    if (!st.card.dismissBtn.disabled) fail('Dismiss enabled too early');
+    click(st.card.todo.el.querySelector('input'), 'to-do');
+    click(st.card.sendBtn, 'Send answers');
+    if (!/You answered/.test(shell.chat.textContent)) fail('answer line not in the chat');
+    if (st.card.dismissBtn.disabled) fail('Dismiss still locked');
+    click(st.card.dismissBtn, 'Dismiss');
+    if (!st.dismissed || shell.chat.contains(st.card.el)) fail('card still there');
+    if (shell.headerRight.querySelector('.c06-chip-n').textContent !== '0') fail('counter not 0');
+    if (clicks !== M.metrics.clicksToResolve) fail('counted ' + clicks + ' clicks, meta says ' + M.metrics.clicksToResolve);
+    cap.textContent = 'Self-test: ' + clicks + ' clicks · ' + (window.__pfErrors.length ? 'FAILED' : 'passed');
+  }
+
+  /* ───────── everywhere: three mini frames, each showing "1" ───────── */
+  (function () {
+    function miniChip() {
+      return el('span', { class: 'c06-chip', 'data-tip': '1 chat needs you · ' + CONV.title }, [el('span', { class: 'c06-chip-main' }, [PF.dot('attention', true), 'needs you', el('span', { class: 'c06-chip-n' }, '1')])]);
+    }
+    var h = PF.renderAppShell(document.getElementById('mini-home'), { view: 'home', width: 1280, height: 800 });
+    h.headerRight.insertBefore(miniChip(), h.headerRight.firstChild);
+    h.pinnedRows.get(CONV.id).classList.add('c06-row-pending');
+    h.setRowBadge(CONV.id, 'needs you · 4 questions', 'attention');
+    var r = PF.renderAppShell(document.getElementById('mini-routines'), { view: 'routines', width: 1280, height: 800 });
+    r.headerRight.insertBefore(miniChip(), r.headerRight.firstChild);
+    r.setRunStatus(NTS.source.runId, 'attention');
+    var s = PF.renderAppShell(document.getElementById('mini-session'), { view: 'session', width: 1280, height: 800, conversationId: CONV.id });
+    s.headerRight.insertBefore(miniChip(), s.headerRight.firstChild);
+    s.chat.prepend(buildCard().el);
+  })();
+
+  /* ───────── three kinds of notices ───────── */
+  (function () {
+    var grid = document.getElementById('levels-grid');
+    function level(key, demo, extra) {
+      var lv = L[key];
+      var box = el('div', { class: 'pf-frame c06-demo' }, demo);
+      grid.appendChild(el('div', { class: 'c06-level' }, [
+        el('p', { class: 'c06-level-name' }, [el('span', { style: 'color:' + lv.color }, lv.glyph), lv.label]),
+        box,
+        el('p', { class: 'c06-level-rule', 'data-tip': lv.label + ' · ' + lv.rule }, lv.rule),
+        extra || null
+      ]));
+      return box;
+    }
+    // info
+    var infoLine;
+    function infoDemo() {
+      var line = el('div', { class: 'c06-sysline', 'data-tip': NRD.title + ' · fades by itself after ' + (INFO_MS / 1000) + ' s' }, [
+        el('span', { style: 'color:#60a5fa' }, L.info.glyph), '— ', el('b', {}, NRD.title), ' · ' + NRD.body + ' —', bar(0, INFO_MS)
+      ]);
+      setTimeout(function () { line.classList.add('c06-gone'); }, INFO_MS);
+      return line;
+    }
+    infoLine = infoDemo();
+    var infoBox = level('info', [el('div', { class: 'c06-sysline' }, 'In the Reddit daily chat:'), infoLine],
+      el('button', { type: 'button', class: 'c06-again', on: { click: function () { var n = infoDemo(); infoBox.replaceChild(n, infoLine); infoLine = n; } } }, 'Play the 6-second fade again'));
+    // warn
+    var warnLine = el('div', { class: 'c06-sysline', 'data-tip': NCR.title + ' · ' + L.warn.rule }, [
+      el('span', { style: 'color:var(--pf-warn)' }, L.warn.glyph), '— ', el('b', {}, NCR.title), ' · ' + NCR.body + ' —'
+    ]);
+    var warnX = el('button', { type: 'button', class: 'c06-badge-x', style: 'color:var(--pf-warn)', 'aria-label': 'Close: ' + NCR.title }, '✕');
+    warnLine.appendChild(warnX);
+    var warnAgain = el('button', { type: 'button', class: 'c06-again', style: 'display:none' }, 'Show it again');
+    warnX.addEventListener('click', function () { warnLine.classList.add('c06-gone'); warnAgain.style.display = ''; });
+    warnAgain.addEventListener('click', function () { warnLine.classList.remove('c06-gone'); warnAgain.style.display = 'none'; });
+    level('warn', [el('div', { class: 'c06-sysline' }, 'In the Crash sweep chat:'), warnLine], warnAgain);
+    // action
+    var left = NTS.questions.length;
+    var lock = el('span', { class: 'c06-dismiss-wrap', 'data-tip': 'Dismiss is locked — still missing: ' + left + ' questions unanswered, answers not sent yet, to-do not ticked' }, PF.button('Dismiss', { variant: 'ok', small: true, disabled: true }));
+    level('action', [
+      el('div', { class: 'c06-card', style: 'gap:6px' }, [
+        el('div', { class: 'c06-card-head' }, [PF.dot('attention', true), el('span', { class: 'c06-card-kicker' }, 'Agent asks'), el('span', { class: 'c06-card-time' }, PF.formatTime(NTS.createdAt))]),
+        el('div', { class: 'c06-card-title' }, NTS.title),
+        el('div', { class: 'c06-actions' }, [PF.badge(left + ' questions · 1 to-do', 'attention'), el('span', { style: 'margin-left:auto' }), lock])
+      ])
+    ]);
+  })();
+
+  /* ───────── flow diagram ───────── */
+  (function () {
+    var svgEl = document.getElementById('flow-svg');
+    var nodes = [
+      { t: 'Arrives', s: '09:04', c: 0, tip: 'The notice arrives · 0 clicks', k: 'start' },
+      { t: 'Open chat', s: 'pop-up “Open ›”', c: 1, tip: 'Open the timesheet chat from the pop-up, counter or row · 1 click' },
+      { t: 'Open PDF', s: '“Open ›”', c: 1, tip: 'Open October timesheet (PDF) in Preview · 1 click' },
+      { t: 'Q1', s: '“No”', c: 1, tip: 'Q1 days off → No · 1 click' },
+      { t: 'Q2', s: '“No”', c: 1, tip: 'Q2 handed work to someone → No · 1 click' },
+      { t: 'Q3', s: '“Only 10 Oct”', c: 1, tip: 'Q3 vacation days → Only 10 Oct · 1 click' },
+      { t: 'Q4', s: 'click + type', c: 1, tip: 'Q4 changes → click into the box and type the note · 1 click' },
+      { t: 'To-do', s: 'tick', c: 1, tip: 'Tick “Send the timesheet email yourself” · 1 click' },
+      { t: 'Send answers', s: 'to the chat', c: 1, tip: 'Send answers to the agent · 1 click' },
+      { t: 'Dismiss', s: 'all gone', c: 1, tip: 'Dismiss — card, badge and counter go away · 1 click', k: 'end' }
+    ];
+    var NS = 'http://www.w3.org/2000/svg';
+    function s(tag, a, txt) { var n = document.createElementNS(NS, tag); for (var k in a) n.setAttribute(k, a[k]); if (txt != null) n.textContent = txt; svgEl.appendChild(n); return n; }
+    var defs = document.createElementNS(NS, 'defs');
+    defs.innerHTML = '<marker id="c06f" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0 L10 5 L0 10z" fill="var(--g-muted)"/></marker>';
+    svgEl.appendChild(defs);
+    var W = 124, H = 60, gap = 30, pos = [];
+    nodes.forEach(function (n, i) {
+      var row = i < 5 ? 0 : 1, col = row ? 9 - i : i;          // snake: left→right, then right→left
+      pos.push({ x: 8 + col * (W + gap), y: 20 + row * 150 });
+    });
+    var total = 0;
+    nodes.forEach(function (n, i) {
+      var p = pos[i];
+      if (i > 0) {
+        var q = pos[i - 1], mid;
+        if (q.y === p.y) {
+          var x1 = p.x > q.x ? q.x + W : q.x, x2 = p.x > q.x ? p.x : p.x + W;
+          s('path', { class: 'c06-arrow', d: 'M' + x1 + ' ' + (p.y + H / 2) + ' H' + (x2 + (p.x > q.x ? -2 : 2)), 'marker-end': 'url(#c06f)' });
+          mid = { x: (x1 + x2) / 2, y: p.y + H / 2 };
+        } else {
+          s('path', { class: 'c06-arrow', d: 'M' + (q.x + W / 2) + ' ' + (q.y + H) + ' V' + (p.y - 2), 'marker-end': 'url(#c06f)' });
+          mid = { x: q.x + W / 2 + 18, y: (q.y + H + p.y) / 2 };
+        }
+      }
+      total += n.c;
+      s('rect', { class: 'c06-node' + (n.k ? ' c06-node--' + n.k : ''), x: p.x, y: p.y, width: W, height: H, rx: 10, 'data-tip': n.tip + ' · running total ' + total + (total === 1 ? ' click' : ' clicks') });
+      s('text', { x: p.x + W / 2, y: p.y + 26, 'text-anchor': 'middle', 'pointer-events': 'none' }, n.t);
+      s('text', { class: 'c06-sub', x: p.x + W / 2, y: p.y + 44, 'text-anchor': 'middle', 'pointer-events': 'none' }, n.s);
+      if (n.c) {
+        var bx = mid ? mid.x : p.x, by = mid ? mid.y : p.y;
+        s('circle', { class: 'c06-click', cx: bx, cy: by - 14, r: 11, 'data-tip': '+' + n.c + ' click → ' + n.t });
+        s('text', { class: 'c06-click-t', x: bx, y: by - 10, 'text-anchor': 'middle', 'pointer-events': 'none' }, '+' + n.c);
+      }
+    });
+    if (total !== M.metrics.clicksToResolve) window.__pfErrors.push('flow total ' + total + ' ≠ meta ' + M.metrics.clicksToResolve);
+  })();
+
+  /* ───────── verdict ───────── */
+  M.pros.forEach(function (p) { document.getElementById('pros').appendChild(el('li', {}, p)); });
+  M.cons.forEach(function (p) { document.getElementById('cons').appendChild(el('li', {}, p)); });
+  PF.barChart(document.getElementById('chart'), {
+    title: 'This design in three numbers',
+    unit: '',
+    categories: [M.name],
+    series: [
+      { name: 'Clicks to finish', unit: 'clicks', color: 'var(--g-accent)', values: [M.metrics.clicksToResolve] },
+      { name: 'Screen space when nothing is waiting', unit: 'px', color: 'var(--g-info)', values: [M.metrics.idleSpacePx] },
+      { name: 'Interruption (1 = quiet badge … 5 = takes over the screen)', unit: 'of 5', color: '#14b8a6', values: [M.metrics.interruption] }
+    ]
+  });
+})();
+</script>
+</body>
+</html>

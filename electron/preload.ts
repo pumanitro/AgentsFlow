@@ -177,9 +177,6 @@ const api: AgentsFlowApi = {
 
   listNotifications: () => ipcRenderer.invoke(NOTIFICATIONS_IPC.list),   // 'notifications:list'
   markNotificationRead: (id) => ipcRenderer.invoke(NOTIFICATIONS_IPC.markRead, id),   // 'notifications:markRead'
-  answerNotification: (id, questionId, answer) => ipcRenderer.invoke(NOTIFICATIONS_IPC.answer, id, questionId, answer),   // 'notifications:answer'
-  setNotificationTodo: (id, todoId, done) => ipcRenderer.invoke(NOTIFICATIONS_IPC.setTodo, id, todoId, done),   // 'notifications:setTodo'
-  sendNotificationAnswers: (id) => ipcRenderer.invoke(NOTIFICATIONS_IPC.sendAnswers, id),   // 'notifications:sendAnswers'
   dismissNotification: (id) => ipcRenderer.invoke(NOTIFICATIONS_IPC.dismiss, id),   // 'notifications:dismiss'
   openNotificationFile: (id, filePath) => ipcRenderer.invoke(NOTIFICATIONS_IPC.openFile, id, filePath),   // 'notifications:openFile'
   onNotificationsUpdated: (cb) => {

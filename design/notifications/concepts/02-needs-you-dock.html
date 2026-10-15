@@ -1,0 +1,635 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Needs-you pane — Peers Flow notifications</title>
+<meta name="description" content="One of six notification designs for Peers Flow, shown on the Abilitie timesheet scenario.">
+<link rel="stylesheet" href="../shared/tokens.css">
+<link rel="stylesheet" href="../shared/app-shell.css">
+<link rel="stylesheet" href="../shared/gallery.css">
+<script src="../shared/scenario.js"></script>
+<script src="../shared/app-shell.js"></script>
+<script src="../shared/gallery.js"></script>
+<script src="./02-needs-you-dock.meta.js"></script>
+<style>
+/* ── hero ── */
+.c02-hero-grid{ display:grid; grid-template-columns:minmax(0,1fr) minmax(0,400px); gap:24px; align-items:center; }
+@media (max-width:860px){ .c02-hero-grid{ grid-template-columns:minmax(0,1fr); } }
+.c02-where{ width:100%; height:auto; display:block; }
+.c02-where text{ font-family:var(--pf-font); }
+.c02-now-grid{ display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); gap:16px; margin-top:16px; align-items:start; }
+@media (max-width:720px){ .c02-now-grid{ grid-template-columns:minmax(0,1fr); } }
+
+/* ── the pane (inside .pf-frame) ── */
+.pf-frame .c02-pane .pf-pane-header.c02-hot{ background:rgba(249,115,22,.14); }
+.pf-frame .c02-pane .pf-pane-title{ color:var(--pf-attention); }
+.pf-frame .c02-pane.c02-calm .pf-pane-title{ color:var(--pf-text); }
+.pf-frame .c02-pane .pf-pane-badge{ font-weight:700; }
+.pf-frame .c02-pane-sub{ font-size:10px; color:var(--pf-muted); }
+.pf-frame .c02-pane .pf-pane-header.c02-pulse{ animation:c02-pulse .9s ease-in-out 2; }
+@keyframes c02-pulse{ 0%,100%{ box-shadow:inset 0 0 0 0 rgba(249,115,22,0); background:rgba(249,115,22,.14); } 50%{ box-shadow:inset 0 0 0 2px var(--pf-attention); background:rgba(249,115,22,.38); } }
+.pf-frame .c02-list{ display:flex; flex-direction:column; }
+.pf-frame .c02-row{ position:relative; display:grid; grid-template-columns:16px minmax(0,1fr) auto; gap:8px; align-items:center; padding:6px 8px; border-left:2px solid transparent; font-size:12px; line-height:16px; cursor:pointer; overflow:hidden; }
+.pf-frame .c02-row + .c02-row{ border-top:1px solid rgba(58,65,89,.5); }
+.pf-frame .c02-row:hover, .pf-frame .c02-row:focus-visible{ background:var(--pf-panel2); outline:none; }
+.pf-frame .c02-row--action{ border-left-color:var(--pf-attention); }
+.pf-frame .c02-row--warn{ border-left-color:var(--pf-warn); cursor:default; }
+.pf-frame .c02-row--info{ border-left-color:var(--pf-info); cursor:default; }
+.pf-frame .c02-glyph{ display:flex; align-items:center; justify-content:center; font-size:13px; line-height:1; }
+.pf-frame .c02-rtitle{ font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.pf-frame .c02-rmeta{ font-size:11px; color:var(--pf-subtle); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.pf-frame .c02-right{ display:flex; align-items:center; gap:6px; color:var(--pf-muted); font-size:11px; font-family:var(--pf-mono); }
+.pf-frame .c02-x{ width:20px; height:20px; border-radius:4px; display:flex !important; align-items:center; justify-content:center; color:var(--pf-muted) !important; }
+.pf-frame .c02-x:hover{ background:var(--pf-panel) !important; color:var(--pf-text) !important; }
+.pf-frame .c02-bar{ position:absolute; left:0; bottom:0; height:2px; width:100%; background:var(--pf-info); transform-origin:left; }
+.pf-frame .c02-bar.c02-run{ animation:c02-shrink 6s linear forwards; }
+.pf-frame .c02-bar.c02-loop{ animation:c02-shrink 6s linear infinite; }
+@keyframes c02-shrink{ from{ transform:scaleX(1); } to{ transform:scaleX(0); } }
+.pf-frame .c02-empty{ padding:6px 10px; font-size:11px; color:var(--pf-subtle); }
+
+/* hidden must win over the kit's display rules */
+.pf-frame .c02-backdrop[hidden], .pf-frame .c02-panel[hidden], .pf-frame .c02-chip[hidden], .pf-frame .pf-btn[hidden]{ display:none !important; }
+
+/* ── routines chip ── */
+.pf-frame .c02-chip{ display:inline-flex !important; align-items:center; gap:6px; padding:3px 10px !important; border-radius:9999px; border:1px solid var(--pf-attention) !important; background:rgba(249,115,22,.16) !important; color:var(--pf-attention) !important; font-size:12px !important; font-weight:600; line-height:16px; white-space:nowrap; }
+.pf-frame .c02-chip:hover{ background:rgba(249,115,22,.28) !important; }
+
+/* ── action sheet ── */
+.pf-frame .c02-sheet{ max-width:720px; height:540px; max-height:none; }
+.pf-frame .c02-sheet-title{ display:flex; align-items:center; gap:8px; min-width:0; }
+.pf-frame .c02-sheet-title span.t{ white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.pf-frame .c02-sheet-body{ flex:1 1 auto; display:grid; grid-template-columns:190px minmax(0,1fr); min-height:0; }
+.pf-frame .c02-stepper{ border-right:1px solid var(--pf-border); padding:12px 8px; display:flex; flex-direction:column; gap:2px; background:rgba(34,38,54,.35); }
+.pf-frame .c02-sbtn{ display:flex !important; align-items:center; gap:8px; padding:6px 8px !important; border-radius:6px; font-size:13px !important; color:var(--pf-muted) !important; text-align:left; }
+.pf-frame .c02-sbtn:hover{ background:var(--pf-panel2) !important; color:var(--pf-text) !important; }
+.pf-frame .c02-sbtn[aria-current="step"]{ background:var(--pf-panel2) !important; color:var(--pf-text) !important; box-shadow:inset 2px 0 0 var(--pf-accent); }
+.pf-frame .c02-snum{ width:20px; height:20px; border-radius:50%; flex:0 0 auto; display:flex; align-items:center; justify-content:center; font-size:11px; font-family:var(--pf-mono); border:1px solid var(--pf-border); color:var(--pf-subtle); }
+.pf-frame .c02-sbtn[aria-current="step"] .c02-snum{ border-color:var(--pf-accent); color:var(--pf-accent); }
+.pf-frame .c02-sbtn.is-done .c02-snum{ background:rgba(74,222,128,.15); border-color:var(--pf-ok); color:var(--pf-ok); }
+.pf-frame .c02-stage{ display:flex; flex-direction:column; min-height:0; }
+.pf-frame .c02-panel{ flex:1 1 auto; overflow-y:auto; padding:18px 22px; display:flex; flex-direction:column; gap:12px; }
+.pf-frame .c02-eyebrow{ font-size:11px; line-height:16px; text-transform:uppercase; letter-spacing:.05em; color:var(--pf-muted); }
+.pf-frame .c02-lead{ font-size:14px; line-height:20px; color:var(--pf-text); }
+.pf-frame .c02-note{ font-size:12px; line-height:17px; color:var(--pf-subtle); }
+.pf-frame .c02-panel .pf-question{ border-top:0; padding:0; font-size:15px; line-height:21px; gap:10px; }
+.pf-frame .c02-panel .pf-q-controls{ flex-direction:column; align-items:flex-start; }
+.pf-frame .c02-panel .pf-q-controls:has(> .pf-btn){ flex-direction:row; }
+.pf-frame .c02-panel .pf-q-choice{ font-size:13px; padding:4px 8px 4px 4px; }
+.pf-frame .c02-panel .pf-input{ font-size:14px; padding:8px 10px; }
+.pf-frame .c02-foot{ flex:0 0 auto; display:flex; align-items:center; gap:8px; padding:10px 16px; border-top:1px solid var(--pf-border); }
+.pf-frame .c02-foot .c02-count{ margin-right:auto; font-size:11px; color:var(--pf-subtle); font-family:var(--pf-mono); }
+.pf-frame .c02-sum{ display:grid; grid-template-columns:auto minmax(0,1fr); gap:6px 12px; font-size:13px; line-height:18px; margin:0; }
+.pf-frame .c02-sum dt{ color:var(--pf-subtle); font-family:var(--pf-mono); font-size:11px; padding-top:1px; }
+.pf-frame .c02-sum dd{ margin:0; }
+.pf-frame .c02-sum .miss{ color:var(--pf-warn); }
+.pf-frame .c02-actions{ display:flex; flex-wrap:wrap; align-items:center; gap:8px; }
+.pf-frame .c02-sent{ font-size:12px; color:var(--pf-ok); }
+.pf-frame .c02-close{ width:24px; height:24px; border-radius:6px; display:flex !important; align-items:center; justify-content:center; color:var(--pf-muted) !important; }
+.pf-frame .c02-close:hover{ background:var(--pf-panel2) !important; color:var(--pf-text) !important; }
+
+/* ── levels section ── */
+.c02-swatch.pf-frame{ width:auto !important; height:auto !important; border-radius:10px; padding:10px; display:block; }
+.c02-swatch .pf-pane{ width:100%; }
+.c02-rule{ margin:10px 0 0; font-size:14px; }
+.c02-lvl-head{ display:flex; align-items:center; gap:8px; margin:0 0 8px; font-weight:600; }
+.c02-lvl-dot{ width:10px; height:10px; border-radius:50%; flex:none; }
+
+/* ── flow ── */
+#c02-flow svg{ display:block; width:100%; height:auto; }
+#c02-flow text{ font-family:var(--pf-font); }
+.c02-total{ margin:12px 0 0; font-size:15px; }
+.c02-total b{ color:var(--g-accent-text); }
+</style>
+</head>
+<body>
+<nav id="pf-nav" data-current="02"></nav>
+<main class="g-page">
+
+  <section class="g-hero">
+    <div class="c02-hero-grid">
+      <div>
+        <p class="g-eyebrow">Design 02 of 6</p>
+        <h1>Needs-you pane</h1>
+        <p class="g-lede" id="c02-tagline"></p>
+        <ul class="g-badges">
+          <li class="g-badge g-badge--accent" data-tip="A new panel at the top of the sidebar's bottom stack, above Accounts. On the Routines screen (no sidebar) a small orange chip sits in the toolbar instead."><b>Where it lives</b> <span id="c02-b-where"></span></li>
+          <li class="g-badge" data-tip="Clicking a notice opens a short sheet: the file first, then one question per page, then your to-do, then send and dismiss."><b>How you answer</b> <span id="c02-b-answer"></span></li>
+          <li class="g-badge" data-tip="Interruption score: 2 out of 5. The panel opens and pulses, but nothing covers what you are doing."><b>How it gets your attention</b> <span id="c02-b-attn"></span></li>
+        </ul>
+      </div>
+      <figure style="margin:0">
+        <svg class="c02-where" viewBox="0 0 400 250" role="img" aria-label="Where it lives: a panel at the top of the sidebar's bottom stack; the action sheet opens in the middle only when you click">
+          <rect x="1" y="1" width="398" height="248" rx="10" fill="#0f1115" stroke="#3a4159"/>
+          <rect x="1" y="1" width="398" height="22" rx="10" fill="#181b25"/><rect x="1" y="12" width="398" height="11" fill="#181b25"/>
+          <circle cx="12" cy="12" r="3" fill="#ff5f57"/><circle cx="22" cy="12" r="3" fill="#febc2e"/><circle cx="32" cy="12" r="3" fill="#28c840"/>
+          <text x="46" y="16" font-size="9" fill="#f1f3f8">Peers Flow</text>
+          <rect x="1" y="23" width="110" height="226" fill="#0f1115" stroke="#3a4159"/>
+          <text x="10" y="38" font-size="7" fill="#b2b8cc" letter-spacing=".6">TRACKED PEERS</text>
+          <rect x="8" y="44" width="96" height="14" rx="3" fill="#181b25" stroke="#3a4159"/>
+          <rect x="8" y="61" width="96" height="14" rx="3" fill="#181b25" stroke="#3a4159"/>
+          <rect x="8" y="78" width="96" height="14" rx="3" fill="#181b25" stroke="#3a4159"/>
+          <g data-tip="NEEDS YOU panel — the new home for notices. Top of the bottom stack, above Accounts. It opens by itself when something needs you.">
+            <rect x="6" y="112" width="100" height="52" rx="5" fill="rgba(249,115,22,.22)" stroke="#f97316" stroke-width="2"/>
+            <text x="13" y="125" font-size="8" font-weight="700" fill="#f97316" letter-spacing=".5">● NEEDS YOU   1</text>
+            <rect x="12" y="131" width="88" height="8" rx="2" fill="rgba(249,115,22,.35)"/>
+            <rect x="12" y="143" width="88" height="8" rx="2" fill="rgba(251,191,36,.3)"/>
+          </g>
+          <rect x="6" y="170" width="100" height="22" rx="5" fill="#181b25" stroke="#3a4159"/><text x="13" y="184" font-size="7" fill="#b2b8cc">ACCOUNTS</text>
+          <rect x="6" y="196" width="100" height="22" rx="5" fill="#181b25" stroke="#3a4159"/><text x="13" y="210" font-size="7" fill="#b2b8cc">USAGE</text>
+          <rect x="6" y="222" width="100" height="18" rx="5" fill="#181b25" stroke="#3a4159"/><text x="13" y="234" font-size="7" fill="#b2b8cc">GLOBAL NOTES</text>
+          <text x="124" y="40" font-size="8" fill="#b2b8cc">Pinned conversations</text>
+          <rect x="122" y="48" width="266" height="12" rx="2" fill="#181b25"/><rect x="122" y="64" width="266" height="12" rx="2" fill="#181b25"/><rect x="122" y="80" width="266" height="12" rx="2" fill="#181b25"/><rect x="122" y="96" width="266" height="12" rx="2" fill="#181b25"/>
+          <g data-tip="The action sheet: opens in the middle of the window only when you click a notice. Close it any time; it remembers your progress.">
+            <rect x="160" y="118" width="196" height="96" rx="8" fill="rgba(24,27,37,.9)" stroke="#ff7847" stroke-dasharray="4 3"/>
+            <line x1="214" y1="118" x2="214" y2="214" stroke="#3a4159"/>
+            <text x="168" y="134" font-size="7" fill="#b2b8cc">File</text><text x="168" y="146" font-size="7" fill="#b2b8cc">Q 1–4</text><text x="168" y="158" font-size="7" fill="#b2b8cc">To-do</text><text x="168" y="170" font-size="7" fill="#b2b8cc">Done</text>
+            <text x="222" y="140" font-size="8" fill="#f1f3f8">Action sheet</text>
+            <text x="222" y="152" font-size="7" fill="#b2b8cc">one step at a time,</text>
+            <text x="222" y="162" font-size="7" fill="#b2b8cc">only when you click</text>
+          </g>
+          <path d="M106 138 C 130 138, 140 150, 158 158" fill="none" stroke="#ff7847" stroke-width="1.5" marker-end="url(#c02-arr)"/>
+          <defs><marker id="c02-arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0L10 5L0 10z" fill="#ff7847"/></marker></defs>
+          <rect x="122" y="226" width="266" height="16" rx="4" fill="#181b25" stroke="#3a4159"/>
+        </svg>
+        <figcaption class="g-muted" style="font-size:13px;margin-top:6px">Orange = the new parts. Hover or tap them for what they are.</figcaption>
+      </figure>
+    </div>
+  </section>
+
+  <section id="pf-main-frame" class="g-section">
+    <h2>Try it: the timesheet morning</h2>
+    <p>It is Thursday 15 October, 09:04. Three routines just finished. Press the steps, or click inside the app yourself — every button works.</p>
+    <div class="g-step-rail" id="rail"></div>
+    <div class="pf-frame-wrap"><div id="frame"></div></div>
+    <p class="g-caption" id="caption"></p>
+    <div class="c02-now-grid">
+      <div>
+        <p class="g-mini-label">The Routines screen at the same moment</p>
+        <div class="pf-frame-wrap g-mini"><div id="frame-routines"></div></div>
+      </div>
+      <div class="g-callout g-callout--info">
+        <p><b>Two screens, one notice.</b> The Routines screen has no sidebar, so it gets a small orange chip in its toolbar instead of the panel. The chip and the timesheet card stay orange until you finish, then the card turns green.</p>
+        <p class="g-muted" style="font-size:14px">Clicking the chip takes you back to the home screen and opens the same sheet, right where you left off.</p>
+      </div>
+    </div>
+  </section>
+
+  <section class="g-section" id="everywhere">
+    <h2>You can see it from everywhere</h2>
+    <p>The same counter shows up on every main screen, so a waiting notice never hides.</p>
+    <div class="g-grid-3">
+      <div><p class="g-mini-label" data-tip="Home screen: the NEEDS YOU panel shows 1 notice waiting">Home · panel</p><div class="pf-frame-wrap g-mini"><div id="mini-home"></div></div></div>
+      <div><p class="g-mini-label" data-tip="Routines screen: no sidebar, so a chip in the toolbar shows 1 notice waiting">Routines · toolbar chip</p><div class="pf-frame-wrap g-mini"><div id="mini-routines"></div></div></div>
+      <div><p class="g-mini-label" data-tip="Inside a chat: the same panel, above Usage, shows 1 notice waiting">Inside a chat · panel</p><div class="pf-frame-wrap g-mini"><div id="mini-session"></div></div></div>
+    </div>
+  </section>
+
+  <section class="g-section" id="levels">
+    <h2>Three kinds of notices</h2>
+    <p>All three live in the same panel. Their colour says how much they need from you, and each one leaves in its own way.</p>
+    <div class="g-grid-3" id="c02-levels"></div>
+  </section>
+
+  <section class="g-section" id="flow">
+    <h2>Your path through it</h2>
+    <p>Every click it takes to finish the timesheet, from the moment it arrives to the moment it is gone. Typing does not count as a click. Hover or tap a step for details.</p>
+    <div id="c02-flow"></div>
+    <p class="c02-total" data-tip="Counted by walking the mock above by hand with the sample answers">Total: <b id="c02-total-n"></b> clicks from arrival to dismissed.</p>
+  </section>
+
+  <section class="g-section" id="verdict">
+    <h2>Good and not so good</h2>
+    <div class="g-grid-2">
+      <div class="g-card"><h3>Good</h3><ul class="g-pros" id="c02-pros"></ul></div>
+      <div class="g-card"><h3>Not so good</h3><ul class="g-cons" id="c02-cons"></ul></div>
+    </div>
+    <div id="c02-chart" style="margin-top:16px"></div>
+    <p class="g-muted" style="font-size:13px" data-tip="Screen space: the folded panel header (34 px) plus the gap under it (8 px), measured on the mock">Screen space is what the folded panel takes when nothing is waiting. Interruption is on a 1 (quiet) to 5 (takes over the screen) scale.</p>
+  </section>
+
+  <details class="g-details" id="build">
+    <summary>How it would be built (for the engineer)</summary>
+    <p>Shared story: a routine's chat calls a new <code>notify</code> tool; the main process stores the notice in <code>notifications.json</code>, pushes it to the window and raises a macOS banner for warn/action. Answers go back into the source chat as one message. Full details: <a href="../index.html#build">the shared plan</a>.</p>
+    <p>What this design adds:</p>
+    <ul>
+      <li><code>renderer/components/notifications/NeedsYouPane.tsx</code> — passed to <code>DockedPanes</code> as a new first slot. The height budget in <code>components/DockedPanes.tsx</code> treats it like Accounts: it can shrink, but its header is never dropped. Auto-expands and runs a 2× pulse (CSS keyframes) when a new <code>action</code> arrives; <code>info</code> rows unmount after 6 000 ms with a CSS scale bar; <code>warn</code> rows carry ✕ → <code>dismissNotification(id)</code>.</li>
+      <li><code>renderer/components/notifications/ActionSheet.tsx</code> — a HelpModal-style modal (720 px) mounted once in <code>_app.tsx</code>, opened by id. Left stepper: File → Q1…Qn → To-do → Done; yes/no and choice answers advance by themselves after 350 ms; text needs Next. Done step: “Send answers to the agent” (<code>sendNotificationAnswers</code>), then “Mark done &amp; dismiss”, disabled until <code>canDismiss(n) &amp;&amp; n.answersSentAt</code>; its tooltip lists what is missing.</li>
+      <li><code>renderer/components/routines/NeedsYouChip.tsx</code> — rendered at the left of the <code>RoutinesView</code> toolbar while any <code>action</code> is open; click → switch to Chat view and open the sheet.</li>
+      <li>Persistence beyond the shared shape: answers are saved as typed (<code>answerNotificationQuestion</code> per change, <code>answeredAt</code> each), file opens stamp <code>files[i].openedAt</code>, and the sheet's current step is <code>lastStep</code> on the notice, so closing and reopening resumes exactly.</li>
+      <li>The folded panel stays visible when the list is empty (“all clear”): 42 px of idle height. Hiding it entirely is a one-line option.</li>
+    </ul>
+  </details>
+</main>
+
+<script>
+(function () {
+  'use strict';
+  var S = window.PF_SCENARIO, META = window.PF_CONCEPTS['02'], el = PF.el;
+  var NT = S.notifications.filter(function (n) { return n.id === 'n-timesheet'; })[0];
+  var NR = S.notifications.filter(function (n) { return n.id === 'n-reddit'; })[0];
+  var NC = S.notifications.filter(function (n) { return n.id === 'n-crash'; })[0];
+  var LV = S.levels;
+  function peerName(id) { var p = S.peers.filter(function (x) { return x.id === id; })[0]; return p ? p.name : id; }
+  var CONV = S.conversations.filter(function (c) { return c.id === NT.source.conversationId; })[0];
+  var FILE = NT.files[0];
+  var INFO_S = NR.autoDismissMs / 1000;
+
+  /* ── hero text from meta ── */
+  document.getElementById('c02-tagline').textContent = META.tagline;
+  document.getElementById('c02-b-where').textContent = META.placement;
+  document.getElementById('c02-b-answer').textContent = META.answering;
+  document.getElementById('c02-b-attn').textContent = META.proactive;
+
+  /* ── row builders (pure; used by the panel and the levels section) ── */
+  function actionRow(n, onOpen) {
+    var prog = el('span', {}, '');
+    var row = el('div', { class: 'c02-row c02-row--action', role: 'button', tabindex: '0', 'aria-label': n.title + ' — open the step-by-step sheet' }, [
+      el('span', { class: 'c02-glyph', style: 'color:' + LV.action.color }, LV.action.glyph),
+      el('div', { style: 'min-width:0' }, [el('div', { class: 'c02-rtitle' }, n.title), el('div', { class: 'c02-rmeta' }, peerName(n.source.peerId) + ' · ' + PF.formatTime(n.createdAt) + ' · ' + LV.action.label)]),
+      el('span', { class: 'c02-right' }, [prog, PF.icon('chevron-right', 12)])
+    ]);
+    function go(e) { if (e.type === 'keydown' && e.key !== 'Enter' && e.key !== ' ') return; e.preventDefault(); if (onOpen) onOpen(); }
+    row.addEventListener('click', go); row.addEventListener('keydown', go);
+    return { el: row, progress: function (done, total) { prog.textContent = done + '/' + total; row.setAttribute('data-tip', n.title + '\n' + done + ' of ' + total + ' parts done · click to open the sheet'); } };
+  }
+  function warnRow(n, onClose) {
+    var x = el('button', { type: 'button', class: 'c02-x', 'aria-label': 'Close this notice', 'data-tip': 'Close (one click)', on: { click: function (e) { e.stopPropagation(); if (onClose) onClose(); } } }, PF.icon('x', 12));
+    return el('div', { class: 'c02-row c02-row--warn', 'data-tip': n.title + '\n' + n.body }, [
+      el('span', { class: 'c02-glyph', style: 'color:' + LV.warn.color }, LV.warn.glyph),
+      el('div', { style: 'min-width:0' }, [el('div', { class: 'c02-rtitle' }, n.title), el('div', { class: 'c02-rmeta' }, peerName(n.source.peerId) + ' · ' + PF.formatTime(n.createdAt) + ' · stopped early (exit 1)')]),
+      el('span', { class: 'c02-right' }, x)
+    ]);
+  }
+  function infoRow(n, loop) {
+    var secs = el('span', {}, INFO_S + ' s');
+    var bar = el('i', { class: 'c02-bar ' + (loop ? 'c02-loop' : 'c02-run') });
+    var row = el('div', { class: 'c02-row c02-row--info', 'data-tip': n.title + ' — ' + n.body + '\nLeaves by itself after ' + INFO_S + ' seconds' }, [
+      el('span', { class: 'c02-glyph', style: 'color:' + LV.info.color }, LV.info.glyph),
+      el('div', { style: 'min-width:0' }, [el('div', { class: 'c02-rtitle' }, n.title), el('div', { class: 'c02-rmeta' }, n.body)]),
+      el('span', { class: 'c02-right' }, secs), bar
+    ]);
+    return { el: row, secs: secs };
+  }
+
+  /* ── a "world": one notice state shared by every view attached to it ── */
+  function World(opts) {
+    opts = opts || {};
+    var w = { st: { arrived: false, fileOpened: false, todo: false, sent: false, dismissed: false, crashClosed: false, infoGone: !!opts.noInfo, infoAt: 0, step: 0 }, views: [], timers: [], adv: null };
+    w.later = function (fn, ms) { var t = setTimeout(fn, ms); w.timers.push(t); return t; };
+    w.kill = function () { w.timers.forEach(clearTimeout); w.timers = []; clearTimeout(w.adv); };
+    w.update = function () { w.views.forEach(function (v) { v(); }); };
+    w.qs = NT.questions.map(function (q, i) {
+      return PF.question(q, { onAnswer: function () {
+        w.update();
+        if (q.kind !== 'text' && w.sheet && w.st.step === i + 1) { clearTimeout(w.adv); w.adv = setTimeout(function () { w.sheet.go(i + 2); }, 350); }
+      } });
+    });
+    w.todo = PF.todo(NT.todos[0], { onToggle: function (v) { w.st.todo = v; w.update(); } });
+    w.parts = function () { return 1 + w.qs.length + 1; };
+    w.doneParts = function () { return (w.st.fileOpened ? 1 : 0) + w.qs.filter(function (q) { return q.answered(); }).length + (w.st.todo ? 1 : 0); };
+    w.missing = function () {
+      var out = [], left = w.qs.filter(function (q) { return !q.answered(); }).length;
+      if (left) out.push(left + (left === 1 ? ' question' : ' questions') + ' not answered');
+      if (!w.st.todo) out.push('the to-do is not ticked');
+      if (!w.st.sent) out.push('answers not sent to the agent yet');
+      return out;
+    };
+    w.pending = function () { return w.st.arrived && !w.st.dismissed ? 1 : 0; };
+    w.arrive = function () {
+      w.st.arrived = true; w.st.infoAt = Date.now();
+      if (!w.st.infoGone) {
+        for (var k = 1; k <= INFO_S; k++) w.later(w.update, k * 1000);
+        w.later(function () { w.st.infoGone = true; w.update(); }, NR.autoDismissMs);
+      }
+      w.update();
+      w.views.forEach(function (v) { if (v.onArrive) v.onArrive(opts.quiet); });
+    };
+    w.send = function () {
+      if (w.qs.some(function (q) { return !q.answered(); }) || w.st.sent) return;
+      w.st.sent = true; w.update();
+    };
+    w.dismiss = function () {
+      if (w.missing().length) return;
+      w.st.dismissed = true;
+      if (w.sheet) w.sheet.close();
+      w.update();
+      w.views.forEach(function (v) { if (v.onDismiss) v.onDismiss(); });
+    };
+    w.closeCrash = function () { w.st.crashClosed = true; w.update(); };
+    return w;
+  }
+
+  /* ── the NEEDS YOU panel in a shell's dock ── */
+  function attachPane(w, shell) {
+    var list = el('div', { class: 'c02-list' });
+    var pane = PF.pane({ title: 'Needs you', tick: 'var(--pf-attention)', badge: '0', badgeColor: 'var(--pf-attention)', open: false, body: list });
+    pane.classList.add('c02-pane');
+    var sub = el('span', { class: 'c02-pane-sub' }, '');
+    pane.header.insertBefore(sub, pane.header.querySelector('.pf-pane-badge'));
+    var badge = pane.header.querySelector('.pf-pane-badge');
+    shell.dock.insertBefore(pane, shell.dock.firstChild);
+    var aRow = actionRow(NT, function () { if (w.sheet) w.sheet.open(); });
+    var cRow = warnRow(NC, w.closeCrash);
+    var iRow = infoRow(NR);
+    var empty = el('div', { class: 'c02-empty' }, 'Nothing needs you.');
+    function isOpen() { return !pane.classList.contains('pf-pane--closed'); }
+    function view() {
+      var st = w.st;
+      var rows = [];
+      if (st.arrived && !st.dismissed) rows.push(aRow.el);
+      if (st.arrived && !st.crashClosed) rows.push(cRow);
+      if (st.arrived && !st.infoGone) rows.push(iRow.el);
+      if (!rows.length) rows.push(empty);
+      if (rows.some(function (r, i) { return list.children[i] !== r; }) || list.children.length !== rows.length) { list.innerHTML = ''; rows.forEach(function (r) { list.appendChild(r); }); }
+      aRow.progress(w.doneParts(), w.parts());
+      var left = Math.max(0, INFO_S - Math.floor((Date.now() - st.infoAt) / 1000));
+      iRow.secs.textContent = left + ' s';
+      iRow.el.setAttribute('data-tip', NR.title + ' — ' + NR.body + '\nLeaves by itself in ' + left + ' s');
+      var n = w.pending(), other = (st.arrived && !st.crashClosed ? 1 : 0) + (st.arrived && !st.infoGone ? 1 : 0);
+      badge.textContent = String(n);
+      badge.style.color = n ? 'var(--pf-attention)' : 'var(--pf-subtle)';
+      badge.setAttribute('data-tip', n + (n === 1 ? ' notice needs' : ' notices need') + ' you · ' + other + ' other ' + (other === 1 ? 'notice' : 'notices'));
+      sub.textContent = n ? '' : (other ? other + ' other' : 'all clear');
+      pane.header.classList.toggle('c02-hot', n > 0);
+      pane.classList.toggle('c02-calm', n === 0);
+    }
+    view.onArrive = function (quiet) {
+      if (!isOpen()) pane.header.click();
+      if (quiet) return;
+      pane.header.classList.remove('c02-pulse'); void pane.header.offsetWidth; pane.header.classList.add('c02-pulse');
+    };
+    view.onDismiss = function () { pane.header.classList.remove('c02-pulse'); if (isOpen() && w.st.crashClosed && w.st.infoGone) pane.header.click(); };
+    w.views.push(view); view();
+    return { pane: pane };
+  }
+
+  /* ── the Routines toolbar chip + the routine card colour ── */
+  function attachRoutines(w, shell, onChip) {
+    var chip = el('button', { type: 'button', class: 'c02-chip', on: { click: function () { if (onChip) onChip(); } } }, [PF.dot('attention', true), el('span', {}, '1 needs you')]);
+    shell.toolbar.prepend(chip);
+    function view() {
+      var n = w.pending();
+      chip.hidden = !n;
+      chip.lastChild.textContent = n + ' needs you';
+      chip.setAttribute('data-tip', n + ' notice needs you: ' + NT.title + '\nClick to go to the home screen and open it');
+      shell.setRunStatus(NT.source.runId, w.st.dismissed ? 'success' : 'attention');
+    }
+    w.views.push(view); view();
+  }
+
+  /* ── the action sheet (one per world, in the given shell's overlay) ── */
+  function attachSheet(w, shell) {
+    var STEPS = [{ key: 'file', label: 'File' }].concat(NT.questions.map(function (q, i) { return { key: q.id, label: 'Question ' + (i + 1) }; }), [{ key: 'todo', label: 'Your to-do' }, { key: 'done', label: 'Done' }]);
+    var stepBtns = STEPS.map(function (s, i) {
+      return el('button', { type: 'button', class: 'c02-sbtn', on: { click: function () { api.go(i); } } }, [el('span', { class: 'c02-snum' }, String(i + 1)), el('span', {}, s.label)]);
+    });
+    // panels
+    var chip = PF.fileChip(FILE);
+    chip.addEventListener('pf-open', function () { w.st.fileOpened = true; w.update(); });
+    var panels = [];
+    panels.push(el('div', { class: 'c02-panel' }, [
+      el('div', { class: 'c02-eyebrow' }, 'Step 1 of ' + STEPS.length + ' · The file'),
+      el('p', { class: 'c02-lead' }, NT.body),
+      chip,
+      el('p', { class: 'c02-note' }, 'It opens in Preview, your normal PDF viewer. Have a look, then press Next.')
+    ]));
+    w.qs.forEach(function (q, i) {
+      panels.push(el('div', { class: 'c02-panel' }, [
+        el('div', { class: 'c02-eyebrow' }, 'Step ' + (i + 2) + ' of ' + STEPS.length + ' · Question ' + (i + 1) + ' of ' + w.qs.length),
+        q.el,
+        el('p', { class: 'c02-note' }, q.question.kind === 'text' ? 'Type your answer, then press Next.' : 'Pick one — the sheet moves on by itself.')
+      ]));
+    });
+    panels.push(el('div', { class: 'c02-panel' }, [
+      el('div', { class: 'c02-eyebrow' }, 'Step ' + (STEPS.length - 1) + ' of ' + STEPS.length + ' · Yours to do by hand'),
+      el('p', { class: 'c02-lead' }, 'The agent cannot send email. Tick this once you have sent it.'),
+      w.todo.el
+    ]));
+    var sum = el('dl', { class: 'c02-sum' });
+    var sendBtn = PF.button('Send answers to the agent', { variant: 'primary', on: function () { w.send(); } });
+    var sentNote = el('span', { class: 'c02-sent' });
+    var dismissBtn = PF.button('Mark done & dismiss', { variant: 'ok', on: function () { w.dismiss(); } });
+    panels.push(el('div', { class: 'c02-panel' }, [
+      el('div', { class: 'c02-eyebrow' }, 'Step ' + STEPS.length + ' of ' + STEPS.length + ' · Check and finish'),
+      sum,
+      el('div', { class: 'c02-actions' }, [sendBtn, sentNote]),
+      el('div', { class: 'c02-actions' }, [dismissBtn]),
+      el('p', { class: 'c02-note' }, 'The notice goes away only when every question is answered, the to-do is ticked and the answers are sent.')
+    ]));
+    var stage = el('div', { class: 'c02-panel-host', style: 'flex:1 1 auto;display:flex;flex-direction:column;min-height:0' }, panels);
+    var backBtn = PF.button('‹ Back', { on: function () { api.go(w.st.step - 1); } });
+    var nextBtn = PF.button('Next ›', { variant: 'primary', on: function () { api.go(w.st.step + 1); } });
+    var count = el('span', { class: 'c02-count' });
+    var closeBtn = el('button', { type: 'button', class: 'c02-close', 'aria-label': 'Close the sheet (your progress is kept)', 'data-tip': 'Close — your progress is kept', on: { click: function () { api.close(); } } }, PF.icon('x', 14));
+    var modal = el('div', { class: 'pf-modal c02-sheet', role: 'dialog', 'aria-modal': 'true', tabindex: '-1', style: 'outline:none', 'aria-label': NT.title }, [
+      el('div', { class: 'pf-modal-header' }, [el('div', { class: 'c02-sheet-title' }, [PF.dot('attention', true), el('span', { class: 't' }, NT.title)]), el('div', { style: 'display:flex;align-items:center;gap:8px' }, [PF.badge(LV.action.label, 'attention'), closeBtn])]),
+      el('div', { class: 'c02-sheet-body' }, [el('nav', { class: 'c02-stepper', 'aria-label': 'Steps' }, stepBtns), el('div', { class: 'c02-stage' }, [stage, el('div', { class: 'c02-foot' }, [count, backBtn, nextBtn])])])
+    ]);
+    var back = el('div', { class: 'pf-modal-backdrop c02-backdrop', hidden: true, on: {
+      click: function (e) { if (e.target === back) api.close(); },
+      keydown: function (e) { if (e.key === 'Escape') { e.stopPropagation(); api.close(); } }
+    } }, modal);
+    shell.overlay.appendChild(back);
+
+    function isDone(i) {
+      var k = STEPS[i].key;
+      if (k === 'file') return w.st.fileOpened;
+      if (k === 'todo') return w.st.todo;
+      if (k === 'done') return w.st.dismissed;
+      return w.qs[i - 1].answered();
+    }
+    function view() {
+      var cur = w.st.step;
+      stepBtns.forEach(function (b, i) {
+        var d = isDone(i);
+        b.classList.toggle('is-done', d);
+        b.firstChild.textContent = d ? '✓' : String(i + 1);
+        if (i === cur) b.setAttribute('aria-current', 'step'); else b.removeAttribute('aria-current');
+        b.setAttribute('data-tip', STEPS[i].label + (d ? ' — done' : ' — not done yet'));
+      });
+      panels.forEach(function (p, i) { p.hidden = i !== cur; });
+      backBtn.disabled = cur === 0;
+      nextBtn.hidden = cur === STEPS.length - 1;
+      count.textContent = w.doneParts() + ' of ' + w.parts() + ' done';
+      // summary
+      sum.innerHTML = '';
+      sum.appendChild(el('dt', {}, 'File')); sum.appendChild(el('dd', { class: w.st.fileOpened ? '' : 'miss' }, w.st.fileOpened ? 'Opened ✓' : 'Not opened yet'));
+      w.qs.forEach(function (q, i) {
+        sum.appendChild(el('dt', {}, 'Q' + (i + 1)));
+        sum.appendChild(el('dd', { class: q.answered() ? '' : 'miss' }, q.answered() ? q.value() : 'Not answered'));
+      });
+      sum.appendChild(el('dt', {}, 'To-do')); sum.appendChild(el('dd', { class: w.st.todo ? '' : 'miss' }, w.st.todo ? 'Ticked ✓' : 'Not ticked'));
+      var qDone = w.qs.every(function (q) { return q.answered(); });
+      sendBtn.disabled = !qDone || w.st.sent;
+      sendBtn.title = w.st.sent ? 'Already sent' : qDone ? 'Post the four answers into the chat' : 'Answer every question first';
+      sendBtn.setAttribute('data-tip', sendBtn.title);
+      sentNote.textContent = w.st.sent ? '✓ Sent to the chat ‘' + CONV.title + '’' : '';
+      var miss = w.missing();
+      dismissBtn.disabled = miss.length > 0;
+      dismissBtn.title = miss.length ? 'Still missing: ' + miss.join(', ') : 'Everything is done — remove the notice';
+      dismissBtn.setAttribute('data-tip', dismissBtn.title);
+    }
+    w.views.push(view);
+    var api = {
+      open: function (i) { back.hidden = false; if (typeof i === 'number') w.st.step = i; w.update(); try { modal.focus({ preventScroll: true }); } catch (e) {} },
+      close: function () { back.hidden = true; clearTimeout(w.adv); },
+      go: function (i) { clearTimeout(w.adv); w.st.step = Math.max(0, Math.min(STEPS.length - 1, i)); w.update(); },
+      isOpen: function () { return !back.hidden; },
+      fileChip: chip, STEPS: STEPS
+    };
+    w.sheet = api;
+    view();
+    return api;
+  }
+
+  /* ── main frame + the routines frame beside it ── */
+  var homeHost = document.getElementById('frame'), rtHost = document.getElementById('frame-routines');
+  var cap = document.getElementById('caption');
+  var W = null, home = null, rt = null, paneRef = null;
+  function reset() {
+    if (W) W.kill();
+    home = PF.renderAppShell(homeHost, { view: 'home', width: 1280, height: 800 });
+    rt = PF.renderAppShell(rtHost, { view: 'routines', width: 1280, height: 800 });
+    W = World();
+    paneRef = attachPane(W, home);
+    attachSheet(W, home);
+    attachRoutines(W, rt, function () {
+      document.getElementById('pf-main-frame').scrollIntoView({ behavior: 'smooth', block: 'start' });
+      W.sheet.open();
+    });
+    PF.fitFrames();
+  }
+  var rail = PF.stepRail(document.getElementById('rail'), {
+    reset: reset,
+    steps: [
+      { label: 'Arrives', caption: 'At 09:04 the Needs-you panel unfolds by itself and its header pulses twice: one notice needs you, the crash warning waits for a click, and the Reddit note leaves on its own after 6 seconds.',
+        run: function () { W.arrive(); } },
+      { label: 'Open', caption: 'You click the timesheet row: a step-by-step sheet opens with the PDF first. “Open ›” shows it in Preview, and the step gets a green tick.',
+        run: function () { W.st.infoGone = true; W.update(); W.sheet.open(0); W.sheet.fileChip.openButton.click(); } },
+      { label: 'Answer', caption: 'One question per page — picking an answer moves you on by itself. You tick the email to-do and press “Send answers to the agent”; they go into the timesheet chat.',
+        run: function () {
+          W.qs.forEach(function (q) { q.setAnswer(q.question.sampleAnswer); });
+          W.todo.set(true);
+          W.sheet.go(W.sheet.STEPS.length - 1);
+          W.send();
+        } },
+      { label: 'Done', caption: '“Mark done & dismiss” unlocks once everything is done. The panel folds back to one quiet line and the routine card turns green. The email itself is still yours to send.',
+        run: function () {
+          W.closeCrash();
+          W.dismiss();
+          PF.toast(home.frame, 'Timesheet notice cleared — remember to send the email yourself', { level: 'ok', ms: 0 });
+          var px = paneRef.pane.offsetHeight + 8;
+          if (Math.abs(px - META.metrics.idleSpacePx) > 3) window.__pfErrors.push('idle panel height ' + px + ' px ≠ meta ' + META.metrics.idleSpacePx + ' px');
+        } }
+    ],
+    onStep: function (n, step) { cap.textContent = step ? step.caption : 'Before 09:04: the Needs-you panel is folded to one line. Press a step to start.'; }
+  });
+  // ?step=N (or #step=N, for file:// tools that cannot pass a query string) opens the rail at step N
+  var q = parseInt(new URLSearchParams(location.search).get('step') || (/step=(\d)/.exec(location.hash) || [])[1], 10);
+  rail.go(q >= 0 && q <= 4 ? q : 1);
+
+  /* ── "everywhere" minis: each shows the indicator with 1 ── */
+  function mini(id, view) {
+    var sh = PF.renderAppShell(document.getElementById(id), { view: view, width: 1280, height: 800, conversationId: 'c-timesheet' });
+    var w = World({ noInfo: true, quiet: true });
+    if (sh.dock) { attachPane(w, sh); attachSheet(w, sh); }
+    if (sh.toolbar) attachRoutines(w, sh, null);
+    w.arrive();
+  }
+  mini('mini-home', 'home'); mini('mini-routines', 'routines'); mini('mini-session', 'session');
+
+  /* ── levels ── */
+  var lvHost = document.getElementById('c02-levels');
+  var lvAction = actionRow(NT, null); lvAction.progress(0, 6);
+  [['info', infoRow(NR, true).el], ['warn', warnRow(NC, null)], ['action', lvAction.el]].forEach(function (pair) {
+    var lv = LV[pair[0]];
+    var row = pair[1];
+    var pane = PF.pane({ title: 'Needs you', tick: 'var(--pf-attention)', badge: pair[0] === 'action' ? '1' : '0', badgeColor: pair[0] === 'action' ? 'var(--pf-attention)' : 'var(--pf-subtle)', body: el('div', { class: 'c02-list' }, row) });
+    pane.classList.add('c02-pane');
+    if (pair[0] !== 'action') pane.classList.add('c02-calm');
+    lvHost.appendChild(el('div', { class: 'g-card' }, [
+      el('p', { class: 'c02-lvl-head' }, [el('span', { class: 'c02-lvl-dot', style: 'background:' + lv.color }), lv.glyph + ' ' + lv.label]),
+      el('div', { class: 'pf-frame c02-swatch' }, pane),
+      el('p', { class: 'c02-rule', 'data-tip': lv.label + ': ' + lv.rule }, lv.rule + (pair[0] === 'info' ? ' — the thin blue line shrinks over the 6 seconds.' : pair[0] === 'warn' ? ' — the ✕ at the right.' : ' — the finish button stays locked until then.'))
+    ]));
+  });
+
+  /* ── flow diagram ── */
+  var HOPS = [
+    { to: 'Open', clicks: 1, how: 'click the timesheet row in the panel' },
+    { to: 'File', clicks: 1, how: '“Open ›” on the PDF' },
+    { to: 'Q1', clicks: 1, how: 'Next' },
+    { to: 'Q2', clicks: 1, how: '“No” — moves on by itself' },
+    { to: 'Q3', clicks: 1, how: '“No” — moves on by itself' },
+    { to: 'Q4', clicks: 1, how: '“Only 10 Oct” — moves on by itself' },
+    { to: 'To-do', clicks: 2, how: 'click the answer box, type, Next' },
+    { to: 'Send answers', clicks: 2, how: 'tick the to-do, Next' },
+    { to: 'Dismiss', clicks: 2, how: '“Send answers to the agent”, then “Mark done & dismiss”' }
+  ];
+  var TOTAL = HOPS.reduce(function (a, h) { return a + h.clicks; }, 0);
+  if (TOTAL !== META.metrics.clicksToResolve) window.__pfErrors.push('flow total ' + TOTAL + ' ≠ meta ' + META.metrics.clicksToResolve);
+  document.getElementById('c02-total-n').textContent = TOTAL;
+  var flowHost = document.getElementById('c02-flow'), lastFW = 0;
+  function drawFlow() {
+    var Wd = Math.round(flowHost.clientWidth || 600);
+    if (Wd === lastFW) return; lastFW = Wd;
+    var nodes = [{ t: 'Arrives', s: '09:04 · 0 clicks' }].concat(HOPS.map(function (h) { return { t: h.to }; }));
+    var nw = Wd < 480 ? 92 : 112, nh = 44, gx = Wd < 480 ? 34 : 46, gy = 40;
+    var cols = Math.max(2, Math.min(nodes.length, Math.floor((Wd + gx) / (nw + gx))));
+    var rows = Math.ceil(nodes.length / cols);
+    var H = rows * nh + (rows - 1) * gy + 8;
+    var used = cols * nw + (cols - 1) * gx, off = Math.max(0, (Wd - used) / 2);
+    function pos(i) { var r = Math.floor(i / cols), c = i % cols; return { x: off + c * (nw + gx), y: 4 + r * (nh + gy) }; }
+    var svg = el('svg', { viewBox: '0 0 ' + Wd + ' ' + H, width: Wd, height: H, role: 'img', 'aria-label': 'The path from arrival to dismissed: ' + TOTAL + ' clicks' });
+    var run = 0;
+    nodes.forEach(function (n, i) {
+      var p = pos(i);
+      if (i > 0) {
+        var h = HOPS[i - 1], a = pos(i - 1), d, lx, ly;
+        run += h.clicks;
+        if (a.y === p.y) { d = 'M' + (a.x + nw) + ' ' + (a.y + nh / 2) + ' L' + (p.x - 3) + ' ' + (p.y + nh / 2); lx = a.x + nw + gx / 2; ly = a.y + nh / 2 - 6; }
+        else { d = 'M' + (a.x + nw / 2) + ' ' + (a.y + nh) + ' C' + (a.x + nw / 2) + ' ' + (a.y + nh + gy * 0.8) + ' ' + (p.x + nw / 2) + ' ' + (p.y - gy * 0.8) + ' ' + (p.x + nw / 2) + ' ' + (p.y - 3); lx = (a.x + p.x + nw) / 2; ly = a.y + nh + gy / 2 + 4; }
+        var tip = 'To ' + h.to + ': ' + h.clicks + (h.clicks === 1 ? ' click' : ' clicks') + ' (' + h.how + ')\nRunning total: ' + run + ' clicks';
+        svg.appendChild(el('path', { d: d, fill: 'none', style: 'stroke:var(--g-muted)', 'stroke-width': 1.5, 'marker-end': 'url(#c02-farr)' }));
+        var badge = el('g', { 'data-tip': tip }, [
+          el('rect', { x: lx - 11, y: ly - 10, width: 22, height: 16, rx: 8, style: 'fill:var(--g-accent)' }),
+          el('text', { x: lx, y: ly + 2, 'text-anchor': 'middle', 'font-size': 11, 'font-weight': 700, fill: '#1a0d06' }, String(h.clicks))
+        ]);
+        svg.appendChild(badge);
+      }
+      var last = i === nodes.length - 1;
+      var tipN = i === 0 ? 'Arrives at 09:04 — the panel opens by itself, 0 clicks' : n.t + ' — reached after ' + run + (run === 1 ? ' click' : ' clicks') + ' in total';
+      svg.appendChild(el('g', { 'data-tip': tipN }, [
+        el('rect', { x: p.x, y: p.y, width: nw, height: nh, rx: 8, style: 'fill:' + (last ? 'color-mix(in srgb, var(--g-ok) 18%, var(--g-surface))' : i === 0 ? 'color-mix(in srgb, var(--g-attention) 16%, var(--g-surface))' : 'var(--g-surface2)') + ';stroke:' + (last ? 'var(--g-ok)' : i === 0 ? 'var(--g-attention)' : 'var(--g-border)') }),
+        el('text', { x: p.x + nw / 2, y: p.y + (i === 0 || last ? 19 : 27), 'text-anchor': 'middle', 'font-size': 13, 'font-weight': 600, style: 'fill:var(--g-text)' }, n.t),
+        i === 0 ? el('text', { x: p.x + nw / 2, y: p.y + 34, 'text-anchor': 'middle', 'font-size': 10.5, style: 'fill:var(--g-muted)' }, '0 clicks') : null,
+        last ? el('text', { x: p.x + nw / 2, y: p.y + 34, 'text-anchor': 'middle', 'font-size': 10.5, style: 'fill:var(--g-muted)' }, 'total ' + TOTAL + ' clicks') : null
+      ]));
+    });
+    var defs = document.createElementNS('http://www.w3.org/2000/svg', 'defs'); var mk = document.createElementNS('http://www.w3.org/2000/svg', 'marker');
+    [['id', 'c02-farr'], ['viewBox', '0 0 10 10'], ['refX', '9'], ['refY', '5'], ['markerWidth', '7'], ['markerHeight', '7'], ['orient', 'auto']].forEach(function (a) { mk.setAttribute(a[0], a[1]); });
+    mk.appendChild(el('path', { d: 'M0 0L10 5L0 10z', style: 'fill:var(--g-muted)' }));
+    defs.appendChild(mk); svg.insertBefore(defs, svg.firstChild);
+    flowHost.innerHTML = ''; flowHost.appendChild(svg);
+  }
+  drawFlow();
+  if (window.ResizeObserver) new ResizeObserver(function () { requestAnimationFrame(drawFlow); }).observe(flowHost); else window.addEventListener('resize', drawFlow);
+
+  /* ── verdict ── */
+  META.pros.forEach(function (t) { document.getElementById('c02-pros').appendChild(el('li', {}, t)); });
+  META.cons.forEach(function (t) { document.getElementById('c02-cons').appendChild(el('li', {}, t)); });
+  PF.barChart(document.getElementById('c02-chart'), {
+    title: 'This design in three numbers',
+    categories: [META.name],
+    series: [
+      { name: 'Clicks to finish the timesheet', unit: 'clicks', color: 'var(--g-accent)', values: [META.metrics.clicksToResolve] },
+      { name: 'Screen space when nothing waits', unit: 'px', color: 'var(--g-info)', values: [META.metrics.idleSpacePx] },
+      { name: 'Interruption (1 quiet – 5 takes over)', unit: 'of 5', color: '#14b8a6', values: [META.metrics.interruption] }
+    ]
+  });
+  PF.fitFrames();
+})();
+</script>
+</body>
+</html>

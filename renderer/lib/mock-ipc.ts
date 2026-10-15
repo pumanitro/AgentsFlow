@@ -5,7 +5,7 @@ import { markRunDone } from '../../shared/routines';
 import { validateRoutineInput } from '../../shared/routine-schedule';
 import { buildMockRoutines } from './mock-routines';
 import type { NotificationsSnapshot, UserNotification } from '../../shared/notifications';
-import { NOTIFICATION_LIMITS, canDismiss, isOpen, missingForDismiss } from '../../shared/notifications';
+import { isOpen } from '../../shared/notifications';
 
 const STORE_KEY = 'agentsflow:mock:v3';
 
@@ -201,7 +201,8 @@ export function createMockApi(): AgentsFlowApi {
   const mutateNotification = (id: string, fn: (n: UserNotification, now: string) => UserNotification): UserNotification => {
     const cur = notifications.find((n) => n.id === id);
     if (!cur) throw new Error('notification not found');
-    const next = fn(cur, new Date().toISOString());
+    const now = new Date().toISOString();
+    const next = fn(cur, now);
     notifications = notifications.map((n) => (n.id === id ? next : n));
     fireNotifications();
     return next;
@@ -848,24 +849,7 @@ export function createMockApi(): AgentsFlowApi {
 
     listNotifications: async () => notificationsSnapshot(),
     markNotificationRead: async (id) => mutateNotification(id, (n, now) => (n.readAt ? n : { ...n, readAt: now })),
-    answerNotification: async (id, questionId, answer) => mutateNotification(id, (n, now) => mockApplyAnswer(n, questionId, answer, now)),
-    setNotificationTodo: async (id, todoId, done) => mutateNotification(id, (n, now) => {
-      if (!n.todos.some((t) => t.id === todoId)) throw new Error('to-do not found');
-      return { ...n, todos: n.todos.map((t) => (t.id === todoId ? { id: t.id, text: t.text, done, ...(done ? { doneAt: now } : {}) } : t)) };
-    }),
-    sendNotificationAnswers: async (id) => {
-      const cur = notifications.find((n) => n.id === id);
-      if (!cur) throw new Error('notification not found');
-      const unanswered = cur.questions.filter((q) => !q.answer).length;
-      if (unanswered) throw new Error(unanswered === 1 ? '1 question unanswered' : `${unanswered} questions unanswered`);
-      // No chat to deliver into here: pretend the open chat took it, after a beat.
-      await new Promise((r) => setTimeout(r, 600));
-      return mutateNotification(id, (n, now) => ({ ...n, answersDelivery: { at: now, ok: true, via: 'open-chat' } }));
-    },
-    dismissNotification: async (id) => mutateNotification(id, (n, now) => {
-      if (!canDismiss(n)) throw new Error(missingForDismiss(n).join(', '));
-      return { ...n, dismissedAt: now };
-    }),
+    dismissNotification: async (id) => mutateNotification(id, (n, now) => (n.dismissedAt ? n : { ...n, dismissedAt: now })),
     openNotificationFile: async () => ({ status: 'success' }),
     onNotificationsUpdated: (cb) => { listeners.notifications.add(cb); return () => listeners.notifications.delete(cb); },
     // Only a macOS banner click pushes this, and the browser demo has none.
@@ -1101,8 +1085,7 @@ export function createMockApi(): AgentsFlowApi {
   };
 }
 
-// ---- Notifications fixtures + the answer rule (a local copy of
-// electron/notifications-mcp.ts applyAnswer: the mock may not import electron/*) ----
+// ---- Notifications fixtures ----
 
 function buildMockNotifications(nowMs: number): UserNotification[] {
   const iso = (minsAgo: number) => new Date(nowMs - minsAgo * 60_000).toISOString();
@@ -1111,17 +1094,10 @@ function buildMockNotifications(nowMs: number): UserNotification[] {
       id: 'mock-notif-timesheet',
       level: 'action',
       title: 'Abilitie timesheet (1–15 Oct) is ready — needs you',
-      body: 'I prepared the timesheet PDF from this month\'s commits. Check it, answer the questions below, then send the email to Abilitie yourself.',
+      body: 'I prepared the timesheet PDF from this month\'s commits. I asked 4 questions in the chat — answer them there, then send the email to Abilitie yourself.',
       source: { kind: 'routine', conversationTitle: 'Abilitie timesheet · 15 Oct 09:00', peerName: 'LISA', routineName: 'Abilitie timesheet' },
       createdAt: iso(4),
       files: [{ path: '/Users/demo/Desktop/LISA/timesheets/2026-10-abilitie-timesheet.pdf', label: 'October timesheet (PDF)' }],
-      questions: [
-        { id: 'dayoffs', text: 'Any days off between 1 and 15 October that I should take out?', kind: 'yesno', hint: 'I found none in your calendar.' },
-        { id: 'delegated', text: 'Did you hand any of this work to someone else?', kind: 'yesno' },
-        { id: 'vacation', text: 'I marked 3 Oct and 10 Oct as vacation — is that right?', kind: 'choice', choices: ['Yes, both', 'Only 3 Oct', 'Only 10 Oct', 'Neither'] },
-        { id: 'edits', text: 'Any changes to descriptions or hours before I finalize?', kind: 'text' },
-      ],
-      todos: [{ id: 't1', text: 'Send the timesheet email to Abilitie yourself — the agent never sends email', done: false }],
     },
     {
       id: 'mock-notif-crash-sweep',
@@ -1131,26 +1107,7 @@ function buildMockNotifications(nowMs: number): UserNotification[] {
       source: { kind: 'routine', routineName: 'Crash sweep', peerName: 'abi', auto: true },
       createdAt: iso(95),
       files: [],
-      questions: [],
-      todos: [],
     },
   ];
 }
 
-function mockApplyAnswer(n: UserNotification, questionId: string, answer: string, now: string): UserNotification {
-  const q = n.questions.find((x) => x.id === questionId);
-  if (!q) throw new Error('question not found');
-  let value: string;
-  if (q.kind === 'yesno') {
-    value = String(answer).trim().toLowerCase();
-    if (value !== 'yes' && value !== 'no') throw new Error('answer "yes" or "no"');
-  } else if (q.kind === 'choice') {
-    value = String(answer);
-    if (!(q.choices ?? []).includes(value)) throw new Error('pick one of the offered choices');
-  } else {
-    value = String(answer).trim();
-    if (!value) throw new Error('the answer is empty');
-    if (value.length > NOTIFICATION_LIMITS.answer) throw new Error(`the answer is longer than ${NOTIFICATION_LIMITS.answer} characters`);
-  }
-  return { ...n, questions: n.questions.map((x) => (x.id === questionId ? { ...x, answer: value, answeredAt: now } : x)) };
-}

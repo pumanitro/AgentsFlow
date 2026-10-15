@@ -1,0 +1,557 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bell + drawer — Peers Flow notifications</title>
+<meta name="description" content="One of six notification designs for Peers Flow, shown on the Abilitie timesheet scenario.">
+<link rel="stylesheet" href="../shared/tokens.css">
+<link rel="stylesheet" href="../shared/app-shell.css">
+<link rel="stylesheet" href="../shared/gallery.css">
+<script src="../shared/scenario.js"></script>
+<script src="../shared/app-shell.js"></script>
+<script src="../shared/gallery.js"></script>
+<script src="./01-bell-drawer.meta.js"></script>
+<style>
+/* ── the bell (same chrome as the ☰ menu button) ── */
+.pf-frame .c01-bell{ position:relative; flex:0 0 auto; width:24px; height:24px; border-radius:6px; border:1px solid var(--pf-border); background:var(--pf-panel); color:var(--pf-muted); display:flex; align-items:center; justify-content:center; }
+.pf-frame .c01-bell:hover{ border-color:var(--pf-accent); color:var(--pf-accent); background:var(--pf-panel2); }
+.pf-frame .c01-bell[aria-expanded="true"]{ border-color:var(--pf-accent); color:var(--pf-accent); background:var(--pf-panel2); }
+.c01-bell-count{ position:absolute; top:-6px; right:-7px; min-width:15px; height:15px; padding:0 4px; border-radius:999px; background:var(--pf-attention); color:var(--pf-bg); font-size:10px; font-weight:700; line-height:15px; text-align:center; box-shadow:0 0 0 2px var(--pf-bg); }
+.c01-bell-warn{ position:absolute; bottom:-3px; right:-3px; width:7px; height:7px; border-radius:50%; background:var(--pf-warn); box-shadow:0 0 0 2px var(--pf-bg); }
+.c01-bell--ring{ box-shadow:0 0 0 3px rgba(249,115,22,.55), 0 0 18px rgba(249,115,22,.6); }
+
+/* ── drawer ── */
+.c01-drawer{ position:absolute; right:0; bottom:0; width:400px; background:var(--pf-panel); border-left:1px solid var(--pf-border); box-shadow:-20px 0 40px -12px rgba(0,0,0,.6); display:flex; flex-direction:column; transform:translateX(102%); transition:transform .25s ease; z-index:1; }
+.c01-drawer--open{ transform:none; }
+.c01-dhead{ flex:0 0 auto; display:flex; align-items:center; gap:8px; padding:10px 12px; border-bottom:1px solid var(--pf-border); background:rgba(34,38,54,.35); }
+.c01-dhead b{ font-size:13px; font-weight:600; }
+.c01-dhead .c01-dcount{ font-size:12px; color:var(--pf-attention); }
+.c01-dhead .c01-dcount--zero{ color:var(--pf-ok); }
+.c01-x{ margin-left:auto; width:24px; height:24px; border-radius:6px; display:flex; align-items:center; justify-content:center; color:var(--pf-muted); }
+.c01-x:hover{ background:var(--pf-panel2); color:var(--pf-text); }
+.c01-dbody{ flex:1 1 auto; min-height:0; overflow-y:auto; padding:10px 12px 14px; display:flex; flex-direction:column; gap:10px; }
+.c01-sec{ display:flex; align-items:center; justify-content:space-between; }
+.c01-sec .pf-link-btn{ text-transform:none; }
+.c01-empty{ font-size:12px; color:var(--pf-subtle); padding:8px 10px; border:1px dashed var(--pf-border); border-radius:6px; display:flex; align-items:center; gap:6px; }
+.c01-empty--ok{ color:var(--pf-ok); border-color:rgba(74,222,128,.45); }
+
+/* ── the "needs you" card ── */
+.c01-card{ border:1px solid rgba(249,115,22,.55); border-left:3px solid var(--pf-attention); border-radius:6px; background:rgba(34,38,54,.45); }
+.c01-card-head{ display:flex; gap:8px; align-items:flex-start; width:100%; padding:9px 10px !important; text-align:left; }
+.c01-card-head .pf-dot{ margin-top:6px; }
+.c01-card-title{ font-size:13px; font-weight:600; line-height:18px; }
+.c01-card-time{ margin-left:auto; flex:0 0 auto; font-size:11px; color:var(--pf-subtle); font-family:var(--pf-mono); }
+.c01-card-caret{ flex:0 0 auto; color:var(--pf-muted); display:flex; margin-top:2px; transition:transform .15s; }
+.c01-card--open .c01-card-caret{ transform:rotate(90deg); }
+.c01-card-meta{ padding:0 10px 0 26px; font-size:11px; color:var(--pf-subtle); display:flex; gap:6px; align-items:center; flex-wrap:wrap; }
+.c01-card-meta .pf-link-btn{ text-decoration:none; }
+.c01-card-body{ padding:6px 10px 10px 26px; font-size:12px; line-height:17px; color:var(--pf-muted); }
+.c01-card-cta{ padding:0 10px 10px 26px; }
+.c01-card-more{ display:none; padding:0 10px 10px; }
+.c01-card--open .c01-card-more{ display:block; }
+.c01-card--open .c01-card-cta{ display:none; }
+.c01-card-foot{ margin-top:10px; padding-top:10px; border-top:1px solid rgba(58,65,89,.6); display:flex; align-items:center; gap:8px; }
+.c01-card-foot .c01-why{ font-size:11px; color:var(--pf-subtle); line-height:15px; }
+.c01-card-foot .c01-why--ok{ color:var(--pf-ok); }
+
+/* ── "Earlier" rows ── */
+.c01-row{ display:flex; gap:8px; align-items:flex-start; padding:7px 8px; border-radius:6px; border:1px solid rgba(58,65,89,.7); background:rgba(15,17,21,.4); }
+.c01-row-glyph{ flex:0 0 auto; display:flex; margin-top:2px; }
+.c01-row-text{ flex:1 1 auto; min-width:0; }
+.c01-row-title{ font-size:12px; font-weight:600; line-height:16px; }
+.c01-row-body{ font-size:11px; line-height:15px; color:var(--pf-subtle); }
+.c01-row-time{ flex:0 0 auto; font-size:10px; color:var(--pf-subtle); font-family:var(--pf-mono); margin-top:2px; }
+.c01-row .c01-x{ margin-left:0; width:20px; height:20px; }
+
+/* ── mini toasts under the bell ── */
+.c01-stack.c01-stack--docked{ top:540px; }   /* lower part of the screen, left of the panel, clear of today's cards */
+.c01-stack{ position:absolute; top:52px; bottom:auto; width:300px; display:flex; flex-direction:column; gap:6px; z-index:3; transition:right .25s ease; }
+.c01-mini{ position:relative; overflow:hidden; display:flex; gap:8px; align-items:flex-start; padding:8px 10px 10px; border-radius:6px; border:1px solid var(--pf-border); background:var(--pf-panel2); box-shadow:0 10px 15px -3px rgba(0,0,0,.45); transition:opacity .3s; }
+.c01-mini--info{ border-color:rgba(59,130,246,.6); }
+.c01-mini--warn{ border-color:rgba(251,191,36,.6); }
+.c01-mini--out{ opacity:0; }
+.c01-mini-bar{ position:absolute; left:0; bottom:0; height:3px; width:100%; transform-origin:left; animation:c01-shrink 6s linear forwards; }
+.c01-mini--info .c01-mini-bar{ background:var(--pf-info); }
+.c01-mini--warn .c01-mini-bar{ background:var(--pf-warn); }
+@keyframes c01-shrink{ from{ transform:scaleX(1); } to{ transform:scaleX(0); } }
+.c01-mini .c01-x{ width:18px; height:18px; margin-left:auto; }
+.c01-secs{ white-space:nowrap; flex:0 0 auto; font-family:var(--pf-mono); font-size:10px; color:var(--pf-subtle); }
+
+/* ── page-level pieces (gallery chrome, light/dark) ── */
+.c01-where{ display:block; width:100%; max-width:520px; height:auto; margin-top:8px; }
+.c01-where text{ font:12px var(--pf-font); fill:var(--g-text); }
+.c01-flow{ width:100%; }
+.c01-flow svg{ display:block; width:100%; height:auto; }
+.c01-flow text{ font-family:var(--pf-font); fill:var(--g-text); }
+.c01-flow .c01-node{ fill:var(--g-surface2); stroke:var(--g-border); }
+.c01-flow .c01-node--hot{ stroke:var(--g-accent); }
+.c01-flow .c01-clk{ fill:var(--g-accent); }
+.c01-lv{ width:auto !important; height:auto !important; padding:14px; border-radius:8px; display:block; }
+.c01-lv .c01-mini{ box-shadow:none; }
+.c01-lv-bar{ animation:c01-shrink 6s linear infinite; }
+.c01-rule{ font-size:14px; margin:10px 0 0; }
+.c01-rule b{ display:block; font-size:12px; text-transform:uppercase; letter-spacing:.06em; color:var(--g-muted); }
+.c01-cols{ display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:16px; margin-bottom:16px; }
+@media (max-width:720px){ .c01-cols{ grid-template-columns:minmax(0,1fr); } }
+.c01-cols ul{ margin:0; padding-left:20px; }
+.c01-cols li{ margin:0 0 6px; }
+@media (prefers-reduced-motion: reduce){ .c01-drawer, .c01-stack{ transition:none; } .c01-lv-bar{ animation:none; transform:scaleX(.6); } }
+</style>
+</head>
+<body>
+<nav id="pf-nav" data-current="01"></nav>
+<main class="g-page">
+  <section class="g-hero">
+    <p class="g-eyebrow">Design 01 of 6</p>
+    <h1>Bell + drawer</h1>
+    <p class="g-lede">A bell sits at the top of every screen. When something needs you, a panel slides in from the right over whatever you are doing, and you answer the agent's questions right there.</p>
+    <ul class="g-badges">
+      <li class="g-badge g-badge--accent"><b>Where it lives</b> A bell at the top of every screen, plus a side panel</li>
+      <li class="g-badge"><b>How you answer</b> Inside the side panel, without leaving your screen</li>
+      <li class="g-badge"><b>How it gets your attention</b> The panel opens by itself; small pop-ups for the rest</li>
+    </ul>
+    <svg class="c01-where" viewBox="0 0 520 250" role="img" aria-label="Where it lives: a bell in the top bar and a panel along the right edge of the app">
+      <rect x="1" y="1" width="518" height="248" rx="10" fill="#0f1115" stroke="#3a4159" data-tip="The Peers Flow window"/>
+      <rect x="1" y="1" width="518" height="30" rx="10" fill="#181b25" stroke="#3a4159" data-tip="The top bar — it is on every screen"/>
+      <circle cx="18" cy="16" r="4" fill="#ff5f57"/><circle cx="31" cy="16" r="4" fill="#febc2e"/><circle cx="44" cy="16" r="4" fill="#28c840"/>
+      <text x="62" y="20" style="fill:#f1f3f8">Peers Flow</text>
+      <rect x="378" y="8" width="16" height="16" rx="4" fill="#222636" stroke="#ff7847" stroke-width="2" data-tip="The bell: 24 × 24 px, left of the Chat | Routines switch"/>
+      <circle cx="394" cy="9" r="6" fill="#f97316" data-tip="Orange number = how many notices need you (here: 1)"/>
+      <text x="394" y="12" text-anchor="middle" style="fill:#0f1115;font-size:9px;font-weight:700">1</text>
+      <rect x="402" y="9" width="70" height="14" rx="4" fill="#222636" stroke="#3a4159"/>
+      <rect x="12" y="42" width="90" height="196" rx="6" fill="#181b25" stroke="#3a4159" opacity=".8"/>
+      <rect x="112" y="42" width="200" height="196" rx="6" fill="#181b25" stroke="#3a4159" opacity=".5"/>
+      <text x="212" y="145" text-anchor="middle" style="fill:#8c93a8">your screen keeps working</text>
+      <rect x="322" y="32" width="197" height="217" fill="rgba(249,115,22,.16)" stroke="#f97316" stroke-width="2" data-tip="The side panel: 400 px wide, slides over the right side, the screen behind stays usable"/>
+      <text x="420" y="58" text-anchor="middle" style="fill:#fb923c;font-weight:600">Side panel</text>
+      <rect x="334" y="70" width="173" height="80" rx="5" fill="#222636" stroke="#f97316"/>
+      <text x="344" y="90" style="fill:#f1f3f8;font-size:11px">Needs you · timesheet</text>
+      <rect x="344" y="100" width="150" height="8" rx="3" fill="#3a4159"/><rect x="344" y="114" width="120" height="8" rx="3" fill="#3a4159"/><rect x="344" y="130" width="60" height="12" rx="3" fill="#ff7847"/>
+      <text x="344" y="172" style="fill:#b2b8cc;font-size:11px">Earlier</text>
+      <rect x="334" y="180" width="173" height="22" rx="4" fill="#181b25" stroke="#3a4159"/>
+      <rect x="334" y="208" width="173" height="22" rx="4" fill="#181b25" stroke="#3a4159"/>
+    </svg>
+  </section>
+
+  <section id="pf-main-frame" class="g-section">
+    <h2>Try it: the timesheet morning</h2>
+    <p>Press the steps one by one, or click around inside the picture — every button works. The picture is the real Routines screen, shrunk to fit.</p>
+    <div class="g-step-rail" id="rail"></div>
+    <div class="pf-frame-wrap"><div id="frame"></div></div>
+    <p class="g-caption" id="caption"></p>
+  </section>
+
+  <section class="g-section" id="everywhere">
+    <h2>You can see it from everywhere</h2>
+    <p>The bell with its orange "1" is in the top bar of the home screen, the routines screen and inside a chat, so you never have to go looking.</p>
+    <div class="g-grid-3">
+      <div><p class="g-mini-label">Home</p><div class="pf-frame-wrap g-mini"><div id="mini-home"></div></div></div>
+      <div><p class="g-mini-label">Routines</p><div class="pf-frame-wrap g-mini"><div id="mini-routines"></div></div></div>
+      <div><p class="g-mini-label">Inside a chat</p><div class="pf-frame-wrap g-mini"><div id="mini-session"></div></div></div>
+    </div>
+  </section>
+
+  <section class="g-section" id="levels">
+    <h2>Three kinds of notices</h2>
+    <p>Each kind looks different and goes away in its own way, so you can tell at a glance whether you need to do anything.</p>
+    <div class="g-grid-3">
+      <div>
+        <div class="pf-frame c01-lv">
+          <div class="c01-mini c01-mini--info">
+            <span style="color:var(--pf-info);display:flex" id="lv-info-g"></span>
+            <div class="c01-row-text"><div class="c01-row-title" id="lv-info-t"></div><div class="c01-row-body" id="lv-info-b"></div></div>
+            <span class="c01-secs" data-tip="Fades by itself after 6 seconds">6 s</span>
+            <span class="c01-mini-bar c01-lv-bar" data-tip="Countdown bar: empties over 6 seconds, then the notice moves to the bell's list"></span>
+          </div>
+        </div>
+        <p class="c01-rule" data-tip="Blue · fades after 6 seconds"><b id="lv-info-l"></b><span id="lv-info-r"></span>. Afterwards it waits quietly in the bell's "Earlier" list.</p>
+      </div>
+      <div>
+        <div class="pf-frame c01-lv">
+          <div class="c01-mini c01-mini--warn">
+            <span style="color:var(--pf-warn);display:flex" id="lv-warn-g"></span>
+            <div class="c01-row-text"><div class="c01-row-title" id="lv-warn-t"></div><div class="c01-row-body" id="lv-warn-b"></div></div>
+            <button type="button" class="c01-x" aria-label="Close" data-tip="One click closes it for good" id="lv-warn-x"></button>
+          </div>
+        </div>
+        <p class="c01-rule" data-tip="Yellow · stays until 1 click on ✕"><b id="lv-warn-l"></b><span id="lv-warn-r"></span>. It also leaves a small yellow dot on the bell.</p>
+      </div>
+      <div>
+        <div class="pf-frame c01-lv" id="lv-action"></div>
+        <p class="c01-rule" data-tip="Orange · opens the side panel by itself; stays until 4 questions answered and 1 to-do ticked"><b id="lv-action-l"></b><span id="lv-action-r"></span>. The side panel opens by itself for this one.</p>
+      </div>
+    </div>
+  </section>
+
+  <section class="g-section" id="flow">
+    <h2>Your path through it</h2>
+    <p>Every click from the moment the timesheet notice arrives until it is gone. The panel opens by itself, so the first step costs nothing.</p>
+    <div class="c01-flow" id="flowchart"></div>
+  </section>
+
+  <section class="g-section" id="verdict">
+    <h2>Good and not so good</h2>
+    <div class="c01-cols">
+      <div><h3>Good</h3><ul class="g-pros" id="pros"></ul></div>
+      <div><h3>Not so good</h3><ul class="g-cons" id="cons"></ul></div>
+    </div>
+    <div id="chart"></div>
+    <div class="g-callout g-callout--info"><p>Clicks were counted by hand on the picture above, answering the four questions without the "Fill sample answers" shortcut. Typing the one written answer counts as a single click into the box. "Interruption" is a 1–5 judgement: 1 is a quiet number, 5 takes over the screen.</p></div>
+  </section>
+
+  <details class="g-details" id="build">
+    <summary>How it would be built (for the engineer)</summary>
+    <p>All six designs share one back end: the agent calls a new <code>notify</code> tool, the main process stores the notice in <code>notifications.json</code> and pushes it to the window, and answers go back into the source chat as a message. The full shared story is on the <a href="../index.html#build">overview page</a>.</p>
+    <p>What this design adds on top:</p>
+    <ul>
+      <li><code>renderer/components/notifications/NotificationBell.tsx</code> — rendered in three headers: <code>pages/index.tsx</code> right cluster (left of the Chat | Routines pill), <code>pages/session.tsx</code> before <code>⑂ Fork</code>, and <code>pages/preview.tsx</code>. Orange count = open <code>action</code> notices; a yellow dot = any open <code>warn</code>.</li>
+      <li><code>NotificationDrawer.tsx</code> mounted once in <code>pages/_app.tsx</code>: <code>position:fixed</code>, right, below the header, <code>z-60</code>, 400 px, no backdrop (the page behind stays clickable), Esc and ✕ close it. Sections "Needs you" (expanded <code>NotificationCard</code>s with file chip, questions, to-dos, Send, Dismiss) and "Earlier" (info/warn rows with ✕ and "Clear all").</li>
+      <li>Mini toasts: a small stack anchored under the bell for <code>warn</code> and <code>info</code>, 6000 ms with a progress bar; while the drawer is open it moves down, just left of the drawer.</li>
+      <li>Auto-open: the drawer opens itself when a new <code>action</code> notice arrives, but only when no text input or terminal has focus (otherwise it just bumps the count), so typing is never interrupted.</li>
+      <li>State: drawer open/closed and expanded cards are local React state, not persisted; <code>readAt</code> is stamped when a card is first expanded. Dismiss is disabled until <code>canDismiss()</code> and the answers were sent; its tooltip lists what is missing.</li>
+      <li>Data needed beyond the shared model: none. Hook: <code>lib/use-notifications.ts</code>. Effort: M.</li>
+    </ul>
+  </details>
+</main>
+<script>
+(function () {
+  'use strict';
+  var S = window.PF_SCENARIO, META = window.PF_CONCEPTS['01'];
+  var el = PF.el;
+  function byId(list, id) { return list.filter(function (x) { return x.id === id; })[0]; }
+  var N_TS = byId(S.notifications, 'n-timesheet'), N_RD = byId(S.notifications, 'n-reddit'), N_CS = byId(S.notifications, 'n-crash');
+  var CONV_TS = byId(S.conversations, N_TS.source.conversationId);
+  var LV = S.levels;
+  var GLYPH = { info: 'info', warn: 'warning', action: 'dot' };
+  var COLOR = { info: 'var(--pf-info)', warn: 'var(--pf-warn)', action: 'var(--pf-attention)' };
+
+  /* ───────── the bell ───────── */
+  function makeBell(count, warn, ring) {
+    var b = el('button', { type: 'button', class: 'c01-bell' + (ring ? ' c01-bell--ring' : ''), 'aria-label': 'Notifications', 'aria-expanded': 'false' }, PF.icon('bell', 14));
+    var c = el('span', { class: 'c01-bell-count' }), w = el('span', { class: 'c01-bell-warn' });
+    b.appendChild(c); b.appendChild(w);
+    b.setCounts = function (n, hasWarn) {
+      c.textContent = String(n); c.style.display = n > 0 ? '' : 'none';
+      w.style.display = hasWarn ? '' : 'none';
+      var parts = [n + (n === 1 ? ' notice needs you' : ' notices need you')];
+      if (hasWarn) parts.push('1 went wrong (yellow dot)');
+      b.setAttribute('data-tip', 'Notifications · ' + parts.join(' · '));
+    };
+    b.setCounts(count, warn);
+    return b;
+  }
+  function mountBell(shell, bell) {
+    if (shell.pill) shell.headerRight.insertBefore(bell, shell.pill);
+    else shell.headerRight.insertBefore(bell, shell.headerRight.children[1] || null);   // session: left of ⑂ Fork
+  }
+
+  /* ───────── the action card ───────── */
+  function makeCard(frame, opts) {
+    opts = opts || {};
+    var caret = el('span', { class: 'c01-card-caret' }, PF.icon('chevron-right', 13));
+    var head = el('button', { type: 'button', class: 'c01-card-head', 'aria-expanded': 'false' }, [
+      PF.dot('attention', true),
+      el('span', { class: 'c01-card-title' }, N_TS.title),
+      el('span', { class: 'c01-card-time', 'data-tip': 'Arrived at ' + PF.formatTime(N_TS.createdAt) + ' on ' + PF.formatDay(N_TS.createdAt) }, PF.formatTime(N_TS.createdAt)),
+      caret
+    ]);
+    var openChat = el('button', { type: 'button', class: 'pf-link-btn', on: { click: function (e) { e.stopPropagation(); PF.toast(frame, 'Would open the chat ‘' + CONV_TS.title + '’', { level: 'info' }); } } }, 'Open chat ›');
+    var card = el('div', { class: 'c01-card' }, [
+      head,
+      el('div', { class: 'c01-card-meta' }, ['from', el('span', { style: 'color:var(--pf-muted)' }, CONV_TS.title), '·', openChat]),
+      el('div', { class: 'c01-card-body' }, N_TS.body)
+    ]);
+    var cta = PF.button('Answer ' + N_TS.questions.length + ' questions ›', { small: true, variant: 'primary' });
+    cta.setAttribute('data-tip', N_TS.questions.length + ' questions and ' + N_TS.todos.length + ' to-do inside');
+    card.appendChild(el('div', { class: 'c01-card-cta' }, cta));
+    var api = { el: card, cl: null, dismissBtn: null };
+    if (opts.static) return api;
+    var cl = api.cl = PF.checklist(N_TS);
+    var dismiss = api.dismissBtn = PF.button('Dismiss', { small: true, disabled: true });
+    var why = el('span', { class: 'c01-why' });
+    var more = el('div', { class: 'c01-card-more' }, [cl.el, el('div', { class: 'c01-card-foot' }, [dismiss, why])]);
+    card.appendChild(more);
+    function toggle(open) {
+      if (open === undefined) open = !card.classList.contains('c01-card--open');
+      card.classList.toggle('c01-card--open', open);
+      head.setAttribute('aria-expanded', String(open));
+    }
+    head.addEventListener('click', function () { toggle(); });
+    cta.addEventListener('click', function () { toggle(true); });
+    function refresh() {
+      var miss = cl.missing();
+      if (!cl.sent()) miss.push('answers not sent to the agent yet');
+      var ok = miss.length === 0;
+      dismiss.disabled = !ok;
+      dismiss.classList.toggle('pf-btn--ok', ok);
+      var t = ok ? 'Everything is done — clear this notice' : 'Still missing: ' + miss.join(', ');
+      dismiss.setAttribute('data-tip', t);
+      why.textContent = ok ? '✓ All done — you can clear it' : 'Unlocks when: ' + miss.join(', ');
+      why.classList.toggle('c01-why--ok', ok);
+    }
+    cl.el.addEventListener('pf-change', refresh);
+    refresh();
+    api.toggle = toggle;
+    return api;
+  }
+
+  /* ───────── the main interactive frame ───────── */
+  var host = document.getElementById('frame'), cap = document.getElementById('caption');
+  var M = null;   // current mounted state
+  var timers = [];
+  function later(fn, ms) { timers.push(setTimeout(fn, ms)); }
+
+  function mount() {
+    timers.forEach(clearTimeout); timers = [];
+    var shell = PF.renderAppShell(host, { view: 'routines', width: 1280, height: 800 });
+    var frame = shell.frame;
+    var st = M = { shell: shell, frame: frame, open: false, needs: 0, warnOpen: false, earlier: [], toasts: {} };
+    st.bell = makeBell(0, false);
+    mountBell(shell, st.bell);
+    var headTop = (shell.header.offsetHeight || 45) + 'px';
+
+    var countEl = el('span', { class: 'c01-dcount' });
+    var closeBtn = el('button', { type: 'button', class: 'c01-x', 'aria-label': 'Close the panel', 'data-tip': 'Close (Esc)' }, PF.icon('x', 14));
+    var needsBox = el('div', { style: 'display:flex;flex-direction:column;gap:8px' });
+    var clearAll = el('button', { type: 'button', class: 'pf-link-btn' }, 'Clear all');
+    var earlierBox = el('div', { style: 'display:flex;flex-direction:column;gap:6px' });
+    st.body = el('div', { class: 'c01-dbody' }, [
+      el('div', { class: 'c01-sec' }, [el('span', { class: 'pf-section-label' }, [el('span', { class: 'pf-tick', style: 'background:var(--pf-attention)' }), 'Needs you'])]),
+      needsBox,
+      el('div', { class: 'c01-sec', style: 'margin-top:6px' }, [el('span', { class: 'pf-section-label' }, [el('span', { class: 'pf-tick', style: 'background:var(--pf-subtle)' }), 'Earlier']), clearAll]),
+      earlierBox
+    ]);
+    st.drawer = el('aside', { class: 'c01-drawer', style: 'top:' + headTop, 'aria-label': 'Notifications', role: 'complementary' }, [
+      el('div', { class: 'c01-dhead' }, [PF.icon('bell', 14), el('b', {}, 'Notifications'), el('span', { class: 'pf-subtle' }, '·'), countEl, closeBtn]),
+      st.body
+    ]);
+    st.stack = el('div', { class: 'c01-stack' });
+    shell.overlay.appendChild(st.drawer);
+    shell.overlay.appendChild(st.stack);
+
+    function bellRight() {
+      var x = 0, n = st.bell;
+      while (n && n !== frame) { x += n.offsetLeft; n = n.offsetParent; }
+      return Math.max(8, frame.offsetWidth - (x + st.bell.offsetWidth) - 4);
+    }
+    st.setOpen = function (open) {
+      st.open = open;
+      st.drawer.classList.toggle('c01-drawer--open', open);
+      st.bell.setAttribute('aria-expanded', String(open));
+      // under the bell when the panel is shut; bottom-left of the panel while it is open (the bell is then above the panel)
+      st.stack.style.right = (open ? 412 : bellRight()) + 'px';
+      st.stack.classList.toggle('c01-stack--docked', open);
+    };
+    st.update = function () {
+      st.bell.setCounts(st.needs, st.warnOpen);
+      countEl.textContent = st.needs ? st.needs + ' needs you' : 'nothing needs you';
+      countEl.classList.toggle('c01-dcount--zero', !st.needs);
+      countEl.setAttribute('data-tip', st.needs + ' notice(s) waiting for you · ' + st.earlier.length + ' in Earlier');
+      earlierBox.innerHTML = '';
+      if (!st.earlier.length) earlierBox.appendChild(el('div', { class: 'c01-empty' }, 'Nothing here.'));
+      st.earlier.forEach(function (n) {
+        var x = el('button', { type: 'button', class: 'c01-x', 'aria-label': 'Remove ' + n.title, 'data-tip': n.level === 'warn' ? 'Close — one click' : 'Remove from the list' }, PF.icon('x', 12));
+        x.addEventListener('click', function () { st.removeEarlier(n.id); });
+        earlierBox.appendChild(el('div', { class: 'c01-row' }, [
+          el('span', { class: 'c01-row-glyph', style: 'color:' + COLOR[n.level], 'data-tip': LV[n.level].label + ' · ' + LV[n.level].rule }, PF.icon(GLYPH[n.level], 13)),
+          el('div', { class: 'c01-row-text' }, [el('div', { class: 'c01-row-title' }, n.title), el('div', { class: 'c01-row-body' }, n.body)]),
+          el('span', { class: 'c01-row-time', 'data-tip': 'Arrived at ' + PF.formatTime(n.createdAt) }, PF.formatTime(n.createdAt)),
+          x
+        ]));
+      });
+      clearAll.style.visibility = st.earlier.length ? 'visible' : 'hidden';
+    };
+    st.removeEarlier = function (id) {
+      st.earlier = st.earlier.filter(function (n) { return n.id !== id; });
+      st.warnOpen = st.earlier.some(function (n) { return n.level === 'warn'; });
+      st.update();
+    };
+    st.addEarlier = function (n) {
+      if (st.earlier.some(function (x) { return x.id === n.id; })) return;
+      st.earlier.push(n);
+      st.earlier.sort(function (a, b) { return a.createdAt < b.createdAt ? 1 : -1; });
+      if (n.level === 'warn') st.warnOpen = true;
+      st.update();
+    };
+    st.miniToast = function (n) {
+      var secs = el('span', { class: 'c01-secs', 'data-tip': 'Seconds left before this pop-up fades' }, '6 s');
+      var x = el('button', { type: 'button', class: 'c01-x', 'aria-label': 'Close' }, PF.icon('x', 12));
+      var t = el('div', { class: 'c01-mini c01-mini--' + n.level, role: 'status' }, [
+        el('span', { style: 'color:' + COLOR[n.level] + ';display:flex;margin-top:2px' }, PF.icon(GLYPH[n.level], 13)),
+        el('div', { class: 'c01-row-text' }, [el('div', { class: 'c01-row-title' }, n.title), el('div', { class: 'c01-row-body' }, n.body)]),
+        secs, x,
+        el('span', { class: 'c01-mini-bar', 'data-tip': 'Countdown: 6 seconds' })
+      ]);
+      st.stack.appendChild(t);
+      st.toasts[n.id] = t;
+      var left = 6;
+      function tick() { left -= 1; if (left > 0) { secs.textContent = left + ' s'; later(tick, 1000); } }
+      later(tick, 1000);
+      function gone() { if (!t.isConnected) return; t.classList.add('c01-mini--out'); later(function () { t.remove(); }, 320); if (n.level === 'info') st.addEarlier(n); delete st.toasts[n.id]; }
+      x.addEventListener('click', function () { gone(); if (n.level === 'warn') st.removeEarlier(n.id); });
+      later(gone, 6000);
+      t.expire = function () { if (!t.isConnected) return; t.remove(); if (n.level === 'info') st.addEarlier(n); delete st.toasts[n.id]; };
+    };
+    st.expireToasts = function () { Object.keys(st.toasts).forEach(function (k) { st.toasts[k].expire(); }); };
+
+    st.card = null;
+    st.showEmpty = function (done) {
+      needsBox.innerHTML = '';
+      needsBox.appendChild(el('div', { class: 'c01-empty' + (done ? ' c01-empty--ok' : '') }, done ? [PF.icon('check', 13), 'Nothing needs you right now.'] : 'Nothing needs you right now.'));
+    };
+    st.addCard = function () {
+      st.card = makeCard(frame);
+      needsBox.innerHTML = '';
+      needsBox.appendChild(st.card.el);
+      st.card.dismissBtn.addEventListener('click', function () { st.dismiss(); });
+      st.needs = 1; st.update();
+    };
+    st.dismiss = function () {
+      if (!st.card || st.card.dismissBtn.disabled) return;
+      st.card = null; st.needs = 0;
+      st.showEmpty(true);
+      st.update();
+      shell.setRunStatus('run-ts-1015', 'success');
+      PF.toast(frame, 'Timesheet notice cleared — sending the email is still yours to do', { level: 'ok', ms: 0 });
+    };
+
+    st.bell.addEventListener('click', function () { st.setOpen(!st.open); });
+    closeBtn.addEventListener('click', function () { st.setOpen(false); });
+    clearAll.addEventListener('click', function () { st.earlier = []; st.warnOpen = false; st.update(); });
+    st.showEmpty(false);
+    st.update();
+    st.setOpen(false);
+    return st;
+  }
+
+  document.addEventListener('keydown', function (e) { if (e.key === 'Escape' && M && M.open) M.setOpen(false); });
+
+  var steps = [
+    { label: 'Arrives', caption: 'At 09:04 the timesheet is ready: the bell shows an orange 1 and the side panel slides open by itself. The two lighter notices pop up under it — the blue one empties its bar and fades in 6 seconds.',
+      run: function () {
+        M.shell.setRunStatus('run-ts-1015', 'attention');
+        M.addEarlier(N_CS);
+        M.addCard();
+        M.setOpen(true);
+        M.miniToast(N_CS);
+        M.miniToast(N_RD);
+      } },
+    { label: 'Open', caption: 'You open the timesheet card and click "Open" on the PDF — it opens in Preview. The two pop-ups have faded and now wait in the "Earlier" list.',
+      run: function () {
+        M.expireToasts();
+        M.card.toggle(true);
+        M.card.cl.el.querySelector('.pf-file-chip').openButton.click();
+      } },
+    { label: 'Answer', caption: 'You answer the four questions, tick "send the email yourself", and press "Send answers to the agent" — the answers land in the timesheet chat.',
+      run: function () {
+        var cl = M.card.cl;
+        cl.questions.forEach(function (q) { q.setAnswer(q.question.sampleAnswer); });
+        cl.todos.forEach(function (t) { t.set(true); });
+        cl.send();
+        M.body.scrollTop = M.body.scrollHeight;
+      } },
+    { label: 'Done', caption: 'Dismiss unlocks and you press it: the bell has no number any more and the timesheet run on the board turns green. The one thing left is yours: send the email to Abilitie by hand.',
+      run: function () { M.dismiss(); M.body.scrollTop = 0; } }
+  ];
+  var rail = PF.stepRail(document.getElementById('rail'), {
+    steps: steps,
+    reset: function () { mount(); },
+    onStep: function (n, st) { cap.textContent = st ? st.caption : 'Press a step to start.'; }
+  });
+  var want = parseInt(new URLSearchParams(location.search).get('step') || (/step=(\d)/.exec(location.hash) || [])[1], 10);   // ?step=4, or #step=4 for tools/shot.sh
+  rail.go(want >= 1 && want <= 4 ? want : 1);
+
+  /* ───────── everywhere: three mini frames ───────── */
+  ['home', 'routines', 'session'].forEach(function (v) {
+    var sh = PF.renderAppShell(document.getElementById('mini-' + v), { view: v, width: 1280, height: 800, conversationId: 'c-timesheet' });
+    var b = makeBell(1, false, true);
+    mountBell(sh, b);
+  });
+
+  /* ───────── levels ───────── */
+  function fillLevel(k, n) {
+    document.getElementById('lv-' + k + '-g').appendChild(PF.icon(GLYPH[k], 13));
+    document.getElementById('lv-' + k + '-t').textContent = n.title;
+    document.getElementById('lv-' + k + '-b').textContent = n.body;
+    document.getElementById('lv-' + k + '-l').textContent = LV[k].glyph + ' ' + LV[k].label;
+    document.getElementById('lv-' + k + '-r').textContent = LV[k].rule;
+  }
+  fillLevel('info', N_RD); fillLevel('warn', N_CS);
+  document.getElementById('lv-warn-x').appendChild(PF.icon('x', 12));
+  document.getElementById('lv-action').appendChild(makeCard(null, { static: true }).el);
+  document.getElementById('lv-action-l').textContent = LV.action.glyph + ' ' + LV.action.label;
+  document.getElementById('lv-action-r').textContent = LV.action.rule;
+
+  /* ───────── flow diagram (re-laid out for narrow screens) ───────── */
+  var FLOW = [
+    { t: 'Arrives', s: 'panel opens itself', c: 0 },
+    { t: 'Open card', s: 'click the card', c: 1 },
+    { t: 'Open PDF', s: 'check the file', c: 1 },
+    { t: 'Question 1', s: 'days off? "No"', c: 1 },
+    { t: 'Question 2', s: 'handed over? "No"', c: 1 },
+    { t: 'Question 3', s: '"Only 10 Oct"', c: 1 },
+    { t: 'Question 4', s: 'click box, type', c: 1 },
+    { t: 'To-do', s: 'tick "send email"', c: 1 },
+    { t: 'Send answers', s: 'to the agent', c: 1 },
+    { t: 'Dismiss', s: 'notice gone', c: 1 }
+  ];
+  var TOTAL = FLOW.reduce(function (a, f) { return a + f.c; }, 0);
+  if (TOTAL !== META.metrics.clicksToResolve) window.__pfErrors.push('flow total ' + TOTAL + ' != meta ' + META.metrics.clicksToResolve);
+  var SVGNS = 'http://www.w3.org/2000/svg';
+  function s(tag, a, p) { var n = document.createElementNS(SVGNS, tag); for (var k in a) n.setAttribute(k, a[k]); if (p) p.appendChild(n); return n; }
+  var flowHost = document.getElementById('flowchart'), lastCols = 0;
+  function drawFlow() {
+    var w = flowHost.clientWidth || 800, cols = w < 520 ? 2 : 5;
+    if (cols === lastCols) return; lastCols = cols;
+    var nw = 140, nh = 58, gx = 44, gy = 44, rows = Math.ceil(FLOW.length / cols);
+    var W = cols * nw + (cols - 1) * gx + 16, H = rows * nh + (rows - 1) * gy + 54;   // room for the click circles
+    flowHost.innerHTML = '';
+    var svg = s('svg', { viewBox: '0 0 ' + W + ' ' + H, role: 'img', 'aria-label': 'The path: ' + FLOW.map(function (f) { return f.t; }).join(', ') + '. ' + TOTAL + ' clicks in total.' }, flowHost);
+    var defs = s('defs', {}, svg), mk = s('marker', { id: 'c01arr', viewBox: '0 0 10 10', refX: 9, refY: 5, markerWidth: 7, markerHeight: 7, orient: 'auto' }, defs);
+    s('path', { d: 'M0 0 L10 5 L0 10z', fill: 'var(--g-muted)' }, mk);
+    var run = 0;
+    FLOW.forEach(function (f, i) {
+      run += f.c;
+      var r = Math.floor(i / cols), ci = i % cols;
+      if (r % 2 === 1) ci = cols - 1 - ci;     // snake so arrows stay short
+      var x = 1 + ci * (nw + gx), y = 13 + r * (nh + gy);
+      var tip = f.t + ' · ' + f.s + ' · ' + f.c + (f.c === 1 ? ' click' : ' clicks') + ' · running total ' + run + ' of ' + TOTAL;
+      var g = s('g', { 'data-tip': tip, tabindex: 0 }, svg);
+      s('rect', { class: 'c01-node' + (f.c ? '' : ' c01-node--hot'), x: x, y: y, width: nw, height: nh, rx: 8 }, g);
+      var t1 = s('text', { x: x + nw / 2, y: y + 24, 'text-anchor': 'middle', 'font-size': 14, 'font-weight': 600 }, g); t1.textContent = f.t;
+      var t2 = s('text', { x: x + nw / 2, y: y + 42, 'text-anchor': 'middle', 'font-size': 11, fill: 'var(--g-muted)', style: 'fill:var(--g-muted)' }, g); t2.textContent = f.s;
+      s('circle', { class: 'c01-clk', cx: x + nw - 2, cy: y + 2, r: 11 }, g);
+      var t3 = s('text', { x: x + nw - 2, y: y + 6, 'text-anchor': 'middle', 'font-size': 11, 'font-weight': 700, style: 'fill:#1a0d06' }, g); t3.textContent = String(f.c);
+      if (i < FLOW.length - 1) {
+        var nr = Math.floor((i + 1) / cols);
+        var a;
+        if (nr !== r) a = { x1: x + nw / 2, y1: y + nh, x2: x + nw / 2, y2: y + nh + gy - 4 };
+        else if (r % 2 === 0) a = { x1: x + nw, y1: y + nh / 2, x2: x + nw + gx - 4, y2: y + nh / 2 };
+        else a = { x1: x, y1: y + nh / 2, x2: x - gx + 4, y2: y + nh / 2 };
+        s('line', { x1: a.x1, y1: a.y1, x2: a.x2, y2: a.y2, stroke: 'var(--g-muted)', 'stroke-width': 2, 'marker-end': 'url(#c01arr)' }, svg);
+      }
+    });
+    var tt = s('text', { x: W / 2, y: H - 8, 'text-anchor': 'middle', 'font-size': 15, 'font-weight': 700, 'data-tip': 'Total: ' + TOTAL + ' clicks from arrival to dismissal' }, svg);
+    tt.textContent = 'Total: ' + TOTAL + ' clicks (orange circles = clicks per step)';
+  }
+  drawFlow();
+  if (window.ResizeObserver) new ResizeObserver(drawFlow).observe(flowHost); else window.addEventListener('resize', drawFlow);
+
+  /* ───────── verdict ───────── */
+  META.pros.forEach(function (p) { document.getElementById('pros').appendChild(el('li', {}, p)); });
+  META.cons.forEach(function (p) { document.getElementById('cons').appendChild(el('li', {}, p)); });
+  var m = META.metrics;
+  PF.barChart(document.getElementById('chart'), {
+    title: 'This design in three numbers (lower is better)',
+    categories: [META.name],
+    series: [
+      { name: 'Clicks to finish', unit: 'clicks', color: 'var(--g-accent)', values: [m.clicksToResolve] },
+      { name: 'Screen space when nothing is waiting', unit: 'px', color: 'var(--g-info)', values: [m.idleSpacePx] },
+      { name: 'Interruption (1–5)', unit: 'out of 5', color: '#14b8a6', values: [m.interruption] }
+    ]
+  });
+})();
+</script>
+</body>
+</html>

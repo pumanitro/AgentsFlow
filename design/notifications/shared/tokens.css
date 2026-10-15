@@ -1,0 +1,27 @@
+/* App tokens — verbatim from renderer/tailwind.config.js + globals.css + routine-style.ts. Dark only: the app has no light theme. */
+:root{
+  --pf-bg:#0f1115; --pf-panel:#181b25; --pf-panel2:#222636; --pf-border:#3a4159;
+  --pf-text:#f1f3f8; --pf-muted:#b2b8cc; --pf-subtle:#8c93a8;
+  --pf-accent:#ff7847; --pf-accent2:#ffa274;
+  --pf-ok:#4ade80; --pf-warn:#fbbf24; --pf-err:#ef4444; --pf-info:#3b82f6;
+  --pf-attention:#f97316;   /* Routines "Needs your attention" (orange-500) — the colour of every "needs you" notification */
+  --pf-teal:#2dd4bf; --pf-violet:#a78bfa;  /* Keeper tick / Accounts tick */
+  --pf-font:ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
+  --pf-mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  --pf-radius:6px; --pf-radius-lg:8px; --pf-radius-xl:12px;
+  --pf-frame-w:1280px; --pf-frame-h:800px;
+}
+/* Gallery chrome tokens — light by default, dark by system or by <html data-theme="dark"> */
+:root{ --g-bg:#f6f7fb; --g-surface:#ffffff; --g-surface2:#eef0f6; --g-text:#161922; --g-muted:#5b6275; --g-border:#dfe3ec; --g-accent:#ff7847; --g-ok:#15803d; --g-warn:#b45309; --g-info:#1d4ed8; --g-attention:#c2410c; }
+@media (prefers-color-scheme: dark){ :root:not([data-theme="light"]){ --g-bg:#0f1115; --g-surface:#181b25; --g-surface2:#222636; --g-text:#f1f3f8; --g-muted:#b2b8cc; --g-border:#3a4159; --g-ok:#4ade80; --g-warn:#fbbf24; --g-info:#60a5fa; --g-attention:#fb923c; } }
+:root[data-theme="dark"]{ --g-bg:#0f1115; --g-surface:#181b25; --g-surface2:#222636; --g-text:#f1f3f8; --g-muted:#b2b8cc; --g-border:#3a4159; --g-ok:#4ade80; --g-warn:#fbbf24; --g-info:#60a5fa; --g-attention:#fb923c; }
+body{ background:var(--g-bg); color:var(--g-text); font-family:var(--pf-font); margin:0; }
+
+/* ---- appended by WP-01 (additions only; nothing above renamed) ---- */
+/* Accent text that stays readable on the light gallery background */
+:root{ --g-accent-text:#c2410c; --g-shadow:0 1px 2px rgba(16,24,40,.06),0 4px 16px rgba(16,24,40,.06); --g-tip-bg:#161922; --g-tip-text:#f1f3f8; }
+@media (prefers-color-scheme: dark){ :root:not([data-theme="light"]){ --g-accent-text:#ffa274; --g-shadow:0 1px 2px rgba(0,0,0,.4),0 6px 20px rgba(0,0,0,.35); --g-tip-bg:#f1f3f8; --g-tip-text:#161922; } }
+:root[data-theme="dark"]{ --g-accent-text:#ffa274; --g-shadow:0 1px 2px rgba(0,0,0,.4),0 6px 20px rgba(0,0,0,.35); --g-tip-bg:#f1f3f8; --g-tip-text:#161922; }
+:root{ color-scheme:light; }
+@media (prefers-color-scheme: dark){ :root:not([data-theme="light"]){ color-scheme:dark; } }
+:root[data-theme="dark"]{ color-scheme:dark; }

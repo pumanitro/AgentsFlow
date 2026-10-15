@@ -86,17 +86,14 @@ import { formatSlot } from '../shared/routine-schedule';
 import { ROUTINES_IPC, markRunDone, type Routine, type RoutineInput, type RoutinePatch, type RoutineRun, type RoutinesSnapshot } from '../shared/routines';
 import { createNotificationsStore, type NotificationsStore } from './notifications-store';
 import {
-  applyAnswer,
-  applyTodo,
   buildNotificationFromArgs,
   buildRunWarning,
   describeForTool,
   dismissNotification,
-  formatAnswersMessage,
   markRead,
   shouldShowSystemNotification,
 } from './notifications-mcp';
-import { NOTIFICATIONS_IPC, allAnswered, type AnswersDelivery, type NotificationSource, type NotificationsSnapshot, type UserNotification } from '../shared/notifications';
+import { NOTIFICATIONS_IPC, type NotificationSource, type NotificationsSnapshot, type UserNotification } from '../shared/notifications';
 import {
   buildProbeScript,
   delegationLooksFinished,
@@ -2176,63 +2173,11 @@ async function handleNotify(req: NotifyRequest): Promise<Record<string, unknown>
   return describeForTool(n);
 }
 
-/**
- * "Send answers": type the user's answers into the chat that asked, as one
- * user turn. A live chat gets them typed in; a chat whose session has ended is
- * resumed with them. A failure is recorded on the notice (the drawer shows it,
- * and a seen failure unlocks Dismiss) — this only rejects on an unanswered question.
- */
-async function deliverAnswers(id: string): Promise<UserNotification> {
-  const n = requireNotification(id);
-  if (!allAnswered(n)) throw new Error('answer every question before sending');
-  const text = formatAnswersMessage(n);
-  const conv = n.source.conversationId ? store.getConversation(n.source.conversationId) : undefined;
-  let result: Omit<AnswersDelivery, 'at'>;
-  if (!conv) {
-    result = { ok: false, error: 'the chat no longer exists' };
-  } else if (conv.provider === 'codex') {
-    try {
-      await codex.send(conv.id, text);
-      result = { ok: true, via: 'codex' };
-    } catch (err) {
-      result = { ok: false, error: (err as Error)?.message ?? String(err) };
-    }
-  } else {
-    let r: pty.NudgeResult;
-    try {
-      r = await nudgeConversation(conv, text);
-    } catch (err) {
-      r = { ok: false, error: (err as Error)?.message ?? String(err) };
-    }
-    if (r.ok) {
-      result = { ok: true, via: r.via };
-    } else if (/no longer running|attach exited|never opened|no daemon id/.test(r.error)) {
-      // Nobody is there to type into: resume the session with the answers as its prompt.
-      const r2 = await relaunchConversation(conv, text);
-      result = r2.ok ? { ok: true, via: 'resume' } : { ok: false, via: 'resume', error: r2.error };
-    } else {
-      result = { ok: false, error: r.error };
-    }
-  }
-  const delivery: AnswersDelivery = { at: new Date().toISOString(), ...result };
-  console.log('[agentsflow][notifications] answers', { id, conversationId: n.source.conversationId, ok: delivery.ok, via: delivery.via, error: delivery.error });
-  // Re-read: the user may have ticked a to-do while the delivery was in flight.
-  return saveNotification({ ...requireNotification(id), answersDelivery: delivery });
-}
-
 ipcMain.handle(NOTIFICATIONS_IPC.list, (): NotificationsSnapshot =>
   notificationsStore ? notificationsStore.snapshot(Date.now()) : { notifications: [], now: new Date().toISOString() });
 
 ipcMain.handle(NOTIFICATIONS_IPC.markRead, (_e, id: string): UserNotification =>
   saveNotification(markRead(requireNotification(id), new Date().toISOString())));
-
-ipcMain.handle(NOTIFICATIONS_IPC.answer, (_e, id: string, questionId: string, answer: string): UserNotification =>
-  saveNotification(applyAnswer(requireNotification(id), questionId, answer, new Date().toISOString())));
-
-ipcMain.handle(NOTIFICATIONS_IPC.setTodo, (_e, id: string, todoId: string, done: boolean): UserNotification =>
-  saveNotification(applyTodo(requireNotification(id), todoId, !!done, new Date().toISOString())));
-
-ipcMain.handle(NOTIFICATIONS_IPC.sendAnswers, (_e, id: string): Promise<UserNotification> => deliverAnswers(id));
 
 ipcMain.handle(NOTIFICATIONS_IPC.dismiss, (_e, id: string): UserNotification => {
   const n = saveNotification(dismissNotification(requireNotification(id), new Date().toISOString()));

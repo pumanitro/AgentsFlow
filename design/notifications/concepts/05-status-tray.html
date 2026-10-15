@@ -1,0 +1,596 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Status-bar tray — Peers Flow notifications</title>
+<meta name="description" content="One of six notification designs for Peers Flow, shown on the Abilitie timesheet scenario.">
+<link rel="stylesheet" href="../shared/tokens.css">
+<link rel="stylesheet" href="../shared/app-shell.css">
+<link rel="stylesheet" href="../shared/gallery.css">
+<script src="../shared/scenario.js"></script>
+<script src="../shared/app-shell.js"></script>
+<script src="../shared/gallery.js"></script>
+<script src="./05-status-tray.meta.js"></script>
+<style>
+/* ── the status bar (24 px, bottom of every screen) ── */
+.c05-bar{ height:24px; flex:0 0 auto; display:flex; align-items:center; gap:12px; padding:0 6px 0 12px; background:var(--pf-panel); border-top:1px solid var(--pf-border); font-size:11px; line-height:16px; color:var(--pf-muted); white-space:nowrap; position:relative; font-family:var(--pf-font); }
+.c05-facts{ flex:0 0 auto; display:flex; align-items:center; gap:7px; font-family:var(--pf-mono); font-size:10.5px; color:var(--pf-subtle); }
+.c05-facts .c05-sep{ opacity:.5; }
+.c05-fact-dot{ width:6px; height:6px; border-radius:50%; background:#34d399cc; display:inline-block; }
+.c05-ticker{ flex:1 1 auto; min-width:0; height:22px; display:flex; align-items:center; justify-content:flex-end; overflow:hidden; }
+.c05-tick{ display:flex; align-items:center; gap:6px; min-width:0; max-width:100%; padding:0 8px; height:18px; border-radius:4px; color:var(--pf-text); background:rgba(59,130,246,.12); position:relative; overflow:hidden; animation:c05slide .45s ease-out; }
+.c05-tick b{ color:var(--pf-info); font-weight:600; }
+.c05-tick .c05-tick-t{ overflow:hidden; text-overflow:ellipsis; }
+.c05-tick .c05-tick-s{ font-family:var(--pf-mono); color:var(--pf-info); font-size:10px; }
+.c05-shrink{ position:absolute; left:0; bottom:0; height:2px; background:var(--pf-info); width:100%; transform-origin:left; animation:c05shrink 6s linear forwards; }
+@keyframes c05shrink{ from{ transform:scaleX(1); } to{ transform:scaleX(0); } }
+@keyframes c05slide{ from{ transform:translateX(40px); opacity:0; } to{ transform:none; opacity:1; } }
+.c05-bar .c05-tray{ flex:0 0 auto; display:flex; align-items:center; gap:10px; height:20px; padding:0 7px; border-radius:4px; border:1px solid transparent; color:var(--pf-muted); }
+.c05-bar .c05-tray:hover, .c05-bar .c05-tray[aria-expanded="true"]{ background:var(--pf-panel2); border-color:var(--pf-border); }
+.c05-bar .c05-tray:focus-visible{ outline:2px solid var(--pf-accent); outline-offset:1px; }
+.c05-seg{ display:inline-flex; align-items:center; gap:4px; font-variant-numeric:tabular-nums; }
+.c05-seg--act{ color:var(--pf-attention); font-weight:600; border-radius:4px; }
+.c05-seg--act.c05-zero{ color:var(--pf-ok); font-weight:500; }
+.c05-seg--warn{ color:var(--pf-warn); }
+.c05-seg--info{ color:var(--pf-info); }
+.c05-seg.c05-off{ color:var(--pf-subtle); opacity:.55; }
+.c05-seg-title{ color:var(--pf-text); font-weight:500; }
+.c05-flash{ padding:0 7px; margin:0 -3px; animation:c05flash 1s ease-in-out 6; background:rgba(249,115,22,.22); }
+@keyframes c05flash{ 0%,100%{ background:rgba(249,115,22,.14); } 50%{ background:rgba(249,115,22,.45); } }
+.c05-mini-off .c05-tray{ pointer-events:none; }
+/* mini frames: a magnified call-out so the tiny bar reads at thumbnail size */
+.c05-callout{ position:absolute; right:14px; bottom:48px; display:flex; align-items:center; gap:16px; padding:12px 26px; border-radius:14px; border:4px solid var(--pf-attention); background:var(--pf-panel); color:var(--pf-attention); font:700 46px/1.1 var(--pf-font); box-shadow:0 20px 40px rgba(0,0,0,.6); }
+.c05-callout small{ font-size:30px; font-weight:500; color:var(--pf-warn); }
+.c05-callout::after{ content:""; position:absolute; right:80px; bottom:-26px; border:13px solid transparent; border-top-color:var(--pf-attention); }
+.c05-ring{ position:absolute; right:0; bottom:0; width:250px; height:26px; border:3px solid var(--pf-attention); border-radius:6px; }
+
+/* ── the pop-up above the tray ── */
+.c05-pop{ position:absolute; right:6px; bottom:30px; width:380px; max-height:640px; display:flex; flex-direction:column; background:var(--pf-panel); border:1px solid var(--pf-border); border-radius:8px; box-shadow:0 20px 40px rgba(0,0,0,.55); font-size:13px; line-height:18px; color:var(--pf-text); }
+.c05-pop[hidden]{ display:none; }
+.c05-pop::after{ content:""; position:absolute; right:40px; bottom:-6px; width:10px; height:10px; background:var(--pf-panel); border-right:1px solid var(--pf-border); border-bottom:1px solid var(--pf-border); transform:rotate(45deg); }
+.c05-pop-head{ flex:0 0 auto; display:flex; align-items:center; gap:8px; padding:8px 10px 8px 12px; border-bottom:1px solid var(--pf-border); background:rgba(34,38,54,.35); border-radius:8px 8px 0 0; }
+.c05-pop-head .c05-lbl{ font-size:11px; text-transform:uppercase; letter-spacing:.05em; color:var(--pf-muted); }
+.c05-pop-head .c05-cnt{ margin-left:auto; font-size:11px; color:var(--pf-attention); font-variant-numeric:tabular-nums; }
+.c05-pop .c05-x{ width:20px; height:20px; display:inline-flex; align-items:center; justify-content:center; border-radius:4px; color:var(--pf-subtle); flex:0 0 auto; }
+.c05-pop .c05-x:hover{ color:var(--pf-text); background:var(--pf-panel2); }
+.c05-pop-list{ overflow:auto; padding:8px; display:flex; flex-direction:column; gap:8px; min-height:0; }
+.c05-empty{ padding:18px 8px; text-align:center; color:var(--pf-muted); font-size:12px; }
+.c05-item{ flex:0 0 auto; border:1px solid var(--pf-border); border-radius:6px; background:rgba(34,38,54,.5); }
+.c05-item--action{ border-color:rgba(249,115,22,.6); }
+.c05-item--warn{ border-color:rgba(251,191,36,.45); }
+.c05-item--info{ border-color:rgba(59,130,246,.45); position:relative; overflow:hidden; }
+.c05-item-head{ display:flex; align-items:center; gap:8px; padding:7px 8px 7px 10px; }
+.c05-item-title{ flex:1 1 auto; min-width:0; font-weight:600; font-size:13px; }
+.c05-time{ font-family:var(--pf-mono); font-size:10px; color:var(--pf-subtle); flex:0 0 auto; }
+.c05-prog{ flex:0 0 auto; font-family:var(--pf-mono); font-size:11px; padding:0 6px; border-radius:4px; border:1px solid rgba(249,115,22,.6); background:rgba(249,115,22,.15); color:var(--pf-attention); font-variant-numeric:tabular-nums; }
+.c05-prog.c05-prog--full{ border-color:rgba(74,222,128,.6); background:rgba(74,222,128,.15); color:var(--pf-ok); }
+.c05-item-body{ padding:0 10px 10px; display:flex; flex-direction:column; gap:8px; }
+.c05-item-text{ font-size:12px; line-height:17px; color:var(--pf-muted); }
+.c05-glyph{ flex:0 0 auto; display:inline-flex; width:16px; justify-content:center; font-size:13px; }
+.c05-rows{ display:flex; flex-direction:column; border:1px solid var(--pf-border); border-radius:6px; overflow:hidden; background:var(--pf-panel); }
+.c05-row{ border-top:1px solid rgba(58,65,89,.6); }
+.c05-row:first-child{ border-top:0; }
+.pf-frame .c05-row-head{ width:100%; display:flex; align-items:center; gap:8px; padding:6px 8px; text-align:left; font-size:12px; line-height:16px; }
+.pf-frame .c05-row-head:hover{ background:var(--pf-panel2); }
+.c05-box{ flex:0 0 auto; width:14px; height:14px; border-radius:3px; border:1px solid var(--pf-subtle); display:inline-flex; align-items:center; justify-content:center; color:var(--pf-bg); }
+.c05-row--done .c05-box{ background:var(--pf-ok); border-color:var(--pf-ok); }
+.c05-row-label{ flex:1 1 0; min-width:0; overflow:hidden; white-space:nowrap; text-overflow:ellipsis; }
+.c05-row--done .c05-row-label{ color:var(--pf-muted); }
+.c05-row-ans{ flex:0 0 auto; max-width:110px; overflow:hidden; white-space:nowrap; text-overflow:ellipsis; color:var(--pf-ok); font-size:11px; }
+.c05-chev{ flex:0 0 auto; color:var(--pf-subtle); display:flex; transition:transform .15s; }
+.c05-row--open .c05-chev{ transform:rotate(90deg); }
+.c05-row-body{ padding:2px 10px 10px 30px; }
+.c05-row-body[hidden]{ display:none; }
+.c05-row-body .pf-question{ padding:0; border-top:0; }
+.c05-row-body .pf-question .pf-q-text{ display:none; }
+.c05-row-q{ font-size:12px; line-height:17px; margin:0 0 6px; }
+.c05-row-todo .pf-todo{ border:0; border-radius:0; padding:7px 8px; font-size:12px; line-height:16px; }
+.c05-foot{ display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+.c05-sent{ font-size:11px; color:var(--pf-ok); flex:1 1 100%; }
+.c05-foot .c05-gap{ flex:1 1 auto; }
+.c05-src{ font-size:11px; color:var(--pf-subtle); }
+.c05-host .pf-toast-line{ bottom:40px; }
+
+/* ── page bits ── */
+.c05-where{ display:block; width:100%; max-width:420px; height:auto; margin-top:6px; }
+.c05-where text{ font:12px var(--pf-font); fill:var(--g-muted); }
+body.pf-embed #pf-main-frame > h2, body.pf-embed #pf-main-frame > h2 + p{ display:none; }
+.c05-host{ margin:0 auto; max-width:max(320px, calc((100vh - 130px) * 1.6)); }
+body.pf-embed .c05-host{ max-width:max(320px, calc((100vh - 90px) * 1.6)); }
+.c05-hero-grid{ display:grid; grid-template-columns:minmax(0,1.4fr) minmax(0,1fr); gap:24px; align-items:center; }
+@media (max-width:720px){ .c05-hero-grid{ grid-template-columns:minmax(0,1fr); } }
+.c05-lvl-sample{ background:var(--pf-bg); border:1px solid var(--pf-border); border-radius:8px; overflow:hidden; color:var(--pf-text); font-family:var(--pf-font); font-size:13px; line-height:18px; }
+.c05-lvl-sample .c05-item{ margin:10px; }
+.c05-lvl-sample .c05-bar{ padding-left:10px; }
+.c05-lvl-sample .c05-shrink{ animation:c05shrink 6s linear infinite; }
+.c05-lvl-sample .c05-x{ width:20px; height:20px; display:inline-flex; align-items:center; justify-content:center; border-radius:4px; color:var(--pf-subtle); background:none; border:0; cursor:pointer; }
+.c05-lvl-sample .c05-x:hover{ color:var(--pf-text); background:var(--pf-panel2); }
+.c05-lvl-rule{ margin:10px 0 0; font-size:14px; }
+.c05-lvl-rule b{ display:block; font-size:12px; text-transform:uppercase; letter-spacing:.06em; }
+.c05-flow{ width:100%; height:auto; display:block; }
+.c05-flow text{ font:13px var(--pf-font); fill:var(--g-text); }
+.c05-flow .c05-fnode{ fill:var(--g-surface2); stroke:var(--g-border); }
+.c05-flow .c05-fnode--a{ stroke:var(--g-attention); }
+.c05-flow .c05-fnode--ok{ stroke:var(--g-ok); }
+.c05-flow .c05-fclick{ fill:var(--g-attention); font-weight:700; font-size:12px; }
+.c05-flow .c05-fsub{ fill:var(--g-muted); font-size:11px; }
+.c05-flow-narrow{ display:none; }
+@media (max-width:720px){ .c05-flow-wide{ display:none; } .c05-flow-narrow{ display:block; max-width:340px; margin:0 auto; } }
+.c05-total{ font-size:15px; margin:10px 0 0; }
+.c05-total b{ color:var(--g-attention); }
+@media (prefers-reduced-motion: reduce){ .c05-flash, .c05-tick, .c05-chev{ animation:none !important; transition:none !important; } }
+</style>
+</head>
+<body>
+<nav id="pf-nav" data-current="05"></nav>
+<main class="g-page">
+  <section class="g-hero">
+    <p class="g-eyebrow">Design 05 of 6</p>
+    <div class="c05-hero-grid">
+      <div>
+        <h1>Status-bar tray</h1>
+        <p class="g-lede">A thin bar runs along the bottom of every screen. Its right end counts what needs you; one click opens a small checklist right above it. It flashes when something arrives, but it never covers your work.</p>
+        <ul class="g-badges">
+          <li class="g-badge g-badge--accent" data-tip="The bar is 24 pixels tall and spans the full window width"><b>Where it lives</b> A 24-pixel bar at the very bottom, on every screen</li>
+          <li class="g-badge" data-tip="6 rows: the file, 4 questions, 1 to-do — progress shown as 0/6 to 6/6"><b>How you answer</b> A step-by-step checklist in a pop-up above the bar</li>
+          <li class="g-badge" data-tip="Orange flash lasts 6 seconds, then a counter: 1 needs you"><b>How it gets your attention</b> The bar flashes orange with the title for 6 seconds, then shows a counter</li>
+        </ul>
+      </div>
+      <svg class="c05-where" viewBox="0 0 420 270" role="img" aria-label="Where it lives: a strip along the bottom of the app window, with a small pop-up above its right end">
+        <rect x="1" y="1" width="418" height="250" rx="10" fill="none" stroke="var(--g-border)" stroke-width="2"/>
+        <rect x="1" y="1" width="418" height="26" rx="10" fill="var(--g-surface2)" data-tip="The app's header — unchanged"/>
+        <rect x="1" y="27" width="110" height="198" fill="var(--g-surface2)" opacity=".6" data-tip="Side panel — unchanged"/>
+        <text x="56" y="130" text-anchor="middle">side panel</text>
+        <text x="150" y="58" text-anchor="middle">your work stays uncovered</text>
+        <rect x="236" y="96" width="176" height="110" rx="6" fill="color-mix(in srgb, var(--g-accent) 14%, transparent)" stroke="var(--g-accent)" stroke-width="2" stroke-dasharray="5 4" data-tip="The pop-up: 380 pixels wide, only open when you click the tray"/>
+        <text x="324" y="150" text-anchor="middle" style="fill:var(--g-attention)">pop-up</text>
+        <text x="324" y="166" text-anchor="middle" style="fill:var(--g-attention)">(on click)</text>
+        <rect x="1" y="225" width="418" height="26" fill="var(--g-accent)" opacity=".9" data-tip="The status bar: 24 pixels tall, full width, on every screen"/>
+        <text x="12" y="243" style="fill:#1a0d06">● bridge live · 1 agent working</text>
+        <text x="408" y="243" text-anchor="end" style="fill:#1a0d06;font-weight:700">● 1 needs you · ⚠ 1</text>
+        <text x="210" y="266" text-anchor="middle">orange = the new part</text>
+      </svg>
+    </div>
+  </section>
+
+  <section id="pf-main-frame" class="g-section">
+    <h2>Try it: the timesheet, start to finish</h2>
+    <p>Press the steps, or click inside the app picture yourself — the tray at the bottom right opens the checklist. Shown on the Routines screen so you can watch the timesheet card change colour.</p>
+    <div class="g-step-rail" id="rail"></div>
+    <div class="pf-frame-wrap c05-host"><div id="frame"></div></div>
+    <p class="g-caption" id="caption"></p>
+  </section>
+
+  <section class="g-section" id="everywhere">
+    <h2>You can see it from everywhere</h2>
+    <p>The same bar sits under every screen — the chat list, the routines board and inside a chat — so the orange counter is always in the same corner.</p>
+    <div class="g-grid-3">
+      <div><p class="g-mini-label">Chat list (home)</p><div class="pf-frame-wrap g-mini"><div id="mini-home"></div></div></div>
+      <div><p class="g-mini-label">Routines</p><div class="pf-frame-wrap g-mini"><div id="mini-routines"></div></div></div>
+      <div><p class="g-mini-label">Inside a chat</p><div class="pf-frame-wrap g-mini"><div id="mini-session"></div></div></div>
+    </div>
+  </section>
+
+  <section class="g-section" id="levels">
+    <h2>Three kinds of notices</h2>
+    <p>Each kind has its own colour in the bar and its own way of going away. Hover a sample for details.</p>
+    <div class="g-grid-3" id="levels-grid"></div>
+  </section>
+
+  <section class="g-section" id="flow">
+    <h2>Your path through it</h2>
+    <p>Every click from the moment the timesheet arrives until it is gone. The checklist opens the next step by itself, so there are no extra clicks between questions.</p>
+    <div id="flow-svg"></div>
+    <p class="c05-total" id="flow-total"></p>
+  </section>
+
+  <section class="g-section" id="verdict">
+    <h2>Good and not so good</h2>
+    <p>In plain words, plus the three numbers used to compare all six designs.</p>
+    <div class="g-grid-2">
+      <div class="g-card"><h3>Good</h3><ul class="g-pros" id="pros"></ul></div>
+      <div class="g-card"><h3>Not so good</h3><ul class="g-cons" id="cons"></ul></div>
+    </div>
+    <div id="chart" style="margin-top:20px"></div>
+  </section>
+
+  <details class="g-details" id="build">
+    <summary>How it would be built (for the engineer)</summary>
+    <p>Shared by all six designs: the agent calls one new <code>notify</code> tool, the app stores the notice in <code>notifications.json</code> and pushes it to the screen; answers go back into the same chat as a message. The full story, the data shape and the dismiss rule are on the <a href="../index.html#build">overview page</a>.</p>
+    <p>What this design adds:</p>
+    <ul>
+      <li><code>renderer/components/notifications/StatusBar.tsx</code> — a fixed 24 px bar mounted once in <code>pages/_app.tsx</code>, so every page gets it. Left: bridge health, working-agent count and plan usage (data already in the app). Right: the tray button with three counters from <code>use-notifications.ts</code>.</li>
+      <li><code>pages/index.tsx</code>, <code>session.tsx</code> and <code>preview.tsx</code> get <code>pb-6</code> (24 px) on their root so nothing hides behind the bar. On home the bar sits under the composer.</li>
+      <li><code>TrayPopover.tsx</code> — 380 px, anchored above the tray, newest first; closes on Esc or a click outside. An <code>action</code> notice renders as an accordion of six rows (file · Q1–Q4 · to-do), progress <code>done/6</code> in its header; answering a yes/no or choice row opens the next unfinished row.</li>
+      <li>Arrival: on a new <code>action</code> the tray segment gets a 6 s orange flash with the title inline; each <code>info</code> notice gets a 6 s slot in the bar's ticker (shrinking bar), then is marked dismissed. No new data beyond the shared shape; the "file opened" tick is local UI state (could become <code>openedAt</code> on <code>NotificationFile</code> if it must survive a restart).</li>
+      <li>Dismiss stays disabled until the shared <code>canDismiss()</code> passes and <code>answersSentAt</code> is set; its tooltip lists what is missing. <code>warn</code> rows have a ✕ (one click). Effort: S.</li>
+      <li>Optional later: move the green bridge dot from the header into the bar.</li>
+    </ul>
+  </details>
+</main>
+<script>
+(function () {
+  var S = window.PF_SCENARIO, M = window.PF_CONCEPTS['05'], el = PF.el;
+  var N = {}; S.notifications.forEach(function (n) { N[n.id] = n; });
+  var LV = S.levels;
+  function conv(id) { return S.conversations.filter(function (c) { return c.id === id; })[0] || {}; }
+  function routine(id) { return S.routines.filter(function (r) { return r.id === id; })[0] || {}; }
+  var working = S.conversations.filter(function (c) { return c.state === 'working'; }).length;
+  var ACT = N['n-timesheet'], INFO = N['n-reddit'], WARN = N['n-crash'];
+  var INFO_MS = INFO.autoDismissMs || 6000;
+
+  /* ───────── the bar + tray, one per frame ───────── */
+  var trays = [];
+  function Tray(shell, opts) {
+    opts = opts || {};
+    var t = { shell: shell, live: {}, timers: [], open: false, flash: false };
+    trays.push(t);
+    var segAct = el('span', { class: 'c05-seg c05-seg--act' });
+    var segWarn = el('span', { class: 'c05-seg c05-seg--warn' });
+    var segInfo = el('span', { class: 'c05-seg c05-seg--info' });
+    var trayBtn = el('button', { type: 'button', class: 'c05-tray', 'aria-haspopup': 'dialog', 'aria-expanded': 'false' }, [segAct, segWarn, segInfo]);
+    var ticker = el('div', { class: 'c05-ticker', 'aria-live': 'polite' });
+    var facts = el('div', { class: 'c05-facts' }, [
+      el('span', { class: 'c05-fact-dot', 'aria-hidden': 'true' }), el('span', { 'data-tip': 'The connection between chats is live' }, 'bridge live'),
+      el('span', { class: 'c05-sep' }, '·'), el('span', { 'data-tip': working + ' chat working right now' }, working + (working === 1 ? ' agent' : ' agents') + ' working'),
+      el('span', { class: 'c05-sep' }, '·'), el('span', { 'data-tip': S.usage.plan + ' plan: ' + S.usage.weekly + ' % of this week’s limit used' }, 'Max ' + S.usage.weekly + '%')
+    ]);
+    t.bar = el('div', { class: 'c05-bar' + (opts.mini ? ' c05-mini-off' : '') }, [facts, ticker, trayBtn]);
+    shell.statusBar.appendChild(t.bar);
+    if (opts.mini) { trayBtn.tabIndex = -1; trayBtn.setAttribute('aria-hidden', 'true'); }
+
+    function later(fn, ms) { t.timers.push(setTimeout(fn, ms)); }
+    function count(level) { return Object.keys(t.live).filter(function (id) { return t.live[id] && N[id].level === level; }).length; }
+    t.render = function () {
+      var a = count('action'), w = count('warn'), i = count('info');
+      segAct.innerHTML = '';
+      segAct.className = 'c05-seg c05-seg--act' + (a ? '' : ' c05-zero') + (t.flash && a ? ' c05-flash' : '');
+      if (a) {
+        segAct.appendChild(el('span', {}, LV.action.glyph));
+        if (t.flash) segAct.appendChild(el('span', { class: 'c05-seg-title' }, ACT.title));
+        else segAct.appendChild(el('span', {}, a + ' needs you'));
+        segAct.setAttribute('data-tip', a + ' notice needs you: ' + ACT.title);
+      } else {
+        segAct.appendChild(el('span', {}, '✓ nothing needs you'));
+        segAct.setAttribute('data-tip', '0 notices need you');
+      }
+      segWarn.textContent = LV.warn.glyph + ' ' + w;
+      segWarn.classList.toggle('c05-off', !w);
+      segWarn.setAttribute('data-tip', w + (w === 1 ? ' warning' : ' warnings') + (w ? ': ' + WARN.title : ''));
+      segInfo.textContent = LV.info.glyph + ' ' + i;
+      segInfo.classList.toggle('c05-off', !i);
+      segInfo.setAttribute('data-tip', i + ' just-so-you-know ' + (i === 1 ? 'notice' : 'notices') + (i ? ': ' + INFO.title : ''));
+      trayBtn.setAttribute('aria-label', 'Notifications: ' + a + ' need you, ' + w + ' warnings, ' + i + ' notices');
+      if (t.pop) t.renderPop();
+    };
+    t.arrive = function (quiet) {
+      t.live['n-timesheet'] = true; t.live['n-crash'] = true;
+      if (!quiet) {
+        t.live['n-reddit'] = true;
+        t.flash = true;
+        later(function () { t.flash = false; t.render(); }, 6000);
+        var secs = el('span', { class: 'c05-tick-s', 'data-tip': 'Fades by itself after 6 seconds' }, '6 s');
+        ticker.appendChild(el('div', { class: 'c05-tick' }, [
+          el('b', {}, LV.info.glyph), el('span', { class: 'c05-tick-t' }, INFO.title + ' — ' + INFO.body), secs, el('span', { class: 'c05-shrink' })
+        ]));
+        for (var k = 1; k < 6; k++) (function (k) { later(function () { secs.textContent = (6 - k) + ' s'; }, k * 1000); })(k);
+        later(function () { ticker.innerHTML = ''; t.live['n-reddit'] = false; t.render(); }, INFO_MS);
+      }
+      t.render();
+    };
+    t.destroy = function () { t.timers.forEach(clearTimeout); t.timers = []; var i = trays.indexOf(t); if (i >= 0) trays.splice(i, 1); };
+
+    if (!opts.mini) {
+      trayBtn.addEventListener('mousedown', function (e) { e.stopPropagation(); });
+      trayBtn.addEventListener('click', function (e) { e.stopPropagation(); t.toggle(); });
+      buildPop(t);
+    }
+    t.trayBtn = trayBtn;
+    t.render();
+    return t;
+  }
+
+  /* ───────── the pop-up with the checklist ───────── */
+  function buildPop(t) {
+    var pop = t.pop = el('div', { class: 'c05-pop', role: 'dialog', 'aria-label': 'Notifications', hidden: '' });
+    var cnt = el('span', { class: 'c05-cnt' });
+    var list = el('div', { class: 'c05-pop-list' });
+    pop.appendChild(el('div', { class: 'c05-pop-head' }, [
+      el('span', { style: 'color:var(--pf-accent);display:flex' }, PF.icon('bell', 13)),
+      el('span', { class: 'c05-lbl' }, 'Notifications · newest first'), cnt,
+      el('button', { type: 'button', class: 'c05-x', 'aria-label': 'Close', title: 'Close (Esc)', on: { click: function () { t.close(); } } }, PF.icon('x', 12))
+    ]));
+    pop.appendChild(list);
+    pop.addEventListener('mousedown', function (e) { e.stopPropagation(); });
+    pop.addEventListener('click', function (e) { e.stopPropagation(); });
+    t.shell.overlay.appendChild(pop);
+
+    /* action item: six rows */
+    var rows = [], openIdx = -1, opened = false, sentAt = null;
+    var prog = el('span', { class: 'c05-prog' });
+    var actItem = el('div', { class: 'c05-item c05-item--action' });
+    var r = routine(ACT.source.routineId);
+    actItem.appendChild(el('div', { class: 'c05-item-head' }, [
+      el('span', { class: 'c05-glyph' }, PF.dot('attention', true)),
+      el('span', { class: 'c05-item-title' }, ACT.title), prog,
+      el('span', { class: 'c05-time', 'data-tip': 'Arrived ' + PF.formatDay(ACT.createdAt) + ' at ' + PF.formatTime(ACT.createdAt) }, PF.formatTime(ACT.createdAt))
+    ]));
+    var rowsEl = el('div', { class: 'c05-rows' });
+    var body = el('div', { class: 'c05-item-body' }, [
+      el('div', { class: 'c05-item-text' }, ACT.body),
+      el('div', { class: 'c05-src' }, 'From the routine “' + r.name + '” · ' + PF.formatDay(ACT.createdAt) + ' ' + r.time),
+      rowsEl
+    ]);
+    actItem.appendChild(body);
+
+    function mkRow(label, content, kind) {
+      var row = { done: false, kind: kind };
+      var box = el('span', { class: 'c05-box', 'aria-hidden': 'true' });
+      var ans = el('span', { class: 'c05-row-ans' });
+      row.head = el('button', { type: 'button', class: 'c05-row-head', 'aria-expanded': 'false' }, [box, el('span', { class: 'c05-row-label' }, label), ans, el('span', { class: 'c05-chev' }, PF.icon('chevron-right', 12))]);
+      row.body = el('div', { class: 'c05-row-body', hidden: '' }, content);
+      row.el = el('div', { class: 'c05-row' }, [row.head, row.body]);
+      row.setDone = function (d, answer) {
+        row.done = d; row.el.classList.toggle('c05-row--done', d);
+        box.innerHTML = ''; if (d) box.appendChild(PF.icon('check', 10));
+        ans.textContent = answer || '';
+      };
+      row.head.addEventListener('click', function () { setOpen(openIdx === rows.indexOf(row) ? -1 : rows.indexOf(row)); });
+      rows.push(row); rowsEl.appendChild(row.el);
+      return row;
+    }
+    function setOpen(i) {
+      openIdx = i;
+      rows.forEach(function (row, j) {
+        if (!row.body) return;
+        var on = j === i;
+        row.body.hidden = !on; row.el.classList.toggle('c05-row--open', on); row.head.setAttribute('aria-expanded', String(on));
+      });
+    }
+    function nextOpen(from) {
+      for (var j = from + 1; j < rows.length; j++) if (!rows[j].done && rows[j].body) return setOpen(j);
+      setOpen(-1);
+    }
+
+    // row 1 · the file
+    var file = ACT.files[0];
+    var chip = PF.fileChip(file);
+    var fileRow = mkRow('Open the file — ' + file.label, chip, 'file');
+    chip.addEventListener('pf-open', function () { if (!fileRow.done) { opened = true; fileRow.setDone(true, 'opened'); nextOpen(0); changed(); } });
+    // rows 2–5 · the questions
+    var qs = ACT.questions.map(function (q, i) {
+      var rowRef;
+      var w = PF.question(q, { onAnswer: function (v) {
+        var done = w.answered();
+        rowRef.setDone(done, done ? String(v) : '');
+        if (done && q.kind !== 'text') nextOpen(rows.indexOf(rowRef));
+        changed();
+      } });
+      rowRef = mkRow('Question ' + (i + 1) + ' — ' + q.text, [el('p', { class: 'c05-row-q' }, q.text), w.el], 'q');
+      return w;
+    });
+    // row 6 · the to-do (ticked straight from the row)
+    var todo = PF.todo(ACT.todos[0], { onToggle: function (v) { todoRow.setDone(v); changed(); } });
+    var todoRow = { done: false, el: el('div', { class: 'c05-row c05-row-todo' }, todo.el), setDone: function (d) { todoRow.done = d; } };
+    rows.push(todoRow); rowsEl.appendChild(todoRow.el);
+
+    // footer: send answers · dismiss
+    var sendBtn = PF.button('Send answers to the agent', { variant: 'primary', small: true });
+    var sendWrap = el('span', {}, sendBtn);
+    var dismissBtn = PF.button('Dismiss', { variant: 'ok', small: true });
+    var dismissWrap = el('span', {}, dismissBtn);
+    var sentNote = el('span', { class: 'c05-sent', role: 'status' });
+    body.appendChild(el('div', { class: 'c05-foot' }, [sendWrap, el('span', { class: 'c05-gap' }), dismissWrap, sentNote]));
+    function answeredN() { return qs.filter(function (q) { return q.answered(); }).length; }
+    function doneN() { return (opened ? 1 : 0) + answeredN() + (todo.done() ? 1 : 0); }
+    function missing() {
+      var out = [];
+      if (!opened) out.push('the file is not opened yet');
+      var left = qs.length - answeredN(); if (left) out.push(left + (left === 1 ? ' question' : ' questions') + ' unanswered');
+      if (!todo.done()) out.push('the to-do is not ticked');
+      if (!sentAt) out.push('answers not sent to the agent');
+      return out;
+    }
+    function changed() {
+      var d = doneN();
+      prog.textContent = d + '/6';
+      prog.classList.toggle('c05-prog--full', d === 6);
+      prog.setAttribute('data-tip', d + ' of 6 steps done (file · 4 questions · to-do)');
+      var qd = answeredN() === qs.length;
+      sendBtn.disabled = !qd || !!sentAt;
+      sendWrap.setAttribute('data-tip', sentAt ? 'Already sent' : qd ? 'Post the four answers into the chat' : 'Answer all four questions first (' + answeredN() + ' of 4 answered)');
+      var miss = missing();
+      dismissBtn.disabled = miss.length > 0;
+      dismissWrap.setAttribute('data-tip', miss.length ? 'Not yet: ' + miss.join(', ') : 'Everything is done — remove this notice');
+    }
+    sendBtn.addEventListener('click', function () {
+      if (sentAt || answeredN() < qs.length) return;
+      sentAt = S.now;
+      var c = conv(ACT.source.conversationId);
+      sentNote.textContent = '✓ Sent to the chat ‘' + c.title + '’';
+      PF.toast(t.shell.frame, 'Sent to the chat ‘' + c.title + '’', { level: 'ok' });
+      changed();
+    });
+    dismissBtn.addEventListener('click', function () {
+      if (missing().length) return;
+      t.live['n-timesheet'] = false;
+      t.shell.setRunStatus(ACT.source.runId, 'success');
+      t.render();
+    });
+
+    /* warn item */
+    var warnItem = el('div', { class: 'c05-item c05-item--warn' }, [
+      el('div', { class: 'c05-item-head' }, [
+        el('span', { class: 'c05-glyph', style: 'color:var(--pf-warn)' }, LV.warn.glyph),
+        el('span', { class: 'c05-item-title' }, WARN.title),
+        el('span', { class: 'c05-time', 'data-tip': 'Arrived ' + PF.formatDay(WARN.createdAt) + ' at ' + PF.formatTime(WARN.createdAt) }, PF.formatTime(WARN.createdAt)),
+        el('button', { type: 'button', class: 'c05-x', 'aria-label': 'Close this warning', 'data-tip': 'Close — one click, it does not come back', on: { click: function () { t.live['n-crash'] = false; t.render(); } } }, PF.icon('x', 12))
+      ]),
+      el('div', { class: 'c05-item-body' }, [
+        el('div', { class: 'c05-item-text' }, WARN.body),
+        el('div', {}, PF.button('Open the chat ›', { small: true, on: function () { PF.toast(t.shell.frame, 'Opened the chat ‘' + conv(WARN.source.conversationId).title + '’', { level: 'info' }); } }))
+      ])
+    ]);
+    /* info item (only while it lives — 6 s) */
+    var infoItem = el('div', { class: 'c05-item c05-item--info' }, [
+      el('div', { class: 'c05-item-head' }, [
+        el('span', { class: 'c05-glyph', style: 'color:var(--pf-info)' }, LV.info.glyph),
+        el('span', { class: 'c05-item-title' }, INFO.title),
+        el('span', { class: 'c05-time' }, PF.formatTime(INFO.createdAt))
+      ]),
+      el('div', { class: 'c05-item-body' }, el('div', { class: 'c05-item-text' }, INFO.body)),
+      el('span', { class: 'c05-shrink', 'data-tip': 'Fades by itself after 6 seconds' })
+    ]);
+    var items = { 'n-timesheet': actItem, 'n-crash': warnItem, 'n-reddit': infoItem };
+    var empty = el('div', { class: 'c05-empty' }, '✓ Nothing needs you right now.');
+
+    t.renderPop = function () {
+      var ids = S.notifications.slice().sort(function (a, b) { return a.createdAt < b.createdAt ? 1 : -1; })
+        .map(function (n) { return n.id; }).filter(function (id) { return t.live[id]; });
+      list.innerHTML = '';
+      ids.forEach(function (id) { list.appendChild(items[id]); });
+      if (!ids.length) list.appendChild(empty);
+      var a = t.live['n-timesheet'] ? 1 : 0;
+      cnt.textContent = a ? a + ' needs you' : '';
+    };
+    t.toggle = function () { t.open ? t.close() : t.show(); };
+    t.show = function () {
+      t.open = true; pop.hidden = false; t.trayBtn.setAttribute('aria-expanded', 'true');
+      if (t.live['n-timesheet'] && openIdx < 0) nextOpen(-1);
+    };
+    t.close = function () { t.open = false; pop.hidden = true; t.trayBtn.setAttribute('aria-expanded', 'false'); };
+    t.api = {
+      openFile: function () { chip.openButton.click(); },
+      answerAll: function () { qs.forEach(function (q) { q.setAnswer(q.question.sampleAnswer); }); },
+      tickTodo: function () { todo.set(true); },
+      send: function () { sendBtn.click(); },
+      dismiss: function () { dismissBtn.click(); }
+    };
+    changed();
+  }
+
+  // Esc or a click outside closes any open pop-up
+  document.addEventListener('keydown', function (e) { if (e.key === 'Escape') trays.forEach(function (t) { if (t.open) { t.close(); t.trayBtn.focus({ preventScroll: true }); } }); });
+  document.addEventListener('mousedown', function () { trays.forEach(function (t) { if (t.open) t.close(); }); });
+
+  /* ───────── main frame + step rail ───────── */
+  var frameHost = document.getElementById('frame'), cap = document.getElementById('caption');
+  var main = null;
+  var rail = PF.stepRail(document.getElementById('rail'), {
+    reset: function () {
+      if (main) main.tray.destroy();
+      var shell = PF.renderAppShell(frameHost, { view: 'routines', width: 1280, height: 800 });
+      main = { shell: shell, tray: Tray(shell) };
+    },
+    steps: [
+      { label: 'Arrives', caption: 'At 09:04 the bar at the bottom flashes orange with the title for 6 seconds, then settles to “1 needs you”. The Reddit note slides through the bar and fades by itself; the crash warning waits in the yellow counter.',
+        run: function () { main.tray.arrive(false); } },
+      { label: 'Open', caption: 'One click on the tray opens the checklist above it. The first row is the PDF — “Open ›” shows it in Preview and the row ticks itself.',
+        run: function () { main.tray.show(); main.tray.api.openFile(); } },
+      { label: 'Answer', caption: 'Each question row opens in turn; you answer, the next one opens. Tick “send the email yourself”, then “Send answers to the agent” posts them into the timesheet chat. The header now reads 6/6.',
+        run: function () { main.tray.show(); main.tray.api.answerAll(); main.tray.api.tickTodo(); main.tray.api.send(); } },
+      { label: 'Done', caption: 'Dismiss is now allowed: the counter drops to “nothing needs you” and the timesheet card turns green. Still yours to do by hand: send the timesheet email to Abilitie.',
+        run: function () { main.tray.api.dismiss(); main.tray.close(); } }
+    ],
+    onStep: function (n, step) { cap.textContent = step ? step.caption : 'Press a step to start.'; }
+  });
+  var want = parseInt(new URLSearchParams(location.search).get('step') || (location.hash.match(/step=(\d)/) || [])[1] || '1', 10);
+  rail.go(want >= 1 && want <= 4 ? want : 1);
+
+  /* ───────── everywhere: three mini frames ───────── */
+  [['mini-home', 'home'], ['mini-routines', 'routines'], ['mini-session', 'session']].forEach(function (m) {
+    var shell = PF.renderAppShell(document.getElementById(m[0]), { view: m[1], width: 1280, height: 800, conversationId: 'c-timesheet' });
+    var t = Tray(shell, { mini: true }); t.arrive(true);
+    shell.overlay.appendChild(el('div', { class: 'c05-ring', 'aria-hidden': 'true' }));
+    shell.overlay.appendChild(el('div', { class: 'c05-callout', 'data-tip': 'Bottom-right of the ' + m[1] + ' screen: 1 notice needs you, 1 warning' }, ['● 1 needs you', el('small', {}, '⚠ 1')]));
+  });
+
+  /* ───────── three kinds of notices ───────── */
+  var lg = document.getElementById('levels-grid');
+  function sampleBar(seg) {
+    return el('div', { class: 'c05-bar' }, [el('div', { class: 'c05-facts' }, [el('span', { class: 'c05-fact-dot' }), 'bridge live']), el('div', { class: 'c05-ticker' }), seg]);
+  }
+  var lvCards = [
+    { lv: 'info', n: INFO,
+      bar: el('div', { class: 'c05-bar' }, [el('div', { class: 'c05-ticker', style: 'justify-content:flex-start' }, el('div', { class: 'c05-tick', 'data-tip': 'Slides through the bar for 6 seconds, then disappears' }, [el('b', {}, LV.info.glyph), el('span', { class: 'c05-tick-t' }, INFO.title), el('span', { class: 'c05-shrink' })]))]),
+      item: el('div', { class: 'c05-item c05-item--info', 'data-tip': 'In the pop-up it also fades after 6 seconds' }, [el('div', { class: 'c05-item-head' }, [el('span', { class: 'c05-glyph', style: 'color:var(--pf-info)' }, LV.info.glyph), el('span', { class: 'c05-item-title' }, INFO.title), el('span', { class: 'c05-time' }, PF.formatTime(INFO.createdAt))]), el('div', { class: 'c05-item-body' }, el('div', { class: 'c05-item-text' }, INFO.body)), el('span', { class: 'c05-shrink' })]) },
+    { lv: 'warn', n: WARN,
+      bar: sampleBar(el('span', { class: 'c05-seg c05-seg--warn', style: 'padding:0 8px', 'data-tip': '1 warning — the yellow counter stays until you close it' }, LV.warn.glyph + ' 1')),
+      item: el('div', { class: 'c05-item c05-item--warn' }, [el('div', { class: 'c05-item-head' }, [el('span', { class: 'c05-glyph', style: 'color:var(--pf-warn)' }, LV.warn.glyph), el('span', { class: 'c05-item-title' }, WARN.title), el('span', { class: 'c05-time' }, PF.formatTime(WARN.createdAt)), el('span', { class: 'c05-x', 'data-tip': 'One click on ✕ closes it' }, PF.icon('x', 12))]), el('div', { class: 'c05-item-body' }, el('div', { class: 'c05-item-text' }, WARN.body))]) },
+    { lv: 'action', n: ACT,
+      bar: sampleBar(el('span', { class: 'c05-seg c05-seg--act', style: 'padding:0 8px', 'data-tip': '1 notice needs you — orange until every step is done' }, LV.action.glyph + ' 1 needs you')),
+      item: el('div', { class: 'c05-item c05-item--action' }, [el('div', { class: 'c05-item-head' }, [el('span', { class: 'c05-glyph' }, PF.dot('attention', true)), el('span', { class: 'c05-item-title' }, ACT.title), el('span', { class: 'c05-prog', 'data-tip': '3 of 6 steps done (file · 4 questions · to-do)' }, '3/6')]), el('div', { class: 'c05-item-body' }, el('div', { class: 'c05-item-text' }, 'Dismiss stays greyed out until all 6 steps are done and the answers are sent.'))]) }
+  ];
+  lvCards.forEach(function (c) {
+    var L = LV[c.lv];
+    lg.appendChild(el('div', { class: 'g-card' }, [
+      el('div', { class: 'c05-lvl-sample' }, [c.item, c.bar]),
+      el('p', { class: 'c05-lvl-rule' }, [el('b', { style: 'color:var(--g-' + (c.lv === 'action' ? 'attention' : c.lv) + ')' }, L.glyph + ' ' + L.label), L.rule + '.'])
+    ]));
+  });
+
+  /* ───────── flow diagram ───────── */
+  var hops = [
+    { t: 'Arrives', s: 'bar flashes', c: 0, tip: 'The bar flashes by itself — 0 clicks' },
+    { t: 'Open tray', s: 'click the counter', c: 1, tip: 'Click the orange counter — 1 click' },
+    { t: 'Open the PDF', s: '“Open ›”', c: 1, tip: 'Open the timesheet PDF in Preview — 1 click' },
+    { t: 'Question 1', s: 'No', c: 1, tip: 'Days off? Answer “No” — 1 click' },
+    { t: 'Question 2', s: 'No', c: 1, tip: 'Work handed over? Answer “No” — 1 click' },
+    { t: 'Question 3', s: 'Only 10 Oct', c: 1, tip: 'Vacation days? Pick “Only 10 Oct” — 1 click' },
+    { t: 'Question 4', s: 'click + type', c: 1, tip: 'Changes? Click the box and type the change — 1 click (plus typing)' },
+    { t: 'To-do', s: 'tick it', c: 1, tip: 'Tick “Send the email yourself” — 1 click' },
+    { t: 'Send answers', s: 'to the agent', c: 1, tip: 'Post the four answers into the chat — 1 click' },
+    { t: 'Dismiss', s: 'all clear', c: 1, tip: 'Remove the notice — 1 click' }
+  ];
+  var total = hops.reduce(function (a, h) { return a + h.c; }, 0);
+  if (total !== M.metrics.clicksToResolve) window.__pfErrors.push('flow total ' + total + ' ≠ meta ' + M.metrics.clicksToResolve);
+  function node(x, y, w, h, i) {
+    var hp = hops[i], cls = 'c05-fnode' + (i === 0 ? ' c05-fnode--a' : i === hops.length - 1 ? ' c05-fnode--ok' : '');
+    var run = hops.slice(0, i + 1).reduce(function (a, q) { return a + q.c; }, 0);
+    return '<g data-tip="' + hp.tip + ' · ' + run + ' of ' + total + ' clicks so far"><rect class="' + cls + '" x="' + x + '" y="' + y + '" width="' + w + '" height="' + h + '" rx="8"/>' +
+      '<text x="' + (x + w / 2) + '" y="' + (y + 22) + '" text-anchor="middle">' + hp.t + '</text>' +
+      '<text class="c05-fsub" x="' + (x + w / 2) + '" y="' + (y + 39) + '" text-anchor="middle">' + hp.s + '</text></g>';
+  }
+  function label(x, y, i) { return hops[i].c ? '<text class="c05-fclick" x="' + x + '" y="' + y + '" text-anchor="middle">+' + hops[i].c + '</text>' : ''; }
+  var defs = '<defs><marker id="c05arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0 L10 5 L0 10z" fill="var(--g-muted)"/></marker></defs>';
+  // wide: two rows of five
+  var W = 1120, nw = 170, nh = 50, gap = (W - 5 * nw) / 4, wide = defs;
+  hops.forEach(function (h, i) {
+    var row = i < 5 ? 0 : 1, col = row ? 4 - (i - 5) : i;   // snake: second row runs right → left
+    var x = col * (nw + gap), y = 20 + row * 110;
+    wide += node(x, y, nw, nh, i);
+    if (i < hops.length - 1 && i !== 4) {
+      var x1 = row ? x - 4 : x + nw + 4, x2 = row ? x - gap + 6 : x + nw + gap - 6;
+      wide += '<path d="M' + x1 + ' ' + (y + 25) + ' H' + x2 + '" stroke="var(--g-muted)" stroke-width="2" marker-end="url(#c05arr)"/>' + label((x1 + x2) / 2, y + 16, i + 1);
+    }
+    if (i === 4) wide += '<path d="M' + (x + nw / 2) + ' ' + (y + nh + 4) + ' V' + (y + 104) + '" stroke="var(--g-muted)" stroke-width="2" marker-end="url(#c05arr)"/>' + label(x + nw / 2 + 18, y + 84, 5);
+  });
+  // narrow: one column
+  var narrow = defs, ny = 0;
+  hops.forEach(function (h, i) {
+    narrow += node(70, ny, 200, 48, i);
+    if (i < hops.length - 1) narrow += '<path d="M170 ' + (ny + 50) + ' V' + (ny + 72) + '" stroke="var(--g-muted)" stroke-width="2" marker-end="url(#c05arr)"/>' + label(196, ny + 66, i + 1);
+    ny += 76;
+  });
+  document.getElementById('flow-svg').innerHTML =
+    '<svg class="c05-flow c05-flow-wide" viewBox="0 -4 ' + W + ' 190" role="img" aria-label="Path: ' + hops.map(function (h) { return h.t; }).join(', ') + ' — ' + total + ' clicks">' + wide + '</svg>' +
+    '<svg class="c05-flow c05-flow-narrow" viewBox="0 -4 340 ' + (ny - 20) + '" role="img" aria-label="Path, ' + total + ' clicks">' + narrow + '</svg>';
+  document.getElementById('flow-total').innerHTML = 'Total: <b data-tip="Counted by hand on the mock above, with the sample answers: ' + total + ' clicks plus typing one short answer">' + total + ' clicks</b> from arrival to gone, plus typing one short answer.';
+
+  /* ───────── verdict ───────── */
+  M.pros.forEach(function (p) { document.getElementById('pros').appendChild(el('li', {}, p)); });
+  M.cons.forEach(function (p) { document.getElementById('cons').appendChild(el('li', {}, p)); });
+  PF.barChart(document.getElementById('chart'), {
+    title: 'This design in three numbers (lower is better)',
+    categories: [M.name],
+    series: [
+      { name: 'Clicks to finish', unit: 'clicks', color: 'var(--g-accent)', values: [M.metrics.clicksToResolve] },
+      { name: 'Screen space when idle', unit: 'px', color: 'var(--g-info)', values: [M.metrics.idleSpacePx] },
+      { name: 'Interruption, ×10 for the scale', unit: '(1–5 score ×10; real score ' + M.metrics.interruption + ')', color: '#14b8a6', values: [M.metrics.interruption * 10] }
+    ]
+  });
+})();
+</script>
+</body>
+</html>

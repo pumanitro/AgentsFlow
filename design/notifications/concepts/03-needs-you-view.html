@@ -1,0 +1,614 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Needs-you tab + banner — Peers Flow notifications</title>
+<meta name="description" content="One of six notification designs for Peers Flow, shown on the Abilitie timesheet scenario.">
+<link rel="stylesheet" href="../shared/tokens.css">
+<link rel="stylesheet" href="../shared/app-shell.css">
+<link rel="stylesheet" href="../shared/gallery.css">
+<script src="../shared/scenario.js"></script>
+<script src="../shared/app-shell.js"></script>
+<script src="../shared/gallery.js"></script>
+<script src="./03-needs-you-view.meta.js"></script>
+<style>
+/* ── gallery side ── */
+.c03-diagram{ display:block; width:100%; max-width:440px; height:auto; margin-top:8px; }
+.c03-diagram text, .c03-flow text{ font-family:var(--pf-font); fill:var(--g-text); }
+.c03-diagram .c03-d-frame{ fill:var(--g-surface2); stroke:var(--g-border); stroke-width:1.5; }
+.c03-diagram .c03-d-quiet{ fill:var(--g-surface); stroke:var(--g-border); }
+.c03-diagram .c03-d-hot{ fill:color-mix(in srgb, var(--g-attention) 18%, transparent); stroke:var(--g-attention); stroke-width:2; }
+.c03-diagram .c03-d-dash{ fill:color-mix(in srgb, var(--g-attention) 8%, transparent); stroke:var(--g-attention); stroke-width:1.5; stroke-dasharray:5 4; }
+.c03-caption-row{ display:flex; flex-wrap:wrap; align-items:flex-start; gap:8px 16px; justify-content:space-between; }
+.c03-caption-row .g-caption{ flex:1 1 320px; }
+.c03-clicks{ margin-top:12px; flex:0 0 auto; font-size:13px; padding:4px 10px; border-radius:999px; border:1px solid var(--g-border); background:var(--g-surface2); color:var(--g-text); font-variant-numeric:tabular-nums; }
+.c03-clicks b{ color:var(--g-attention); }
+.c03-swatch.pf-frame{ width:100%; height:auto; min-height:84px; border-radius:8px; justify-content:center; padding:14px 0; }
+.c03-level-name{ display:flex; align-items:center; gap:8px; font-weight:600; margin:0 0 8px; }
+.c03-level-rule{ font-size:13px; color:var(--g-muted); margin:8px 0 0; }
+.c03-flow-wrap{ overflow-x:auto; -webkit-overflow-scrolling:touch; }
+.c03-flow{ display:block; width:100%; min-width:600px; height:auto; }
+.c03-flow .c03-f-node{ fill:var(--g-surface2); stroke:var(--g-border); stroke-width:1.5; }
+.c03-flow .c03-f-node--hot{ fill:color-mix(in srgb, var(--g-attention) 14%, var(--g-surface)); stroke:var(--g-attention); }
+.c03-flow .c03-f-node--ok{ fill:color-mix(in srgb, var(--g-ok) 14%, var(--g-surface)); stroke:var(--g-ok); }
+.c03-flow .c03-f-arrow{ stroke:var(--g-muted); stroke-width:1.6; fill:none; }
+.c03-flow .c03-f-plus{ fill:var(--g-attention); font-weight:700; font-size:13px; }
+.c03-flow .c03-f-sub{ fill:var(--g-muted); font-size:11px; }
+.c03-total{ font-size:15px; margin:10px 0 0; }
+.c03-total b{ color:var(--g-attention); font-size:20px; }
+.g-details code{ font-family:var(--pf-mono); font-size:12.5px; }
+
+/* ── inside the app frame ── */
+.c03-ny-btn--hot{ color:var(--pf-attention) !important; box-shadow:inset 0 0 0 1px var(--pf-attention); font-weight:600; }
+.c03-ny-btn.pf-pill-btn--on{ color:var(--pf-bg) !important; box-shadow:none; }
+.c03-ny-n{ opacity:.75; }
+.c03-chip{ display:inline-flex; align-items:center; gap:6px; padding:3px 10px !important; border-radius:6px; border:1px solid var(--pf-attention) !important; background:rgba(249,115,22,.12) !important; color:var(--pf-attention) !important; font-size:11px !important; line-height:16px; text-transform:uppercase; letter-spacing:.05em; font-weight:600; }
+.c03-chip-n{ background:var(--pf-attention); color:var(--pf-bg); border-radius:999px; padding:0 6px; font-size:10px; }
+.c03-banner{ height:32px; display:flex; align-items:center; gap:8px; padding:0 16px 0 13px; background:var(--pf-panel); border-left:3px solid var(--pf-attention); border-bottom:1px solid var(--pf-border); font-size:13px; white-space:nowrap; overflow:hidden; }
+.c03-banner--enter{ animation:c03-slide .4s ease-out; }
+@keyframes c03-slide{ from{ margin-top:-32px; opacity:0; } to{ margin-top:0; opacity:1; } }
+.c03-banner-title{ font-weight:600; }
+.c03-banner-meta{ color:var(--pf-muted); font-size:12px; }
+.c03-banner-review{ margin-left:auto !important; color:var(--pf-attention) !important; font-weight:600; font-size:12px !important; padding:2px 10px !important; border-radius:6px; border:1px solid rgba(249,115,22,.55) !important; }
+.c03-banner-review:hover, .c03-banner-review:focus-visible{ background:rgba(249,115,22,.15) !important; }
+.c03-notices{ display:flex; flex-direction:column; align-items:flex-start; gap:6px; padding:6px 16px; border-bottom:1px solid var(--pf-border); background:rgba(24,27,37,.5); }
+.c03-line{ position:relative; display:flex; align-items:center; gap:8px; max-width:100%; padding:5px 10px; border-radius:6px; border:1px solid var(--pf-border); background:var(--pf-panel2); font-size:12px; line-height:16px; overflow:hidden; white-space:nowrap; transition:opacity .3s; }
+.c03-line--info{ border-color:rgba(59,130,246,.6); }
+.c03-line--warn{ border-color:rgba(251,191,36,.6); }
+.c03-line--out{ opacity:0; }
+.c03-line-icon{ display:flex; }
+.c03-line b{ font-weight:600; }
+.c03-line-body{ color:var(--pf-muted); overflow:hidden; text-overflow:ellipsis; }
+.c03-line-count{ font-family:var(--pf-mono); color:var(--pf-subtle); font-size:11px; }
+.c03-info-bar{ position:absolute; left:0; bottom:0; height:2px; width:100%; background:var(--pf-info); }
+.c03-swatch .c03-info-bar{ animation:c03-shrink 6s linear infinite; }
+@keyframes c03-shrink{ from{ width:100%; } to{ width:0; } }
+.c03-link{ color:var(--pf-accent) !important; font-size:12px !important; }
+.c03-link:hover{ text-decoration:underline; }
+.c03-x{ color:var(--pf-muted) !important; padding:0 5px !important; border-radius:4px; font-size:13px !important; }
+.c03-x:hover, .c03-x:focus-visible{ color:var(--pf-text) !important; background:var(--pf-border) !important; }
+
+.c03-view{ flex:1 1 auto; min-height:0; display:flex; }
+.c03-list{ width:288px; flex:0 0 288px; border-right:1px solid var(--pf-border); background:rgba(24,27,37,.4); overflow-y:auto; padding:8px 0; }
+.c03-group-h{ display:flex; justify-content:space-between; font-size:11px; line-height:16px; text-transform:uppercase; letter-spacing:.05em; color:var(--pf-muted); padding:10px 16px 6px; margin:0 12px 0 0; border-top:2px solid transparent; }
+.c03-row{ display:grid !important; grid-template-columns:10px minmax(0,1fr) auto; align-items:center; gap:2px 8px; width:100%; padding:7px 16px 7px 14px !important; text-align:left; font-size:13px !important; border-left:2px solid transparent !important; }
+.c03-row:hover{ background:var(--pf-panel2) !important; }
+.c03-row[aria-current="true"]{ background:var(--pf-panel2) !important; border-left-color:var(--pf-accent) !important; }
+.c03-row-title{ overflow:hidden; white-space:nowrap; text-overflow:ellipsis; }
+.c03-row-time{ font-size:11px; color:var(--pf-subtle); font-variant-numeric:tabular-nums; }
+.c03-row-sub{ grid-column:2 / 4; font-size:11px; color:var(--pf-subtle); overflow:hidden; white-space:nowrap; text-overflow:ellipsis; }
+.c03-empty{ padding:6px 16px 10px; font-size:12px; color:var(--pf-subtle); }
+.c03-work{ flex:1 1 auto; min-width:0; overflow-y:auto; padding:18px 24px 24px; }
+.c03-work-inner{ max-width:640px; display:flex; flex-direction:column; gap:12px; }
+.c03-work-head{ display:flex; align-items:center; gap:10px; }
+.c03-work-head h2{ font-size:16px !important; font-weight:600 !important; flex:1 1 auto; }
+.c03-meta{ font-size:12px; color:var(--pf-muted); }
+.c03-body{ font-size:13px; color:var(--pf-text); }
+.c03-label{ display:flex; justify-content:space-between; font-size:10px; line-height:14px; text-transform:uppercase; letter-spacing:.05em; color:var(--pf-muted); margin-top:4px; }
+.c03-filecard{ display:flex; align-items:center; gap:8px; }
+.c03-filecard .pf-file-chip{ flex:1 1 auto; }
+.c03-qs{ display:flex; flex-direction:column; gap:8px; }
+.c03-actions{ display:flex; align-items:center; gap:8px; flex-wrap:wrap; padding-top:10px; border-top:1px solid var(--pf-border); }
+.c03-missing{ font-size:11px; color:var(--pf-subtle); flex-basis:100%; }
+.c03-sent{ font-size:11px; color:var(--pf-ok); }
+.c03-done-note{ border:1px solid rgba(74,222,128,.5); background:rgba(74,222,128,.08); border-radius:6px; padding:10px 12px; font-size:13px; display:flex; gap:8px; align-items:flex-start; }
+.c03-done-note .c03-ok{ color:var(--pf-ok); display:flex; margin-top:2px; }
+.c03-locked{ opacity:.5; pointer-events:none; }
+.c03-ctx{ width:320px; flex:0 0 320px; border-left:1px solid var(--pf-border); padding:16px; display:flex; flex-direction:column; gap:10px; overflow-y:auto; }
+.c03-ctx h3{ font-size:14px !important; font-weight:600 !important; display:flex; align-items:center; gap:8px; }
+.c03-ctx dl{ margin:0; display:grid; grid-template-columns:72px 1fr; gap:6px 8px; font-size:12px; }
+.c03-ctx dt{ color:var(--pf-muted); }
+.c03-ctx dd{ margin:0; min-width:0; overflow-wrap:anywhere; }
+.c03-ctx .pf-card{ cursor:default; }
+.c03-prev{ display:flex; align-items:center; gap:8px; font-size:12px; }
+.c03-quote{ font-family:var(--pf-mono); font-size:11.5px; line-height:16px; color:var(--pf-muted); border-left:2px solid var(--pf-border); padding-left:8px; }
+</style>
+</head>
+<body>
+<nav id="pf-nav" data-current="03"></nav>
+<main class="g-page">
+  <section class="g-hero">
+    <p class="g-eyebrow">Design 03 of 6</p>
+    <h1>Needs-you tab + banner</h1>
+    <p class="g-lede">Next to “Chat” and “Routines” there is a third tab, “Needs you”. While something is waiting for you, a slim orange strip sits under the header on every screen and points to it — it cannot be closed, it only goes away once the job is done.</p>
+    <ul class="g-badges">
+      <li class="g-badge g-badge--accent"><b>Where it lives</b> A third tab in the top switch, plus a strip on every screen</li>
+      <li class="g-badge"><b>How you answer</b> On a page of its own: list, form, background</li>
+      <li class="g-badge"><b>How it gets your attention</b> The orange strip slides in and pushes the screen down</li>
+    </ul>
+    <svg class="c03-diagram" viewBox="0 0 360 214" role="img" aria-label="Where it lives: the third tab in the header, the orange strip under it, and the Needs-you page filling the window">
+      <rect class="c03-d-frame" x="1" y="1" width="358" height="212" rx="10"/>
+      <rect class="c03-d-quiet" x="1" y="1" width="358" height="30" rx="10"/>
+      <circle cx="16" cy="16" r="3.5" fill="#ff5f57"/><circle cx="28" cy="16" r="3.5" fill="#febc2e"/><circle cx="40" cy="16" r="3.5" fill="#28c840"/>
+      <text x="56" y="20" font-size="10" font-weight="600">Peers Flow</text>
+      <rect class="c03-d-quiet" x="168" y="8" width="44" height="16" rx="3" data-tip="Chat tab — your pinned conversations"/>
+      <text x="190" y="19.5" font-size="8" text-anchor="middle">CHAT</text>
+      <rect class="c03-d-quiet" x="212" y="8" width="58" height="16" rx="3" data-tip="Routines tab — chats that start on a schedule"/>
+      <text x="241" y="19.5" font-size="8" text-anchor="middle">ROUTINES</text>
+      <rect class="c03-d-hot" x="270" y="8" width="80" height="16" rx="3" data-tip="New third tab · “Needs you (1)” · orange while anything waits, plain at 0, never hidden"/>
+      <text x="310" y="19.5" font-size="8" text-anchor="middle" font-weight="700">NEEDS YOU (1)</text>
+      <rect class="c03-d-hot" x="1" y="31" width="358" height="18" data-tip="The strip · 32 pixels tall · on every screen while something needs you · no close button"/>
+      <text x="12" y="43.5" font-size="8.5">● Abilitie timesheet is ready — needs you · Review ›</text>
+      <rect class="c03-d-dash" x="8" y="56" width="84" height="150" rx="5" data-tip="Left column · the list: “Needs you” on top, “Earlier” below"/>
+      <text x="50" y="134" font-size="9" text-anchor="middle">List</text>
+      <rect class="c03-d-dash" x="98" y="56" width="168" height="150" rx="5" data-tip="Middle column · the form: the PDF, four questions, the to-do, Send and Dismiss"/>
+      <text x="182" y="134" font-size="9" text-anchor="middle">File · questions · to-do</text>
+      <rect class="c03-d-dash" x="272" y="56" width="80" height="150" rx="5" data-tip="Right column · 320 pixels · which routine, this run, last month's run, open the chat"/>
+      <text x="312" y="134" font-size="9" text-anchor="middle">Background</text>
+    </svg>
+  </section>
+
+  <section id="pf-main-frame" class="g-section">
+    <h2>Try it: the timesheet from start to finish</h2>
+    <p>Press the steps, or click inside the picture yourself — every button, question and tab works.</p>
+    <div class="g-step-rail" id="rail"></div>
+    <div class="pf-frame-wrap"><div id="frame"></div></div>
+    <div class="c03-caption-row">
+      <p class="g-caption" id="caption"></p>
+      <span class="c03-clicks" id="c03-clicks" data-tip="Clicks made inside the picture since the notice arrived">Clicks so far: <b>0</b></span>
+    </div>
+  </section>
+
+  <section class="g-section" id="everywhere">
+    <h2>You can see it from everywhere</h2>
+    <p>The same strip and the same counter show on the home list, on the routines board and inside a chat. Inside a chat there is no Chat | Routines switch, so the counter becomes a small orange chip at the top right.</p>
+    <div class="g-grid-3">
+      <div><p class="g-mini-label">Home</p><div class="pf-frame-wrap g-mini"><div id="mini-home"></div></div></div>
+      <div><p class="g-mini-label">Routines</p><div class="pf-frame-wrap g-mini"><div id="mini-routines"></div></div></div>
+      <div><p class="g-mini-label">Inside a chat</p><div class="pf-frame-wrap g-mini"><div id="mini-session"></div></div></div>
+    </div>
+  </section>
+
+  <section class="g-section" id="levels">
+    <h2>Three kinds of notices</h2>
+    <p>Only real “needs you” work gets the strip and the counter. The two lighter kinds show as a thin line just under it.</p>
+    <div class="g-grid-3">
+      <div class="g-card" data-tip="Blue · Just so you know · disappears after 6 seconds">
+        <p class="c03-level-name" id="lv-info-name"></p>
+        <div class="pf-frame c03-swatch" id="lv-info"></div>
+        <p class="c03-level-rule" id="lv-info-rule"></p>
+      </div>
+      <div class="g-card" data-tip="Yellow · Something went wrong · stays until 1 click on ✕">
+        <p class="c03-level-name" id="lv-warn-name"></p>
+        <div class="pf-frame c03-swatch" id="lv-warn"></div>
+        <p class="c03-level-rule" id="lv-warn-rule"></p>
+      </div>
+      <div class="g-card" data-tip="Orange · Needs you · stays until 4 of 4 questions are answered and 1 of 1 to-do is ticked">
+        <p class="c03-level-name" id="lv-action-name"></p>
+        <div class="pf-frame c03-swatch" id="lv-action"></div>
+        <p class="c03-level-rule" id="lv-action-rule"></p>
+      </div>
+    </div>
+  </section>
+
+  <section class="g-section" id="flow">
+    <h2>Your path through it</h2>
+    <p>Every click from the moment the strip appears until it is gone, using the sample answers. Typing the change in question 4 is not counted as clicks.</p>
+    <div class="c03-flow-wrap">
+      <svg class="c03-flow" viewBox="0 0 820 236" role="img" aria-label="Path: arrives, Review, open the PDF, four questions, tick the to-do, send answers, dismiss — 9 clicks">
+        <defs><marker id="c03Arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0 L10 5 L0 10z" fill="var(--g-muted)"/></marker></defs>
+        <g data-tip="Arrives · 09:04 · 0 clicks — the strip slides in and the tab reads Needs you (1)"><rect class="c03-f-node c03-f-node--hot" x="10" y="20" width="130" height="58" rx="8"/><text x="75" y="45" text-anchor="middle" font-size="14" font-weight="600">Arrives</text><text class="c03-f-sub" x="75" y="63" text-anchor="middle">09:04 · strip appears</text></g>
+        <path class="c03-f-arrow" d="M142 49 H176" marker-end="url(#c03Arrow)"/><text class="c03-f-plus" x="158" y="40" text-anchor="middle">+1</text>
+        <g data-tip="Open · 1 click — “Review ›” on the strip (or the Needs you tab)"><rect class="c03-f-node" x="180" y="20" width="130" height="58" rx="8"/><text x="245" y="45" text-anchor="middle" font-size="14" font-weight="600">Review ›</text><text class="c03-f-sub" x="245" y="63" text-anchor="middle">opens the page</text></g>
+        <path class="c03-f-arrow" d="M312 49 H346" marker-end="url(#c03Arrow)"/><text class="c03-f-plus" x="328" y="40" text-anchor="middle">+1</text>
+        <g data-tip="File · 1 click — Open shows the October timesheet PDF in Preview"><rect class="c03-f-node" x="350" y="20" width="130" height="58" rx="8"/><text x="415" y="45" text-anchor="middle" font-size="14" font-weight="600">Open the PDF</text><text class="c03-f-sub" x="415" y="63" text-anchor="middle">184 KB timesheet</text></g>
+        <path class="c03-f-arrow" d="M482 49 H516" marker-end="url(#c03Arrow)"/><text class="c03-f-plus" x="498" y="40" text-anchor="middle">+1</text>
+        <g data-tip="Question 1 · 1 click — days off? answer: No"><rect class="c03-f-node" x="520" y="20" width="130" height="58" rx="8"/><text x="585" y="45" text-anchor="middle" font-size="14" font-weight="600">Q1 days off</text><text class="c03-f-sub" x="585" y="63" text-anchor="middle">“No”</text></g>
+        <path class="c03-f-arrow" d="M652 49 H686" marker-end="url(#c03Arrow)"/><text class="c03-f-plus" x="668" y="40" text-anchor="middle">+1</text>
+        <g data-tip="Question 2 · 1 click — handed to someone else? answer: No"><rect class="c03-f-node" x="690" y="20" width="120" height="58" rx="8"/><text x="750" y="45" text-anchor="middle" font-size="14" font-weight="600">Q2 handed off</text><text class="c03-f-sub" x="750" y="63" text-anchor="middle">“No”</text></g>
+        <path class="c03-f-arrow" d="M750 80 V110 H75 V136" marker-end="url(#c03Arrow)"/><text class="c03-f-plus" x="410" y="104" text-anchor="middle">+1</text>
+        <g data-tip="Question 3 · 1 click — vacation days right? answer: Only 10 Oct"><rect class="c03-f-node" x="10" y="140" width="130" height="58" rx="8"/><text x="75" y="165" text-anchor="middle" font-size="14" font-weight="600">Q3 vacation</text><text class="c03-f-sub" x="75" y="183" text-anchor="middle">“Only 10 Oct”</text></g>
+        <path class="c03-f-arrow" d="M142 169 H176" marker-end="url(#c03Arrow)"/><text class="c03-f-plus" x="158" y="160" text-anchor="middle">+1</text>
+        <g data-tip="Question 4 · 1 click into the box, then you type the change"><rect class="c03-f-node" x="180" y="140" width="130" height="58" rx="8"/><text x="245" y="165" text-anchor="middle" font-size="14" font-weight="600">Q4 edits</text><text class="c03-f-sub" x="245" y="183" text-anchor="middle">click + type</text></g>
+        <path class="c03-f-arrow" d="M312 169 H346" marker-end="url(#c03Arrow)"/><text class="c03-f-plus" x="328" y="160" text-anchor="middle">+1</text>
+        <g data-tip="To-do · 1 click — tick “Send the timesheet email yourself”"><rect class="c03-f-node" x="350" y="140" width="130" height="58" rx="8"/><text x="415" y="165" text-anchor="middle" font-size="14" font-weight="600">Tick the to-do</text><text class="c03-f-sub" x="415" y="183" text-anchor="middle">email is yours</text></g>
+        <path class="c03-f-arrow" d="M482 169 H516" marker-end="url(#c03Arrow)"/><text class="c03-f-plus" x="498" y="160" text-anchor="middle">+1</text>
+        <g data-tip="Send answers · 1 click — the answers go back into the routine's chat"><rect class="c03-f-node" x="520" y="140" width="130" height="58" rx="8"/><text x="585" y="165" text-anchor="middle" font-size="14" font-weight="600">Send answers</text><text class="c03-f-sub" x="585" y="183" text-anchor="middle">to the agent</text></g>
+        <path class="c03-f-arrow" d="M652 169 H686" marker-end="url(#c03Arrow)"/><text class="c03-f-plus" x="668" y="160" text-anchor="middle">+1</text>
+        <g data-tip="Dismiss · 1 click — strip gone, counter 0, routine card green · total 9 clicks"><rect class="c03-f-node c03-f-node--ok" x="690" y="140" width="120" height="58" rx="8"/><text x="750" y="165" text-anchor="middle" font-size="14" font-weight="600">Dismiss</text><text class="c03-f-sub" x="750" y="183" text-anchor="middle">all clear</text></g>
+        <text x="410" y="226" text-anchor="middle" font-size="13" class="c03-f-sub">Each “+1” is one click</text>
+      </svg>
+    </div>
+    <p class="c03-total" data-tip="Clicks to finish · counted on the picture above · 9 clicks">In total: <b id="c03-total-n">9</b> clicks from “it arrived” to “it is gone”.</p>
+  </section>
+
+  <section class="g-section" id="verdict">
+    <h2>Good and not so good</h2>
+    <div class="g-grid-2">
+      <div><h3>Good</h3><ul class="g-pros" id="c03-pros"></ul></div>
+      <div><h3>Not so good</h3><ul class="g-cons" id="c03-cons"></ul></div>
+    </div>
+    <div id="c03-chart"></div>
+    <div class="g-callout g-callout--info"><p>Screen space when idle is 0: with nothing waiting the strip is gone and the extra tab sits inside the header row that is already there. Interruption is 3 of 5: the strip pushes the screen on every page, but nothing pops over your work.</p></div>
+  </section>
+
+  <details class="g-details" id="build">
+    <summary>How it would be built (for the engineer)</summary>
+    <p>All six designs share one pipeline: the agent calls a new <code>notify</code> tool on the existing <code>peersflow</code> server, the main process stores the notice in <code>notifications.json</code> and pushes snapshots to the window, and answers go back into the source chat as one message. Details and types: <a href="../index.html#build">the shared story on the index page</a>.</p>
+    <p>What this design adds:</p>
+    <ul>
+      <li><code>renderer/lib/ui-state.ts</code> — the <code>view</code> union gains <code>'needsYou'</code>; a third pill button in <code>pages/index.tsx</code> (orange text and outline while the count of open <code>action</code> notices is above 0; plain at 0, never hidden).</li>
+      <li><code>components/needs-you/NeedsYouView.tsx</code> rendered in the same slot as <code>RoutinesView</code> (it replaces the whole body like Routines does; no peers sidebar, no SpawnBar), with children <code>NeedsYouList</code> (groups “Needs you” / “Earlier”), <code>NeedsYouWork</code> (file card with Open / Reveal in Finder via the <code>open_file</code> route, questions, to-do, Send answers, Dismiss) and <code>NeedsYouContext</code> (320 px: routine, this run's card, previous run, Open chat).</li>
+      <li><code>NeedsYouBanner.tsx</code> — 32 px, <code>bg-panel</code>, orange left edge, no ✕; rendered right after <code>&lt;header&gt;</code> in <code>index.tsx</code>, <code>session.tsx</code> and <code>preview.tsx</code> as a normal flex child (pushes content, no fixed positioning). In <code>session.tsx</code> the counter is a chip in the header actions, because that header has no Chat | Routines pill.</li>
+      <li><code>info</code> / <code>warn</code> notices render as one-line rows under the banner (Routines toast look): <code>info</code> removes itself after 6000 ms with a visible bar; <code>warn</code> waits for ✕.</li>
+      <li>Selection (which notice is open) is remembered per window in <code>renderer/lib/needs-you-ui-state.ts</code>, same pattern as <code>routines-ui-state.ts</code>. The banner's “Review ›” selects the oldest open <code>action</code>.</li>
+      <li>Dismiss is disabled until <code>canDismiss(n)</code> and <code>answersSentAt</code> are both true; its tooltip lists what is missing. Dismissed notices stay under “Earlier” (180-day retention from the shared store); <code>readAt</code> is set when the work panel first shows a notice.</li>
+      <li>Effort L: a new top-level view, a banner in three pages, and the list/work/context split.</li>
+    </ul>
+  </details>
+</main>
+<script>
+(function () {
+  'use strict';
+  var S = window.PF_SCENARIO, el = PF.el, META = window.PF_CONCEPTS['03'];
+  function byId(list, id) { return (list || []).filter(function (x) { return x.id === id; })[0]; }
+  var NT = byId(S.notifications, 'n-timesheet'), NR = byId(S.notifications, 'n-reddit'), NC = byId(S.notifications, 'n-crash');
+  var LV = S.levels;
+  function routineOf(n) { return byId(S.routines, n.source.routineId); }
+  function runOf(n) { return byId(S.runs, n.source.runId); }
+  function convOf(n) { return byId(S.conversations, n.source.conversationId); }
+  function peerOf(n) { return byId(S.peers, n.source.peerId); }
+  function ordinal(d) { return d + (d === 1 || d === 21 ? 'st' : d === 2 || d === 22 ? 'nd' : d === 3 || d === 23 ? 'rd' : 'th'); }
+  function whenLabel(r) {
+    var cad = { daily: 'Daily', monthly: 'Monthly', twiceMonthly: 'Twice a month' }[r.cadence] || r.cadence;
+    return cad + ' · ' + r.time + (r.monthDays ? ' (' + r.monthDays.map(ordinal).join(' and ') + ')' : '');
+  }
+  var TS_ROUTINE = routineOf(NT), TS_RUN = runOf(NT), TS_CONV = convOf(NT);
+  var PREV_RUN = S.runs.filter(function (r) { return r.routineId === TS_ROUTINE.id && r.id !== TS_RUN.id; })[0];
+  var LEVEL_DOT = { info: 'info', warn: 'warn', action: 'attention' };
+
+  /* ───────── pieces drawn the same way everywhere ───────── */
+  function bannerEl(n, opts) {
+    opts = opts || {};
+    var review = el('button', { type: 'button', class: 'c03-banner-review', title: 'Open the Needs-you page on this notice' }, 'Review ›');
+    if (opts.onReview) review.addEventListener('click', opts.onReview);
+    return el('div', { class: 'c03-banner' + (opts.enter ? ' c03-banner--enter' : ''), role: 'status', 'data-tip': n.title + ' · since ' + PF.formatTime(n.createdAt) + ' · stays until resolved' }, [
+      PF.dot('attention', true),
+      el('span', { class: 'c03-banner-title' }, n.title),
+      el('span', { class: 'c03-banner-meta' }, '· ' + routineOf(n).name + ' · ' + PF.formatDay(n.createdAt) + ' ' + PF.formatTime(n.createdAt)),
+      review
+    ]);
+  }
+  function infoLine(n, opts) {
+    opts = opts || {};
+    var count = el('span', { class: 'c03-line-count' }, opts.left === undefined ? '6 s' : Math.ceil(opts.left / 1000) + ' s');
+    var bar = el('i', { class: 'c03-info-bar', style: opts.left === undefined ? '' : 'width:' + (opts.left / NR.autoDismissMs * 100) + '%' });
+    var line = el('div', { class: 'c03-line c03-line--info', role: 'status', 'data-tip': LV.info.label + ' · ' + n.title + ' · fades after ' + (n.autoDismissMs / 1000) + ' s' }, [
+      el('span', { class: 'c03-line-icon', style: 'color:var(--pf-info)' }, PF.icon('info', 13)),
+      el('b', {}, n.title), el('span', { class: 'c03-line-body' }, '— ' + n.body), count, bar
+    ]);
+    line.count = count; line.bar = bar;
+    return line;
+  }
+  function warnLine(n, opts) {
+    opts = opts || {};
+    var open = el('button', { type: 'button', class: 'c03-link' }, 'Open chat ›');
+    var x = el('button', { type: 'button', class: 'c03-x', 'aria-label': 'Close this notice', title: 'Close (1 click)' }, '✕');
+    if (opts.onOpen) open.addEventListener('click', opts.onOpen);
+    if (opts.onClose) x.addEventListener('click', opts.onClose);
+    return el('div', { class: 'c03-line c03-line--warn', role: 'alert', 'data-tip': LV.warn.label + ' · ' + n.title + ' · since ' + PF.formatTime(n.createdAt) + ' · 1 click on ✕ to close' }, [
+      el('span', { class: 'c03-line-icon', style: 'color:var(--pf-warn)' }, PF.icon('warning', 13)),
+      el('b', {}, n.title), el('span', { class: 'c03-line-body' }, '— ' + n.body), open, x
+    ]);
+  }
+  function pillButton(count, on) {
+    return el('button', {
+      type: 'button', role: 'tab', 'aria-selected': String(!!on),
+      class: 'pf-pill-btn c03-ny-btn' + (count > 0 ? ' c03-ny-btn--hot' : '') + (on ? ' pf-pill-btn--on' : ''),
+      title: count > 0 ? count + ' notice needs you' : 'Nothing needs you',
+      'data-tip': 'Needs you · ' + count + (count === 1 ? ' notice waiting' : ' notices waiting')
+    }, ['Needs you ', el('span', { class: 'c03-ny-n' }, '(' + count + ')')]);
+  }
+  function sessionChip(count) {
+    return el('button', { type: 'button', class: 'c03-chip', 'data-tip': 'Needs you · ' + count + ' notice waiting · click to review' }, ['Needs you', el('span', { class: 'c03-chip-n' }, String(count))]);
+  }
+
+  /* ───────── the main interactive frame ───────── */
+  var host = document.getElementById('frame');
+  var captionEl = document.getElementById('caption');
+  var clicksEl = document.getElementById('c03-clicks');
+  var M, V;
+
+  function freshModel() { return { view: 'home', arrived: false, enter: false, redditStart: 0, redditGone: false, crashClosed: false, tsDone: false, sent: false, selected: NT.id, clicks: 0, timers: [], h: null }; }
+  function count() { return M.arrived && !M.tsDone ? 1 : 0; }
+  function setClicks() { clicksEl.innerHTML = ''; clicksEl.appendChild(document.createTextNode('Clicks so far: ')); clicksEl.appendChild(el('b', {}, String(M.clicks))); clicksEl.setAttribute('data-tip', 'Clicks made inside the picture since the notice arrived: ' + M.clicks + ' clicks'); }
+  host.addEventListener('click', function (e) {
+    if (!M || !M.arrived) return;
+    var t = e.target;
+    if (!t || t.tagName === 'LABEL') return;              // the browser re-sends a label click to its input; count that one
+    if (!t.closest('button, input, [role="tab"]')) return;
+    M.clicks++; setClicks();
+  }, true);
+
+  function setView(v) { M.view = v; render(); }
+
+  function renderNotices(h) {
+    var old = h.banner.querySelector('.c03-notices');
+    if (old) old.remove();
+    if (!M.arrived) return;
+    var lines = [];
+    if (!M.redditGone) {
+      var left = Math.max(0, NR.autoDismissMs - (performance.now() - M.redditStart));
+      var il = infoLine(NR, { left: left });
+      M.infoLine = il; lines.push(il);
+    } else M.infoLine = null;
+    if (!M.crashClosed) lines.push(warnLine(NC, {
+      onOpen: function () { PF.toast(h.frame, 'Opens the chat ‘' + convOf(NC).title + '’', { level: 'info' }); },
+      onClose: function () { M.crashClosed = true; refresh(); }
+    }));
+    if (lines.length) h.banner.appendChild(el('div', { class: 'c03-notices' }, lines));
+  }
+
+  function decorate(h, view, n, opts) {
+    opts = opts || {};
+    if (h.pill) {
+      var b = pillButton(n, view === 'needsYou');
+      h.pill.appendChild(b);
+      if (view === 'needsYou') { h.pill.children[0].classList.remove('pf-pill-btn--on'); h.pill.children[0].setAttribute('aria-selected', 'false'); }
+      if (opts.interactive) {
+        h.pill.children[0].addEventListener('click', function () { setView('home'); });
+        h.pill.children[1].addEventListener('click', function () { setView('routines'); });
+        b.addEventListener('click', function () { setView('needsYou'); });
+      }
+    } else if (h.headerRight) {
+      h.headerRight.insertBefore(sessionChip(n), h.headerRight.firstChild);
+    }
+    if (n > 0) h.banner.appendChild(bannerEl(NT, { enter: opts.enter, onReview: opts.interactive ? function () { M.selected = NT.id; setView('needsYou'); } : null }));
+    if (h.routineCards && h.routineCards.size) h.setRunStatus(TS_RUN.id, opts.done ? 'success' : 'attention');
+  }
+
+  function render() {
+    var shellView = M.view === 'routines' ? 'routines' : 'home';
+    var h = M.h = PF.renderAppShell(host, { view: shellView, width: 1280, height: 800 });
+    decorate(h, M.view, count(), { interactive: true, enter: M.enter, done: M.tsDone });
+    M.enter = false;
+    renderNotices(h);
+    if (M.view === 'needsYou') {
+      h.sidebar.style.display = 'none';
+      if (h.composer) h.composer.style.display = 'none';
+      h.main.replaceChildren(V.el);
+      V.refresh();
+    }
+    PF.fitFrames();
+  }
+  function refresh() { render(); }
+
+  /* ───────── the Needs-you page (built once per reset, moved between frames) ───────── */
+  function buildView() {
+    var list = el('div', { class: 'c03-list', role: 'listbox', 'aria-label': 'Notifications' });
+    var work = el('div', { class: 'c03-work' });
+    var ctx = el('aside', { class: 'c03-ctx', 'aria-label': 'Background' });
+    var root = el('div', { class: 'c03-view' }, [list, work, ctx]);
+
+    // the timesheet form — persistent so answers survive tab switches
+    var chip = PF.fileChip(NT.files[0]);
+    var reveal = PF.button('Reveal in Finder', { small: true, title: 'Show the file in its folder' });
+    reveal.addEventListener('click', function (e) { e.stopPropagation(); PF.toast(chip.closest('.pf-frame'), 'Showed ' + NT.files[0].path.split('/').pop() + ' in Finder', { level: 'ok' }); });
+    var qCounter = el('span', {});
+    var qs = NT.questions.map(function (q) { return PF.question(q, { onAnswer: update }); });
+    var todos = NT.todos.map(function (t) { return PF.todo(t, { onToggle: update }); });
+    var sendBtn = PF.button('Send answers to the agent', { variant: 'primary', small: true });
+    var fill = el('button', { type: 'button', class: 'pf-link-btn' }, 'Fill sample answers');
+    var sentNote = el('span', { class: 'c03-sent' });
+    var dismissBtn = PF.button('Dismiss', { variant: 'ok', small: true });
+    var missingEl = el('span', { class: 'c03-missing' });
+    var doneNote = el('div', { class: 'c03-done-note', style: 'display:none' }, [
+      el('span', { class: 'c03-ok' }, PF.icon('check', 14)),
+      el('span', {}, ['Dismissed. The run is marked done and the strip is gone everywhere. ', el('b', {}, 'Still yours by hand: '), NT.todos[0].text.replace(/ — .*/, '') + '.'])
+    ]);
+    fill.addEventListener('click', function () { qs.forEach(function (q) { q.setAnswer(q.question.sampleAnswer); }); });
+    sendBtn.addEventListener('click', function () {
+      if (!allAnswered() || M.sent) return;
+      M.sent = true;
+      sentNote.textContent = '✓ Sent to the chat ‘' + TS_CONV.title + '’';
+      PF.toast(M.h.frame, 'Sent to the chat ‘' + TS_CONV.title + '’', { level: 'ok' });
+      update();
+    });
+    dismissBtn.addEventListener('click', function () {
+      if (missing().length) return;
+      M.tsDone = true;
+      refresh();
+    });
+    var form = el('div', { class: 'c03-form' }, [
+      el('div', { class: 'c03-label' }, [el('span', {}, 'The file to check')]),
+      el('div', { class: 'c03-filecard' }, [chip, reveal]),
+      el('div', { class: 'c03-label' }, [el('span', {}, 'Questions from the agent'), qCounter]),
+      el('div', { class: 'c03-qs' }, qs.map(function (q) { return q.el; })),
+      el('div', { class: 'c03-label' }, [el('span', {}, 'Yours to do by hand')]),
+      todos.map(function (t) { return t.el; }),
+      el('div', { class: 'c03-actions' }, [sendBtn, fill, sentNote, el('span', { class: 'pf-grow' }), dismissBtn, missingEl])
+    ]);
+    form.style.cssText = 'display:flex;flex-direction:column;gap:10px';
+
+    function allAnswered() { return qs.every(function (q) { return q.answered(); }); }
+    function missing() {
+      var out = [], left = qs.filter(function (q) { return !q.answered(); }).length;
+      if (left) out.push(left + (left === 1 ? ' question' : ' questions') + ' unanswered');
+      var td = todos.filter(function (t) { return !t.done(); }).length;
+      if (td) out.push(td + ' to-do not ticked');
+      if (!M.sent) out.push('answers not sent yet');
+      return out;
+    }
+    function update() {
+      var answered = qs.filter(function (q) { return q.answered(); }).length;
+      qCounter.textContent = answered + ' of ' + qs.length + ' answered';
+      qCounter.setAttribute('data-tip', answered + ' of ' + qs.length + ' questions answered');
+      sendBtn.disabled = !allAnswered() || M.sent;
+      sendBtn.title = M.sent ? 'Already sent' : allAnswered() ? 'Post the answers into the chat' : 'Answer every question first';
+      var miss = missing();
+      dismissBtn.disabled = miss.length > 0 || M.tsDone;
+      dismissBtn.title = M.tsDone ? 'Already dismissed' : miss.length ? 'Still missing: ' + miss.join(', ') : 'Everything is done — dismiss';
+      missingEl.textContent = M.tsDone ? '' : miss.length ? 'Dismiss unlocks when done · still missing: ' + miss.join(' · ') : 'All done — you can dismiss it now.';
+    }
+
+    function row(n, state) {
+      var r = el('button', { type: 'button', class: 'c03-row', role: 'option', 'aria-current': String(M.selected === n.id), 'aria-selected': String(M.selected === n.id), 'data-tip': LV[n.level].label + ' · ' + n.title + ' · ' + PF.formatTime(n.createdAt) }, [
+        PF.dot(state === 'done' ? 'ok' : LEVEL_DOT[n.level], state === 'open' && n.level === 'action'),
+        el('span', { class: 'c03-row-title' }, n.title),
+        el('span', { class: 'c03-row-time' }, PF.formatTime(n.createdAt)),
+        el('span', { class: 'c03-row-sub' }, routineOf(n).name + ' · ' + (state === 'done' ? 'done, dismissed' : state === 'closed' ? 'closed' : LV[n.level].label))
+      ]);
+      r.addEventListener('click', function () { M.selected = n.id; V.refresh(); });
+      return r;
+    }
+    function group(title, n, rows, colour) {
+      return [el('div', { class: 'c03-group-h', style: 'border-top-color:' + colour }, [el('span', {}, title), el('span', {}, '(' + n + ')')])].concat(rows);
+    }
+
+    function renderList() {
+      list.replaceChildren();
+      var open = M.arrived && !M.tsDone ? [row(NT, 'open')] : [];
+      list.append.apply(list, group('Needs you', open.length, open.length ? open : [el('div', { class: 'c03-empty' }, 'Nothing waiting — all clear.')], 'var(--pf-attention)'));
+      var earlier = [];
+      if (M.arrived) {
+        if (M.tsDone) earlier.push(row(NT, 'done'));
+        earlier.push(row(NR, 'seen'));
+        earlier.push(row(NC, M.crashClosed ? 'closed' : 'seen'));
+      }
+      list.append.apply(list, group('Earlier', earlier.length, earlier.length ? earlier : [el('div', { class: 'c03-empty' }, 'No older notices.')], 'var(--pf-border)'));
+    }
+
+    function renderWork() {
+      work.replaceChildren();
+      var n = byId(S.notifications, M.selected) || NT;
+      if (!M.arrived) { work.appendChild(el('div', { class: 'c03-empty', style: 'padding:24px 0' }, 'Nothing needs you right now.')); return; }
+      var badge = n.id === NT.id && M.tsDone ? PF.badge('Done', 'ok') : PF.badge(LV[n.level].label, n.level === 'action' ? 'attention' : n.level);
+      var inner = el('div', { class: 'c03-work-inner' }, [
+        el('div', { class: 'c03-work-head' }, [PF.dot(n.id === NT.id && M.tsDone ? 'ok' : LEVEL_DOT[n.level], n.level === 'action' && !M.tsDone), el('h2', {}, n.title), badge]),
+        el('div', { class: 'c03-meta' }, 'From the routine “' + routineOf(n).name + '” on ' + peerOf(n).name + ' · ' + PF.formatDay(n.createdAt) + ' at ' + PF.formatTime(n.createdAt)),
+        el('div', { class: 'c03-body' }, n.body)
+      ]);
+      if (n.id === NT.id) {
+        form.classList.toggle('c03-locked', M.tsDone);
+        doneNote.style.display = M.tsDone ? '' : 'none';
+        inner.appendChild(doneNote);
+        inner.appendChild(form);
+      } else {
+        var acts = el('div', { class: 'c03-actions' }, [PF.button('Open chat ›', { small: true, on: function () { PF.toast(M.h.frame, 'Opens the chat ‘' + convOf(n).title + '’', { level: 'info' }); } })]);
+        if (n.level === 'warn' && !M.crashClosed) acts.appendChild(PF.button('✕ Close', { small: true, on: function () { M.crashClosed = true; refresh(); } }));
+        inner.appendChild(el('div', { class: 'c03-meta' }, LV[n.level].rule + '.'));
+        inner.appendChild(acts);
+      }
+      work.appendChild(inner);
+    }
+
+    function renderCtx() {
+      ctx.replaceChildren();
+      if (!M.arrived) return;
+      var n = byId(S.notifications, M.selected) || NT;
+      var r = routineOf(n), run = runOf(n);
+      var status = n.id === NT.id ? (M.tsDone ? 'success' : 'attention') : run.status;
+      var word = { attention: 'needs you', failed: 'failed', running: 'running' }[status];
+      var card = el('div', { class: 'pf-card pf-card--' + status, 'data-tip': r.name + ' · ' + PF.formatDay(run.slotAt) + ' ' + PF.formatTime(run.slotAt) + ' · ' + (word || 'done') }, [el('b', {}, r.name), el('span', {}, PF.formatTime(run.slotAt) + (word ? ' · ' + word : ''))]);
+      ctx.append(
+        el('div', { class: 'c03-label', style: 'margin-top:0' }, [el('span', {}, 'Routine')]),
+        el('h3', {}, [el('span', { style: 'color:var(--pf-accent);display:flex' }, PF.icon('clock', 16)), r.name]),
+        el('dl', {}, [el('dt', {}, 'Agent'), el('dd', {}, byId(S.peers, r.peerId).name), el('dt', {}, 'When'), el('dd', {}, whenLabel(r)), el('dt', {}, 'Prompt'), el('dd', { class: 'pf-mono', style: 'font-size:11px' }, r.prompt)]),
+        el('div', { class: 'c03-label' }, [el('span', {}, 'This run on the board')]),
+        card,
+        el('div', { class: 'c03-meta' }, PF.formatDay(run.slotAt) + ' ' + PF.formatTime(run.slotAt) + ' · ' + (run.summary || run.error || '')),
+        el('div', {}, PF.button('Open chat ›', { small: true, on: function () { PF.toast(M.h.frame, 'Opens the chat ‘' + convOf(n).title + '’', { level: 'info' }); } }))
+      );
+      if (n.id === NT.id && PREV_RUN) {
+        ctx.append(
+          el('div', { class: 'c03-label' }, [el('span', {}, 'Previous run')]),
+          el('div', { class: 'c03-prev', 'data-tip': 'Previous run · ' + PF.formatDay(PREV_RUN.slotAt) + ' ' + PF.formatTime(PREV_RUN.slotAt) + ' · ' + PREV_RUN.status }, [PF.dot('ok'), PF.formatDay(PREV_RUN.slotAt) + ' — ' + PREV_RUN.summary]),
+          el('div', { class: 'c03-label' }, [el('span', {}, 'Last words in the chat')]),
+          el('div', { class: 'c03-quote' }, S.chat.lines[S.chat.lines.length - 1].text)
+        );
+      }
+    }
+
+    update();
+    return {
+      el: root, work: work, qs: qs, todos: todos, chip: chip, sendBtn: sendBtn, dismissBtn: dismissBtn,
+      refresh: function () { renderList(); renderWork(); renderCtx(); update(); }
+    };
+  }
+
+  /* ───────── the info notice's 6-second fade (one timer, cleared on every reset) ───────── */
+  function startFade() {
+    M.redditStart = performance.now();
+    var id = setInterval(function () {
+      var left = NR.autoDismissMs - (performance.now() - M.redditStart);
+      if (left <= 0) { clearInterval(id); fadeOut(); return; }
+      if (M.infoLine) { M.infoLine.bar.style.width = (left / NR.autoDismissMs * 100) + '%'; M.infoLine.count.textContent = Math.ceil(left / 1000) + ' s'; }
+    }, 100);
+    M.timers.push(function () { clearInterval(id); });
+  }
+  function fadeOut() {
+    if (M.redditGone) return;
+    var line = M.infoLine;
+    if (line) line.classList.add('c03-line--out');
+    var t = setTimeout(function () { M.redditGone = true; renderNotices(M.h); }, 320);
+    M.timers.push(function () { clearTimeout(t); });
+  }
+  function clearTimers() { if (M) M.timers.forEach(function (f) { f(); }); }
+
+  /* ───────── steps ───────── */
+  function q(i) { return V.qs[i]; }
+  function answerByClick(qo) {
+    var sample = qo.question.sampleAnswer, ctl = qo.el.querySelector('.pf-q-controls');
+    if (qo.question.kind === 'yesno') { [].filter.call(ctl.querySelectorAll('button'), function (b) { return b.textContent === sample; })[0].click(); }
+    else if (qo.question.kind === 'choice') { [].filter.call(ctl.querySelectorAll('input'), function (r) { return r.value === sample; })[0].click(); }
+    else { var inp = ctl.querySelector('input'); inp.click(); qo.setAnswer(sample); }
+  }
+  var rail = PF.stepRail(document.getElementById('rail'), {
+    reset: function () {
+      clearTimers();
+      M = freshModel();
+      V = buildView();
+      setClicks();
+      render();
+    },
+    steps: [
+      { label: 'Arrives', caption: '09:04 — the routine finished. An orange strip slides in under the header and the new third tab reads “Needs you (1)”. Below it, the blue notice fades by itself in 6 seconds; the yellow one waits for one click on ✕.',
+        run: function () { M.arrived = true; M.enter = true; startFade(); render(); } },
+      { label: 'Open', caption: 'You press “Review ›” on the strip and the Needs-you page opens on the timesheet. The PDF sits at the top — “Open” shows it in Preview. (The blue notice has faded by now.)',
+        run: function () { clearTimers(); M.redditGone = true; M.h.banner.querySelector('.c03-banner-review').click(); V.chip.openButton.click(); } },
+      { label: 'Answer', caption: 'You answer the four questions in the middle column, tick the to-do “send the email yourself”, then press “Send answers” — they go straight back into the routine\'s chat.',
+        run: function () { [0, 1, 2, 3].forEach(function (i) { answerByClick(q(i)); }); V.todos[0].el.querySelector('input').click(); V.sendBtn.click(); V.work.scrollTop = V.work.scrollHeight; } },
+      { label: 'Done', caption: 'Dismiss unlocks only now. The strip disappears from every screen, the tab drops to “Needs you (0)” and the routine\'s card turns green. Still yours by hand: send the timesheet email to Abilitie — the agent never sends email.',
+        run: function () { V.dismissBtn.click(); V.work.scrollTop = 0; } }
+    ],
+    onStep: function (n, step) { captionEl.textContent = step ? step.caption : 'Before 09:04 — nothing needs you: no strip, and the third tab reads “Needs you (0)”.'; }
+  });
+  var want = parseInt(new URLSearchParams(location.search).get('step'), 10);
+  rail.go(want >= 0 && want <= 4 ? want : 1);
+
+  /* ───────── everywhere: three mini frames, each showing "1" ───────── */
+  ['home', 'routines', 'session'].forEach(function (v) {
+    var h = PF.renderAppShell(document.getElementById('mini-' + v), { view: v, width: 1280, height: 800, conversationId: 'c-timesheet' });
+    decorate(h, v, 1, {});
+  });
+
+  /* ───────── three kinds of notices ───────── */
+  [['info', infoLine(NR)], ['warn', warnLine(NC)], ['action', bannerEl(NT)]].forEach(function (p) {
+    var lv = LV[p[0]];
+    var name = document.getElementById('lv-' + p[0] + '-name');
+    name.append(el('span', { style: 'color:' + lv.color }, lv.glyph), lv.label);
+    var box = document.getElementById('lv-' + p[0]);
+    if (p[0] === 'action') { p[1].style.borderBottom = '0'; box.appendChild(p[1]); }
+    else box.appendChild(el('div', { style: 'padding:0 12px;display:flex' }, p[1]));
+    document.getElementById('lv-' + p[0] + '-rule').textContent = lv.rule + '.' + (p[0] === 'action' ? ' Shown as the strip plus the counter on the tab.' : ' Shown as a thin line under the strip.');
+  });
+
+  /* ───────── verdict ───────── */
+  META.pros.forEach(function (t) { document.getElementById('c03-pros').appendChild(el('li', {}, t)); });
+  META.cons.forEach(function (t) { document.getElementById('c03-cons').appendChild(el('li', {}, t)); });
+  document.getElementById('c03-total-n').textContent = String(META.metrics.clicksToResolve);
+  PF.barChart(document.getElementById('c03-chart'), {
+    title: 'This design in three numbers',
+    unit: '',
+    categories: [META.name],
+    series: [
+      { name: 'Clicks to finish (counted)', unit: 'clicks', color: 'var(--g-accent)', values: [META.metrics.clicksToResolve] },
+      { name: 'Screen space when idle', unit: 'px', color: 'var(--g-info)', values: [META.metrics.idleSpacePx] },
+      { name: 'Interruption (1 quiet – 5 takes over)', unit: 'of 5', color: '#14b8a6', values: [META.metrics.interruption] }
+    ]
+  });
+})();
+</script>
+</body>
+</html>

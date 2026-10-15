@@ -341,6 +341,7 @@ export default function SessionPage() {
             </>
           )}
         </div>
+        <NotificationBell />
         <div
           style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
           className="shrink-0 flex rounded-md border border-border bg-panel overflow-hidden"
@@ -357,7 +358,6 @@ export default function SessionPage() {
             title={openFile ? 'Show file editor' : 'Click a file in the sidebar to open it'}
           >File</button>
         </div>
-        <NotificationBell />
         {/* Fork, with the cross-provider move on its ▾. Both need something to
             copy from, so both are dead until this chat has a session (a Codex
             row has no thread until its first turn). */}

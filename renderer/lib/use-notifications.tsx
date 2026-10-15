@@ -9,9 +9,6 @@ const RING_MS = 1200;
 
 export interface NotificationActions {
   markRead: (id: string) => Promise<UserNotification>;
-  answer: (id: string, questionId: string, answer: string) => Promise<UserNotification>;
-  setTodo: (id: string, todoId: string, done: boolean) => Promise<UserNotification>;
-  sendAnswers: (id: string) => Promise<UserNotification>;
   dismiss: (id: string) => Promise<UserNotification>;
   openFile: (id: string, filePath: string) => Promise<{ status: 'success' | 'failure'; error?: string }>;
 }
@@ -34,7 +31,7 @@ const STALE = 'Notifications need a restart of Peers Flow.';
 const stale = () => Promise.reject(new Error(STALE));
 
 const NOOP_ACTIONS: NotificationActions = {
-  markRead: stale, answer: stale, setTodo: stale, sendAnswers: stale, dismiss: stale, openFile: stale,
+  markRead: stale, dismiss: stale, openFile: stale,
 };
 
 // Outside a provider (or before the first snapshot) the bell simply hides.
@@ -139,9 +136,6 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
     const call = <T,>(p: Promise<T> | undefined): Promise<T> => (p ? p.catch((e) => { throw mainMessage(e); }) : stale());
     return {
       markRead: (id) => call(api().markNotificationRead?.(id)).then(merge),
-      answer: (id, q, answer) => call(api().answerNotification?.(id, q, answer)).then(merge),
-      setTodo: (id, t, done) => call(api().setNotificationTodo?.(id, t, done)).then(merge),
-      sendAnswers: (id) => call(api().sendNotificationAnswers?.(id)).then(merge),
       dismiss: (id) => call(api().dismissNotification?.(id)).then((n) => {
         merge(n);
         if (n.level === 'action') setJustCleared(true);

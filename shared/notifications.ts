@@ -5,18 +5,6 @@ import type { Routine, RoutineRun } from './routines';
 // missed. Two levels only — there is deliberately no "info": a chat that
 // finished with nothing needed is already visible as a green dot.
 export type NotificationLevel = 'warn' | 'action';
-export type QuestionKind = 'yesno' | 'choice' | 'text';
-
-export interface NotificationQuestion {
-  id: string;
-  text: string;
-  kind: QuestionKind;
-  choices?: string[];      // choice: 2..12 options
-  hint?: string;           // what the agent found / assumed
-  answer?: string;         // yesno: 'yes' | 'no'; choice: one of choices; text: free text
-  answeredAt?: string;     // ISO
-}
-export interface NotificationTodo { id: string; text: string; done: boolean; doneAt?: string }
 export interface NotificationFile { path: string; label?: string }   // absolute path (resolved by main)
 
 export interface NotificationSource {
@@ -31,15 +19,6 @@ export interface NotificationSource {
   auto?: boolean;               // raised by the app (failed / missed run), not by an agent
 }
 
-// The last "Send answers" attempt. A failed attempt the user has seen still
-// unlocks Dismiss: a chat that no longer exists must not lock a notice forever.
-export interface AnswersDelivery {
-  at: string;
-  ok: boolean;
-  via?: 'open-chat' | 'headless' | 'resume' | 'codex';
-  error?: string;
-}
-
 // Not `Notification`: Electron's main process has a global class of that name.
 export interface UserNotification {
   id: string;
@@ -48,12 +27,9 @@ export interface UserNotification {
   body?: string;
   source: NotificationSource;
   createdAt: string;            // ISO
-  readAt?: string;              // first time its card was expanded
+  readAt?: string;              // first time its card was shown in the open drawer
   dismissedAt?: string;         // set = gone from the drawer; kept on disk for a while
   files: NotificationFile[];
-  questions: NotificationQuestion[];
-  todos: NotificationTodo[];
-  answersDelivery?: AnswersDelivery;
 }
 
 export interface NotificationsSnapshot {
@@ -64,39 +40,23 @@ export interface NotificationsSnapshot {
 export const NOTIFICATIONS_IPC = {
   list: 'notifications:list',               // () → NotificationsSnapshot
   markRead: 'notifications:markRead',       // (id) → UserNotification
-  answer: 'notifications:answer',           // (id, questionId, answer) → UserNotification; rejects with a one-line message on a bad answer
-  setTodo: 'notifications:setTodo',         // (id, todoId, done) → UserNotification
-  sendAnswers: 'notifications:sendAnswers', // (id) → UserNotification with answersDelivery set; rejects when a question is unanswered
-  dismiss: 'notifications:dismiss',         // (id) → UserNotification; rejects when !canDismiss
+  dismiss: 'notifications:dismiss',         // (id) → UserNotification; always allowed
   openFile: 'notifications:openFile',       // (id, path) → { status: 'success' | 'failure'; error?: string }
   updated: 'notifications:updated',         // push: NotificationsSnapshot on every change
   open: 'notifications:open',               // push: { id } — open the drawer on this one (macOS banner click)
 } as const;
 
-export const NOTIFICATION_LIMITS = { title: 200, body: 4000, files: 20, questions: 20, todos: 20, choices: 12, answer: 4000 } as const;
+export const NOTIFICATION_LIMITS = { title: 200, body: 4000, files: 20 } as const;
 export const DISMISSED_RETENTION_DAYS = 30;   // dismissed notices are pruned from the file after this
 export const OPEN_RETENTION_DAYS = 180;       // an open notice nobody touched for this long is pruned too
 
 export const isOpen = (n: Pick<UserNotification, 'dismissedAt'>) => !n.dismissedAt;
-export const allAnswered = (n: Pick<UserNotification, 'questions'>) => n.questions.every((q) => typeof q.answer === 'string' && q.answer.length > 0);
-export const allTodosDone = (n: Pick<UserNotification, 'todos'>) => n.todos.every((t) => t.done);
-/** Answers only need sending when there is a question to answer. */
-export const needsSend = (n: Pick<UserNotification, 'questions'>) => n.questions.length > 0;
-/** A delivery the user attempted counts even when it failed (the error is shown to them). */
-export const answersSent = (n: Pick<UserNotification, 'answersDelivery'>) => !!n.answersDelivery;
-
-/** What still blocks Dismiss, in the user's words. Empty = may dismiss. */
-export function missingForDismiss(n: UserNotification): string[] {
-  if (n.level !== 'action') return [];
-  const out: string[] = [];
-  const unanswered = n.questions.filter((q) => !(typeof q.answer === 'string' && q.answer.length > 0)).length;
-  if (unanswered) out.push(unanswered === 1 ? '1 question unanswered' : `${unanswered} questions unanswered`);
-  const open = n.todos.filter((t) => !t.done).length;
-  if (open) out.push(open === 1 ? '1 to-do not ticked' : `${open} to-dos not ticked`);
-  if (needsSend(n) && !unanswered && !answersSent(n)) out.push('answers not sent to the agent yet');
-  return out;
-}
-export const canDismiss = (n: UserNotification) => missingForDismiss(n).length === 0;
+/**
+ * The drawer card's line for an "action" notice. The notice is only a pointer:
+ * the agent asked its questions as plain text in its chat, and the user answers
+ * there by typing. Nothing is ever answered inside Peers Flow's notification UI.
+ */
+export const ACTION_POINTER_LINE = 'Look inside the chat — it needs you';
 
 /** Badge numbers for the bell: open "needs you" notices, and whether any warning is open. */
 export function countsOf(list: UserNotification[]): { action: number; warn: number } {

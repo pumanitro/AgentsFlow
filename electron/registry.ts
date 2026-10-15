@@ -132,28 +132,18 @@ export const TOOL_DEFS = [
     name: 'notify',
     title: 'Notify the user',
     description:
-      'Show the user a notification in Peers Flow (a bell at the top of every screen; a panel they open). Use level "action" when the work cannot finish without the user: a file they must check, questions only they can answer, something they must do by hand (send an email, approve, pay). An "action" notice stays until every question is answered and every to-do is ticked. Use level "warn" when something went wrong that the user should know about; it stays until they close it. Never notify when nothing is needed from the user. After calling notify with questions, END YOUR TURN: the answers arrive later in this chat as one new message, and the chat is resumed for you. Never do the user\'s to-dos yourself.',
-    usage: 'notify({ title, level, body?, files?, questions?, todos? })',
+      'Show the user a notification in Peers Flow (a bell at the top of every screen; a panel they open). A notification is only a pointer to THIS chat: it shows its title, this chat\'s name, your body, the files you attach (each with Open / Reveal), "Open chat" and "Dismiss" — it never shows questions and never collects answers. Use level "action" when the chat needs the user: questions only they can answer, a file they must check, something they must do by hand (send an email, approve, pay). FIRST write your questions and to-dos as plain text in your own chat reply, THEN call notify with a short pointer body; the user opens the chat, reads them there and answers by typing in this chat. Use level "warn" when something went wrong that the user should know about. The user can dismiss any notification at any time. Never notify when nothing is needed from the user. After an "action" notify, END YOUR TURN: the answers arrive as the user\'s next message in this chat. Never do the user\'s to-dos yourself.',
+    usage: 'notify({ title, level, body?, files? })',
     inputSchema: {
       type: 'object',
       properties: {
         title: { type: 'string', description: 'One line, at most 200 characters, e.g. "Abilitie timesheet is ready — needs you".' },
         level: { type: 'string', enum: ['warn', 'action'], description: '"action" = the user must do something before the work is finished; "warn" = something went wrong, the user should know.' },
-        body: { type: 'string', description: 'A short plain-words explanation: what happened, what you need. Plain text, at most 4000 characters.' },
+        body: { type: 'string', description: 'A short plain-words pointer: what happened and that the chat needs them, e.g. "3 questions about the October timesheet are in the chat." Not the questions themselves — those go in your chat reply. Plain text, at most 4000 characters.' },
         files: {
           type: 'array',
           items: { type: 'object', properties: { path: { type: 'string', description: 'Absolute path, or relative to this peer\'s directory.' }, label: { type: 'string', description: 'Shown instead of the file name, e.g. "October timesheet (PDF)".' } }, required: ['path'], additionalProperties: false },
           description: 'Files the user should look at. Each gets an Open button (PDFs open in the system viewer). At most 20.',
-        },
-        questions: {
-          type: 'array',
-          items: { type: 'object', properties: { id: { type: 'string', description: 'Optional stable id, e.g. "dayoffs".' }, text: { type: 'string' }, kind: { type: 'string', enum: ['yesno', 'choice', 'text'] }, choices: { type: 'array', items: { type: 'string' }, description: 'kind "choice" only: 2 to 12 options.' }, hint: { type: 'string', description: 'What you found or assumed, e.g. "I found none in your calendar."' } }, required: ['text', 'kind'], additionalProperties: false },
-          description: 'Questions only the user can answer. At most 20. The answers come back to THIS chat as one message once the user presses "Send answers".',
-        },
-        todos: {
-          type: 'array',
-          items: { type: 'object', properties: { text: { type: 'string' } }, required: ['text'], additionalProperties: false },
-          description: 'Things the user must do by hand, e.g. "Send the email yourself". The user ticks them off; you never do them. At most 20.',
         },
       },
       required: ['title', 'level'],
@@ -467,7 +457,7 @@ export function renderBootstrapPrompt(reg: Registry, self?: SelfInfo): string {
   lines.push('## Telling the user something (notifications)');
   lines.push('');
   lines.push(
-    `- When the work cannot finish without the user — a file they must check, questions only they can answer, something they must do by hand (send an email, approve, pay) — call \`${qualifiedToolName('notify')}\` with level "action": attach the files, list the questions and the to-dos, then END YOUR TURN. The answers arrive later in this chat as one new message; continue from there. Never do the user's to-dos yourself.`,
+    `- When the work cannot finish without the user — questions only they can answer, a file they must check, something they must do by hand (send an email, approve, pay) — list the questions and the to-dos as plain text in your chat message, then call \`${qualifiedToolName('notify')}\` with level "action", a short pointer body and any files, then END YOUR TURN. The notification only points the user to this chat; they answer by typing here, so the answers arrive as the user's next chat message — continue from there. Never do the user's to-dos yourself.`,
   );
   lines.push('- When something went wrong that the user should know about, call it with level "warn".');
   lines.push('- Do not notify when nothing is needed from the user — the app already shows that a chat finished.');

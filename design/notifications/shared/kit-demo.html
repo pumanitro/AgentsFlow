@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Gallery kit — Peers Flow notifications</title>
+<meta name="description" content="A test page for the shared gallery pieces: navigation, tooltips, chart, step rail, scaled app frame, details and tables.">
+<link rel="stylesheet" href="./tokens.css">
+<link rel="stylesheet" href="./gallery.css">
+<script src="./gallery.js"></script>
+<style>
+  .kd-frame { width: 1280px; height: 800px; background: var(--pf-bg); color: var(--pf-text); font: 14px/1.4 var(--pf-font); position: relative; }
+  .kd-frame-head { height: 44px; display: flex; align-items: center; gap: 10px; padding: 0 16px; background: var(--pf-panel); border-bottom: 1px solid var(--pf-border); }
+  .kd-frame-side { position: absolute; top: 44px; bottom: 0; left: 0; width: 280px; background: var(--pf-panel); border-right: 1px solid var(--pf-border); padding: 12px; }
+  .kd-frame-label { font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: var(--pf-muted); }
+  .kd-frame-box { position: absolute; left: 320px; top: 90px; width: 360px; height: 160px; border-radius: var(--pf-radius-lg); display: grid; place-items: center; font-size: 22px; font-weight: 600; transition: background .3s, transform .3s, left .3s; }
+  .kd-frame-corner { position: absolute; right: 16px; bottom: 16px; padding: 6px 10px; border: 1px solid var(--pf-border); border-radius: var(--pf-radius); background: var(--pf-panel2); color: var(--pf-muted); font-size: 12px; }
+  .kd-diagram text { fill: var(--g-text); font: 13px var(--pf-font); }
+  .kd-diagram .kd-node { fill: var(--g-surface2); stroke: var(--g-border); }
+</style>
+</head>
+<body>
+<nav id="pf-nav" data-current="kit"></nav>
+<main class="g-page">
+  <section class="g-hero">
+    <p class="g-eyebrow">Test page for the shared pieces</p>
+    <h1>Gallery kit</h1>
+    <p class="g-lede">This page checks that every shared building block works: the menu at the top, the light/dark switch, hover notes, the chart, the step-by-step buttons, the scaled-down app picture, the fold-out details and a wide table.</p>
+    <ul class="g-badges">
+      <li class="g-badge g-badge--accent"><b>Where it lives</b> Top of every gallery page</li>
+      <li class="g-badge"><b>How you answer</b> Click the step buttons</li>
+      <li class="g-badge"><b>How it gets your attention</b> It does not — it is a test</li>
+    </ul>
+    <svg class="kd-diagram" viewBox="0 0 560 70" width="560" role="img" aria-label="Pieces flow: page loads, kit draws, you explore">
+      <rect class="kd-node" x="1" y="10" width="150" height="48" rx="8" data-tip="Step 1 · The page loads its shared files"/>
+      <text x="76" y="39" text-anchor="middle">Page loads</text>
+      <path d="M155 34 H199" stroke="var(--g-muted)" stroke-width="2" marker-end="url(#kdArrow)"/>
+      <rect class="kd-node" x="205" y="10" width="150" height="48" rx="8" data-tip="Step 2 · The kit draws the menu, chart and frames"/>
+      <text x="280" y="39" text-anchor="middle">Kit draws</text>
+      <path d="M359 34 H403" stroke="var(--g-muted)" stroke-width="2" marker-end="url(#kdArrow)"/>
+      <rect class="kd-node" x="409" y="10" width="150" height="48" rx="8" data-tip="Step 3 · You hover, tap and click around"/>
+      <text x="484" y="39" text-anchor="middle">You explore</text>
+      <defs><marker id="kdArrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0 L10 5 L0 10z" fill="var(--g-muted)"/></marker></defs>
+    </svg>
+  </section>
+
+  <section id="pf-main-frame" class="g-section">
+    <h2>Step rail driving an app frame</h2>
+    <p>Each button rebuilds the picture from the start and plays the steps up to that one. The frame below is drawn at full app size (1280 × 800) and shrunk to fit.</p>
+    <div class="g-step-rail" id="rail"></div>
+    <div class="pf-frame-wrap"><div id="frame">
+      <div class="pf-frame kd-frame">
+        <div class="kd-frame-head"><span style="width:10px;height:10px;border-radius:50%;background:var(--pf-accent)"></span><b>Peers Flow</b><span class="kd-frame-label" style="margin-left:auto">plain dark test frame</span></div>
+        <div class="kd-frame-side"><div class="kd-frame-label">Section label</div></div>
+        <div class="kd-frame-box" id="kdBox" data-tip="The coloured box: grey at the start, then blue, orange, green">Start</div>
+        <div class="kd-frame-corner">1280 × 800</div>
+      </div>
+    </div></div>
+    <p class="g-caption" id="caption"></p>
+  </section>
+
+  <section class="g-section" id="everywhere">
+    <h2>Mini frames</h2>
+    <p>Three smaller copies use the same shrink rule at their own width.</p>
+    <div class="g-grid-3">
+      <div><p class="g-mini-label">Home</p><div class="pf-frame-wrap g-mini"><div class="pf-frame kd-frame"><div class="kd-frame-head"><b>Home</b></div><div class="kd-frame-box" style="background:var(--pf-info)">1</div></div></div></div>
+      <div><p class="g-mini-label">Routines</p><div class="pf-frame-wrap g-mini"><div class="pf-frame kd-frame"><div class="kd-frame-head"><b>Routines</b></div><div class="kd-frame-box" style="background:var(--pf-attention)">1</div></div></div></div>
+      <div><p class="g-mini-label">Chat</p><div class="pf-frame-wrap g-mini"><div class="pf-frame kd-frame"><div class="kd-frame-head"><b>Chat</b></div><div class="kd-frame-box" style="background:var(--pf-ok);color:#0f1115">1</div></div></div></div>
+    </div>
+  </section>
+
+  <section class="g-section" id="verdict">
+    <h2>Chart</h2>
+    <p>Hover (or tap) any bar or row for the exact number.</p>
+    <div id="chart"></div>
+    <div class="g-callout g-callout--info"><p>The numbers here are made up for the test only.</p></div>
+  </section>
+
+  <section class="g-section" id="levels">
+    <h2>A deliberately wide table</h2>
+    <p>On a phone it scrolls sideways inside its box instead of pushing the page.</p>
+    <div class="g-table-wrap">
+      <table class="g-table">
+        <thead><tr><th>Design</th><th>Where it lives</th><th>How you answer</th><th>How it gets your attention</th><th>Always visible?</th><th class="g-num">Clicks to finish</th><th class="g-num">Screen space when idle (px)</th><th class="g-num">Interruption (1–5)</th><th>Build effort</th></tr></thead>
+        <tbody>
+          <tr><td>Test row A</td><td>Header on every screen plus a side drawer</td><td>Cards inside the drawer, answered in place</td><td>The drawer opens itself</td><td>Yes</td><td class="g-num">9</td><td class="g-num">0</td><td class="g-num">2</td><td>S</td></tr>
+          <tr><td>Test row B</td><td>Docked pane under the peers list</td><td>Inline questions in the pane</td><td>Pane header glows orange</td><td>Home only</td><td class="g-num">10</td><td class="g-num">34</td><td class="g-num">1</td><td>M</td></tr>
+          <tr><td>Test row C</td><td>Status bar at the very bottom</td><td>A tray pops up from the bar</td><td>A counter in the bar</td><td>Yes</td><td class="g-num">11</td><td class="g-num">24</td><td class="g-num">1</td><td>M</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <details class="g-details" id="build">
+    <summary>How it would be built (for the engineer)</summary>
+    <p>The shared files are <code>shared/tokens.css</code>, <code>shared/gallery.css</code> and <code>shared/gallery.js</code>. Screenshots come from <code>tools/shot.sh</code>.</p>
+    <pre>tools/shot.sh &lt;abs-html&gt; &lt;abs-png&gt; [width] [height] [dark|light] [hash]</pre>
+  </details>
+</main>
+<script>
+(function () {
+  var box = document.getElementById('kdBox'), cap = document.getElementById('caption');
+  function set(bg, text, left, color) { box.style.background = bg; box.textContent = text; box.style.left = left + 'px'; box.style.color = color || '#f1f3f8'; }
+  var rail = PF.stepRail(document.getElementById('rail'), {
+    reset: function () { set('var(--pf-panel2)', 'Start', 320); },
+    steps: [
+      { label: 'Arrives', caption: 'Something arrives: the box turns blue.', run: function () { set('var(--pf-info)', 'Arrived', 380); } },
+      { label: 'Open', caption: 'You open it: the box turns orange.', run: function () { set('var(--pf-attention)', 'Open', 440, '#0f1115'); } },
+      { label: 'Answer', caption: 'You answer: the box moves right.', run: function () { set('var(--pf-attention)', 'Answered', 560, '#0f1115'); } },
+      { label: 'Done', caption: 'All done: the box turns green.', run: function () { set('var(--pf-ok)', 'Done', 680, '#0f1115'); } }
+    ],
+    onStep: function (n, step) { cap.textContent = step ? step.caption : 'Press a step to start.'; }
+  });
+  rail.go(1);
+
+  PF.barChart(document.getElementById('chart'), {
+    title: 'Test chart: three series across four designs',
+    unit: '',
+    categories: ['Bell + drawer', 'Needs-you pane', 'Status-bar tray', 'Agent asks in chat'],
+    series: [
+      { name: 'Clicks to finish', unit: 'clicks', color: 'var(--g-accent)', values: [9, 10, 11, 8] },
+      { name: 'Screen space when idle', unit: 'px', color: 'var(--g-info)', values: [0, 34, 24, 0] },
+      { name: 'Interruption, ×10 for the scale', unit: '(×10)', color: '#14b8a6', values: [20, 10, 10, 30] }
+    ]
+  });
+})();
+</script>
+</body>
+</html>

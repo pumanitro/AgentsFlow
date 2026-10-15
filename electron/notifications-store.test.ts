@@ -13,7 +13,7 @@ const tmpFile = () => path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'notif-sto
 
 const notice = (id: string, extra: Partial<UserNotification> = {}): UserNotification => ({
   id, level: 'action', title: `Notice ${id}`, source: { kind: 'chat', conversationId: 'c1' },
-  createdAt: isoOf(T0), files: [], questions: [], todos: [], ...extra,
+  createdAt: isoOf(T0), files: [], ...extra,
 });
 
 describe('notifications store', () => {
@@ -23,11 +23,7 @@ describe('notifications store', () => {
     const full = notice('n1', {
       body: 'Check the PDF',
       files: [{ path: '/Users/demo/a.pdf', label: 'A' }],
-      questions: [{ id: 'dayoffs', text: 'Days off?', kind: 'yesno', hint: 'none found', answer: 'no', answeredAt: isoOf(T0) },
-        { id: 'q2', text: 'Which?', kind: 'choice', choices: ['a', 'b'] }],
-      todos: [{ id: 't1', text: 'Send it', done: true, doneAt: isoOf(T0) }],
       readAt: isoOf(T0),
-      answersDelivery: { at: isoOf(T0), ok: false, via: 'resume', error: 'gone' },
     });
     a.add(full);
     a.add(notice('n2', { level: 'warn', createdAt: isoOf(T0 + 1000), source: { kind: 'routine', routineId: 'r1', runId: 'run1', auto: true } }));
@@ -40,14 +36,13 @@ describe('notifications store', () => {
     assert.deepEqual(b.list().map((n) => n.id), ['n2', 'n1']);
   });
 
-  it('sanitize drops records with an unknown level / kind or no id / title / createdAt, and fills missing arrays', () => {
+  it('sanitize drops records with an unknown level or no id / title / createdAt, and fills missing arrays', () => {
     const file = tmpFile();
     fs.writeFileSync(file, JSON.stringify({
       version: 1,
       notifications: [
         { id: 'ok', level: 'warn', title: 'fine', createdAt: isoOf(T0), source: { kind: 'app' } },
         { id: 'info', level: 'info', title: 'no info level', createdAt: isoOf(T0) },
-        { id: 'badq', level: 'action', title: 't', createdAt: isoOf(T0), questions: [{ id: 'q1', text: 'x', kind: 'slider' }] },
         { level: 'warn', title: 'no id', createdAt: isoOf(T0) },
         { id: 'notitle', level: 'warn', createdAt: isoOf(T0) },
         { id: 'nodate', level: 'warn', title: 't' },
@@ -57,9 +52,9 @@ describe('notifications store', () => {
     const errors = mock.method(console, 'error', () => undefined);
     try {
       const s = createNotificationsStore(file, { now: () => T0 });
-      assert.deepEqual(s.list(), [{ id: 'ok', level: 'warn', title: 'fine', createdAt: isoOf(T0), source: { kind: 'app' }, files: [], questions: [], todos: [] }]);
+      assert.deepEqual(s.list(), [{ id: 'ok', level: 'warn', title: 'fine', createdAt: isoOf(T0), source: { kind: 'app' }, files: [] }]);
       assert.equal(errors.mock.callCount(), 1);
-      assert.match(String(errors.mock.calls[0].arguments[0]), /dropped 6/);
+      assert.match(String(errors.mock.calls[0].arguments[0]), /dropped 5/);
     } finally {
       errors.mock.restore();
     }
@@ -101,6 +96,39 @@ describe('notifications store', () => {
     assert.deepEqual(snap.notifications.map((n) => n.id), ['new', 'old']);
     assert.equal(snap.now, isoOf(T0 + 5));
     assert.deepEqual(s.list({ includeDismissed: true }).map((n) => n.id), ['new', 'gone', 'old']);
+    assert.deepEqual(Object.keys(snap).sort(), ['notifications', 'now']);
+  });
+
+  it('a notice saved by the retired in-app answering UI (questions / todos / answersDelivery) loads fine, without those fields', () => {
+    const file = tmpFile();
+    const legacy = {
+      id: 'legacy', level: 'action', title: 'Timesheet needs you', body: 'Check it', createdAt: isoOf(T0),
+      source: { kind: 'chat', conversationId: 'c1' },
+      files: [{ path: '/Users/demo/a.pdf', label: 'A' }],
+      questions: [
+        { id: 'dayoffs', text: 'Days off?', kind: 'yesno', answer: 'no', answeredAt: isoOf(T0) },
+        { id: 'odd', text: 'x', kind: 'slider' },
+      ],
+      todos: [{ id: 't1', text: 'Send it', done: false }],
+      answersDelivery: { at: isoOf(T0), ok: false, via: 'resume', error: 'gone' },
+    };
+    fs.writeFileSync(file, JSON.stringify({ version: 1, notifications: [legacy] }));
+    const errors = mock.method(console, 'error', () => undefined);
+    try {
+      const s = createNotificationsStore(file, { now: () => T0 });
+      assert.equal(errors.mock.callCount(), 0, 'nothing dropped');
+      assert.deepEqual(s.get('legacy'), {
+        id: 'legacy', level: 'action', title: 'Timesheet needs you', body: 'Check it', createdAt: isoOf(T0),
+        source: { kind: 'chat', conversationId: 'c1' }, files: [{ path: '/Users/demo/a.pdf', label: 'A' }],
+      });
+      assert.deepEqual(s.snapshot(T0).notifications.map((n) => n.id), ['legacy']);
+      s.update('legacy', { readAt: isoOf(T0) });
+      s.flushSync();
+      const saved = JSON.parse(fs.readFileSync(file, 'utf8')).notifications[0];
+      for (const k of ['questions', 'todos', 'answersDelivery']) assert.equal(k in saved, false, `${k} is not written back`);
+    } finally {
+      errors.mock.restore();
+    }
   });
 
   it('update merges a patch, never changes the id, and returns null for an unknown one', () => {

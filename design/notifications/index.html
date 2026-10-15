@@ -1,0 +1,392 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>All six — Peers Flow notifications</title>
+<meta name="description" content="Six notification designs for Peers Flow, compared on the Abilitie timesheet scenario, with a recommendation.">
+<link rel="stylesheet" href="shared/tokens.css">
+<link rel="stylesheet" href="shared/app-shell.css">
+<link rel="stylesheet" href="shared/gallery.css">
+<script src="shared/scenario.js"></script>
+<script src="shared/app-shell.js"></script>
+<script src="shared/gallery.js"></script>
+<script src="concepts/01-bell-drawer.meta.js"></script>
+<script src="concepts/02-needs-you-dock.meta.js"></script>
+<script src="concepts/03-needs-you-view.meta.js"></script>
+<script src="concepts/04-toast-cards.meta.js"></script>
+<script src="concepts/05-status-tray.meta.js"></script>
+<script src="concepts/06-agent-asks-in-chat.meta.js"></script>
+<style>
+/* index-only styles, prefixed .ix- */
+.ix-pick { margin-top: 16px; }
+.ix-pick h2 { font-size: 17px; margin: 0 0 4px; }
+.ix-pick p { margin: 0 0 6px; }
+.ix-svg { display: block; width: 100%; height: auto; }
+.ix-svg text { font-family: var(--pf-font); fill: var(--g-text); }
+.ix-svg .ix-m { fill: var(--g-muted); }
+.ix-svg .ix-mono { font-family: var(--pf-mono); fill: var(--g-muted); }
+.ix-svg .ix-line { stroke: var(--g-border); stroke-width: 2; fill: none; }
+.ix-svg .ix-box { fill: var(--g-surface2); stroke: var(--g-border); stroke-width: 1.5; }
+.ix-svg .ix-box--acc { fill: color-mix(in srgb, var(--g-accent) 12%, var(--g-surface)); stroke: var(--g-accent); }
+.ix-svg .ix-arrow { stroke: var(--g-muted); stroke-width: 1.6; fill: none; }
+.ix-svg .ix-arrow--acc { stroke: var(--g-accent); }
+.ix-svg [data-tip]:hover { opacity: .85; }
+.ix-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+.ix-scroll > svg { min-width: 640px; }
+.ix-cards { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; }
+@media (max-width: 1000px) { .ix-cards { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 640px) { .ix-cards { grid-template-columns: minmax(0, 1fr); } }
+.ix-card { display: flex; flex-direction: column; gap: 10px; padding: 12px; border-radius: 10px; border: 1px solid var(--g-border); background: var(--g-surface2); min-width: 0; }
+.ix-card--pick { border-color: var(--g-accent); box-shadow: 0 0 0 1px var(--g-accent); }
+.ix-card h3 { font-size: 16px; margin: 0; display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.ix-num { font-size: 12px; color: var(--g-muted); font-variant-numeric: tabular-nums; }
+.ix-tag { font-size: 11px; font-weight: 600; padding: 1px 7px; border-radius: 999px; background: var(--g-accent); color: #1a0d06; }
+.ix-tag--alt { background: transparent; color: var(--g-accent-text); border: 1px solid var(--g-accent); }
+.ix-card p { margin: 0; font-size: 14px; }
+.ix-thumb { position: relative; width: 100%; aspect-ratio: 1280 / 960; overflow: hidden; border-radius: 8px; border: 1px solid var(--g-border); background: #0f1115; }
+.ix-thumb iframe { position: absolute; left: 0; top: 0; width: 1280px; height: 960px; border: 0; transform-origin: top left; pointer-events: none; }
+.ix-thumb-fallback { position: absolute; inset: 0; display: grid; place-items: center; color: #8c93a8; font-size: 13px; }
+.ix-facts { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; font-size: 13px; }
+.ix-facts li { display: grid; grid-template-columns: 86px 1fr; gap: 8px; }
+.ix-facts b { font-size: 11px; text-transform: uppercase; letter-spacing: .05em; color: var(--g-muted); font-weight: 600; padding-top: 2px; }
+.ix-pc { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; font-size: 13px; }
+.ix-pc ul { margin: 0; padding-left: 18px; }
+.ix-pc li { margin: 0 0 4px; }
+@media (max-width: 420px) { .ix-pc { grid-template-columns: 1fr; } }
+.ix-open { font-weight: 600; font-size: 14px; margin-top: auto; }
+.ix-meter { display: inline-flex; gap: 2px; vertical-align: middle; margin-left: 6px; }
+.ix-meter i { width: 7px; height: 10px; border-radius: 2px; background: var(--g-border); }
+.ix-meter i.on { background: var(--g-accent); }
+.ix-table td { font-size: 13px; }
+.ix-table thead th { white-space: normal; vertical-align: bottom; }
+.ix-table td:nth-child(2), .ix-table td:nth-child(3), .ix-table td:nth-child(4) { min-width: 150px; }
+.ix-table th.g-num { min-width: 64px; }
+.ix-table td:first-child { font-weight: 600; min-width: 120px; }
+.ix-table td:last-child { white-space: nowrap; }
+.ix-table tr.is-pick td { background: color-mix(in srgb, var(--g-accent) 8%, transparent); }
+.ix-yes { color: var(--g-ok); font-weight: 600; }
+.ix-read { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; }
+@media (max-width: 720px) { .ix-read { grid-template-columns: 1fr; } }
+.ix-read .g-card p { margin: 0; font-size: 14px; }
+.ix-read h3 { display: flex; align-items: center; gap: 8px; }
+.ix-sw { width: 12px; height: 12px; border-radius: 3px; display: inline-block; }
+.ix-why { margin: 8px 0 12px; padding-left: 20px; }
+.ix-why li { margin: 0 0 6px; }
+</style>
+</head>
+<body>
+<nav id="pf-nav" data-current="index"></nav>
+<main class="g-page">
+
+  <section class="g-hero">
+    <p class="g-eyebrow">Peers Flow · notification designs</p>
+    <h1>Six ways Peers Flow could tell you a routine needs you</h1>
+    <p class="g-lede">Routines run on their own while you work. Most of the time they just finish, but sometimes the agent needs you: a file to look at, a few questions to answer, a job only you can do by hand. Today Peers Flow has no way to say so. These six designs each solve that on the same real example, so you can compare them side by side and pick one.</p>
+    <div class="g-callout ix-pick" id="pick-callout">
+      <h2>What I would pick: <span id="pick-name">Bell + drawer</span>, with two ideas borrowed</h2>
+      <p>Start from <b>01 Bell + drawer</b>. Add 04's habit of <b>opening by itself when something needs you</b>, and 06's rule that <b>your answers go straight back into the agent's chat</b>. Runner-up: <b>03 Needs-you tab + banner</b>, if you want a place to work through several items at once. <a href="#pick">Why ›</a></p>
+    </div>
+  </section>
+
+  <section class="g-section" id="scenario">
+    <h2>The same situation in all six</h2>
+    <p>Every design shows the same morning, so the only thing that changes is the design itself.</p>
+    <div class="ix-scroll"><svg id="timeline" class="ix-svg" viewBox="0 0 1200 150" role="img" aria-label="Timeline of the morning of 15 October"></svg></div>
+    <div class="g-grid-3" style="margin-top:12px" id="levels"></div>
+  </section>
+
+  <section class="g-section" id="six">
+    <h2>The six designs</h2>
+    <p>Each picture is the live design page, frozen at the moment the notice arrives. Open a design to click through all four steps yourself.</p>
+    <div class="ix-cards" id="cards"></div>
+  </section>
+
+  <section class="g-section" id="compare">
+    <h2>Side by side</h2>
+    <p>The numbers were counted on each design's own page, walking the same example from start to finish. Hover or tap a number for what it means.</p>
+    <div class="g-table-wrap"><table class="g-table ix-table" id="table"></table></div>
+  </section>
+
+  <section class="g-section" id="chart-section">
+    <h2>The numbers as bars</h2>
+    <p>Shorter is better on all three. Interruption is a 1–5 score, multiplied by 10 only so its bars are visible next to the others.</p>
+    <div id="chart"></div>
+  </section>
+
+  <section class="g-section" id="read">
+    <h2>How to read the numbers</h2>
+    <div class="ix-read">
+      <div class="g-card"><h3><span class="ix-sw" style="background:#ff7847"></span>Clicks to finish</h3><p>How many clicks it takes from the moment the notice appears until it is gone: open the PDF, answer four questions, tick the to-do, send, dismiss. Typing the one written answer is not counted, only the click into the box.</p></div>
+      <div class="g-card"><h3><span class="ix-sw" style="background:#3b82f6"></span>Screen space when idle</h3><p>How many pixels the design takes up on a quiet day, when nothing is waiting. Zero means it only appears when there is something to show.</p></div>
+      <div class="g-card"><h3><span class="ix-sw" style="background:#14b8a6"></span>Interruption</h3><p>How hard the design pulls you away from what you are doing, from 1 (a quiet number) to 5 (takes over the screen). Too low and you miss it; too high and it gets annoying.</p></div>
+    </div>
+  </section>
+
+  <section class="g-section" id="pick">
+    <h2>What I would pick</h2>
+    <p><b>01 Bell + drawer</b> as the base, with two ideas taken from the others.</p>
+    <div class="ix-scroll"><svg id="pickdiagram" class="ix-svg" viewBox="0 0 1000 200" role="img" aria-label="The pick: Bell + drawer plus two borrowed ideas"></svg></div>
+    <p style="margin-top:12px"><b>Why the bell and drawer:</b></p>
+    <ul class="ix-why">
+      <li><b>It is on every screen, because the header is.</b> Home, Routines and inside a chat all share the same top bar, so the count is never out of sight.</li>
+      <li><b>It never pushes your work around.</b> The drawer slides over the screen and slides away; nothing jumps, nothing shrinks, and on a quiet day it takes no space at all.</li>
+      <li><b>It grows from one notice to twenty.</b> A drawer is a list, so a busy morning just means a longer list, not a cluttered screen.</li>
+    </ul>
+    <p><b>The two borrowed ideas:</b> from <a href="concepts/04-toast-cards.html">04</a>, the drawer opens by itself only for things that need you (the light notices just flash). From <a href="concepts/06-agent-asks-in-chat.html">06</a>, pressing “Send answers” posts them into the routine's own chat, so the agent continues and the conversation keeps the full story.</p>
+    <div class="g-callout g-callout--info">
+      <p><b>Runner-up: 03 Needs-you tab + banner.</b> Better if you want a place to <i>work</i> through several items in a row, with room for the PDF, the questions and the routine's history side by side, rather than just being told. It costs the most to build and its strip pushes the screen down until you deal with it.</p>
+    </div>
+  </section>
+
+  <details class="g-details" id="build">
+    <summary>How it would be built (for the engineer)</summary>
+    <p>This part is the same for all six designs; each design page only adds what differs (where it sits on screen). Nothing here is written yet.</p>
+    <div class="ix-scroll"><svg id="arch" class="ix-svg" viewBox="0 0 1000 345" role="img" aria-label="How a notification travels from the routine's chat to the screen and back"></svg></div>
+    <h3>In plain words</h3>
+    <ol>
+      <li>The routine's chat calls a new <code>notify</code> tool on the existing <code>peersflow</code> server, with a title, a level, files, questions and to-dos.</li>
+      <li>The tool goes over the existing bridge socket to the app, which works out which routine run it belongs to and stores it in <code>notifications.json</code>.</li>
+      <li>The app pushes it to the window, so every screen updates at once; for “something went wrong” and “needs you” it also shows a macOS banner whose click brings the window forward.</li>
+      <li>You open the file, answer, tick the to-do. “Send answers” writes them into the source chat as a message; Dismiss is refused until everything is done.</li>
+      <li>Routines that finish or fail on their own raise “finished” / “did not finish” notices automatically, unless the chat already raised a “needs you”.</li>
+    </ol>
+    <h3>The data shape</h3>
+<pre>// shared/notifications.ts  (PROPOSED — not written in this run)
+export type NotificationLevel = 'info' | 'warn' | 'action';
+export interface NotificationQuestion { id: string; text: string; kind: 'yesno' | 'text' | 'choice'; choices?: string[]; hint?: string; answer?: string; answeredAt?: string }
+export interface NotificationTodo { id: string; text: string; done: boolean; doneAt?: string }
+export interface NotificationFile { path: string; label?: string }        // absolute; opened through the existing open_file route (PDF → system viewer, else in-app)
+export interface NotificationSource { kind: 'routine' | 'chat' | 'app'; routineId?: string; runId?: string; conversationId?: string; directoryId?: string }
+export interface Notification { id: string; level: NotificationLevel; title: string; body?: string; source: NotificationSource; createdAt: string; readAt?: string; dismissedAt?: string; files?: NotificationFile[]; questions?: NotificationQuestion[]; todos?: NotificationTodo[]; answersSentAt?: string }
+export interface NotificationsSnapshot { notifications: Notification[]; now: string }
+export const NOTIFICATIONS_IPC = { list: 'notifications:list', answer: 'notifications:answer', setTodo: 'notifications:setTodo', sendAnswers: 'notifications:sendAnswers', dismiss: 'notifications:dismiss', updated: 'notifications:updated' } as const;
+export const canDismiss = (n: Notification) => n.level !== 'action' || ((n.questions ?? []).every(q => q.answer !== undefined) && (n.todos ?? []).every(t => t.done));</pre>
+    <h3>The new tool</h3>
+<pre>// electron/registry.ts — one more TOOL_DEFS entry on the existing `peersflow` server
+{ name: 'notify', title: 'Notify the user',
+  description: 'Show the user a notification in Peers Flow. level "info" = done, nothing needed (fades by itself); "warn" = something went wrong (stays until closed); "action" = the user must do something by hand or answer questions before the work can finish — it stays until every question is answered and every to-do is ticked. Attach the files to look at and the questions you need answered; the answers come back to this chat as a message.',
+  usage: 'notify({ title, body?, level?, files?, questions?, todos? })',
+  inputSchema: { type: 'object', properties: {
+    title: { type: 'string' }, body: { type: 'string' }, level: { type: 'string', enum: ['info', 'warn', 'action'] },
+    files: { type: 'array', items: { type: 'object', properties: { path: { type: 'string' }, label: { type: 'string' } }, required: ['path'] } },
+    questions: { type: 'array', items: { type: 'object', properties: { id: { type: 'string' }, text: { type: 'string' }, kind: { type: 'string', enum: ['yesno', 'text', 'choice'] }, choices: { type: 'array', items: { type: 'string' } }, hint: { type: 'string' } }, required: ['text'] } },
+    todos: { type: 'array', items: { type: 'object', properties: { text: { type: 'string' } }, required: ['text'] } }
+  }, required: ['title'], additionalProperties: false } }</pre>
+    <h3>The path through the code</h3>
+    <ul>
+      <li>Routine chat calls <code>notify</code> → <code>agentsflow-mcp-server.ts</code> <code>toolNotify</code> → <code>bridgeRequest({type:'notify', rootConversationId, …}, 20_000)</code>.</li>
+      <li><code>delegation-bridge.ts</code>: new <code>NotifyRequest</code> + <code>handlers.onNotify</code> → <code>main.ts</code> <code>handleNotify</code> (resolves the source chat → directory → routine run via <code>run.conversationId</code>).</li>
+      <li>New <code>electron/notifications-store.ts</code>: <code>&lt;userData&gt;/notifications.json</code>, same shape as <code>routines-store.ts</code> (FILE_VERSION, 250 ms debounced save, sanitize on load, 180-day retention).</li>
+      <li><code>mainWindow.webContents.send('notifications:updated', snapshot)</code>; for <code>warn</code>/<code>action</code> also an Electron <code>new Notification({title, body})</code> whose click focuses the window.</li>
+      <li><code>preload.ts</code> adds <code>listNotifications, answerNotificationQuestion, setNotificationTodo, sendNotificationAnswers, dismissNotification, onNotificationsUpdated</code> → <code>renderer/lib/use-notifications.ts</code> (mirrors <code>use-routines.ts</code>) → the chosen design's components.</li>
+      <li>Auto-raised notices: <code>routine-scheduler.ts</code> <code>endRun()</code> raises <code>info</code> “Routine X finished” on success and <code>warn</code> “Routine X failed: …” on failure, unless that run's chat already raised an <code>action</code>.</li>
+      <li>Answers back: <code>sendNotificationAnswers(id)</code> composes “Answers to your questions: 1) … 4) …; to-do done”, posts it into the source chat (Claude: the attached PTY, or <code>claude --resume &lt;sessionId&gt; -p</code> when idle; Codex: <code>codexSend</code>) and stamps <code>answersSentAt</code>.</li>
+      <li>Dismiss: main refuses unless <code>canDismiss()</code>; the UI disables the button and explains. <code>readAt</code> is set when the notification is first shown open. An open <code>action</code> keeps the routine run at <code>attention</code>; dismissal lets it settle to <code>success</code>.</li>
+    </ul>
+    <h3>One difference between the pages and this sketch</h3>
+    <p>All six design pages keep Dismiss locked until the answers have also been <i>sent</i> (they check <code>answersSentAt</code> as well), which is one step stricter than <code>canDismiss()</code> above. Either rule works; if the stricter one is kept, add <code>&amp;&amp; !!n.answersSentAt</code> for <code>action</code> notices in <code>canDismiss</code> so the main process and the UI agree.</p>
+  </details>
+
+</main>
+<script>
+(function () {
+  'use strict';
+  var S = window.PF_SCENARIO, C = window.PF_CONCEPTS || {};
+  var IDS = ['01', '02', '03', '04', '05', '06'].filter(function (id) { return C[id]; });
+  var PICK = '01', RUNNER = '03';
+  var NS = 'http://www.w3.org/2000/svg';
+  function h(tag, attrs, kids) {
+    var n = document.createElement(tag);
+    for (var k in attrs || {}) { if (k === 'text') n.textContent = attrs[k]; else if (k === 'html') n.innerHTML = attrs[k]; else n.setAttribute(k, attrs[k]); }
+    [].concat(kids || []).forEach(function (c) { if (c != null) n.appendChild(typeof c === 'string' ? document.createTextNode(c) : c); });
+    return n;
+  }
+  function s(tag, attrs, parent, text) {
+    var n = document.createElementNS(NS, tag);
+    for (var k in attrs || {}) n.setAttribute(k, attrs[k]);
+    if (text != null) n.textContent = text;
+    if (parent) parent.appendChild(n); return n;
+  }
+  function hhmm(iso) { return iso.slice(11, 16); }
+  var EFFORT = { S: 'Small — a few days', M: 'Medium — about a week', L: 'Large — two weeks or more' };
+
+  /* ---------- scenario timeline ---------- */
+  (function () {
+    var svg = document.getElementById('timeline');
+    var nById = {}; S.notifications.forEach(function (n) { nById[n.id] = n; });
+    var run = S.runs.filter(function (r) { return r.id === 'run-ts-1015'; })[0];
+    var y = 70;
+    s('defs', {}, svg).innerHTML = '<marker id="ix-ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#8c93a8"/></marker>';
+    s('line', { 'class': 'ix-line', x1: 20, y1: y, x2: 730, y2: y }, svg);
+    var pts = [
+      { x: 100, t: hhmm(nById['n-crash'].createdAt), label: 'Crash sweep stops', sub: 'Something went wrong', color: '#fbbf24', tip: nById['n-crash'].title + ' — ' + nById['n-crash'].body + ' Stays until you close it (one click).' },
+      { x: 280, t: hhmm(run.slotAt), label: 'Timesheet routine starts', sub: 'Runs by itself', color: '#8c93a8', tip: 'The routine “Abilitie timesheet” starts at ' + hhmm(run.slotAt) + ' on ' + PF.formatDay(run.slotAt) + '.' },
+      { x: 460, t: hhmm(nById['n-reddit'].createdAt), label: 'Reddit daily finished', sub: 'Just so you know', color: '#3b82f6', tip: nById['n-reddit'].title + ' — ' + nById['n-reddit'].body + ' Fades by itself after 6 seconds.' },
+      { x: 640, t: hhmm(nById['n-timesheet'].createdAt), label: 'Timesheet needs you', sub: 'PDF + 4 questions + to-do', color: '#f97316', tip: nById['n-timesheet'].title + ' — ' + nById['n-timesheet'].body }
+    ];
+    pts.forEach(function (p) {
+      var g = s('g', { 'data-tip': p.t + ' · ' + p.tip }, svg);
+      s('circle', { cx: p.x, cy: y, r: 9, fill: p.color }, g);
+      s('text', { x: p.x, y: y - 22, 'text-anchor': 'middle', 'font-size': 15, 'font-weight': 700 }, g, p.t);
+      s('text', { x: p.x, y: y + 30, 'text-anchor': 'middle', 'font-size': 13, 'font-weight': 600 }, g, p.label);
+      s('text', { 'class': 'ix-m', x: p.x, y: y + 48, 'text-anchor': 'middle', 'font-size': 12 }, g, p.sub);
+    });
+    // then, by hand
+    var you = [
+      { x: 805,  label: 'Open the PDF', tip: 'You open “' + S.files[0].label + '” (' + S.files[0].sizeKb + ' KB).' },
+      { x: 925,  label: '4 answers', tip: nById['n-timesheet'].questions.map(function (q, i) { return (i + 1) + ') ' + q.text + ' → ' + q.sampleAnswer; }).join('\n') },
+      { x: 1045, label: 'Send the email', tip: nById['n-timesheet'].todos[0].text },
+      { x: 1150, label: 'Dismissed', tip: 'Only now can the notice be dismissed; the routine card turns green.' }
+    ];
+    s('rect', { x: 745, y: 30, width: 445, height: 82, rx: 8, fill: 'none', stroke: '#f97316', 'stroke-dasharray': '4 4' }, svg);
+    s('text', { 'class': 'ix-m', x: 757, y: 48, 'font-size': 11, 'letter-spacing': '.06em' }, svg, 'THEN YOU, BY HAND');
+    s('path', { 'class': 'ix-arrow', d: 'M650 70 L748 70', 'marker-end': 'url(#ix-ah)' }, svg);
+    you.forEach(function (p, i) {
+      var w = i === 3 ? 76 : 104;
+      var g = s('g', { 'data-tip': p.tip }, svg);
+      s('rect', { x: p.x - w / 2, y: 56, width: w, height: 32, rx: 6, 'class': i === 3 ? 'ix-box ix-box--acc' : 'ix-box' }, g);
+      s('text', { x: p.x, y: 77, 'text-anchor': 'middle', 'font-size': 12, 'font-weight': 600 }, g, p.label);
+      if (i < 3) s('path', { 'class': 'ix-arrow', d: 'M' + (p.x + w / 2 + 1) + ' 72 L' + (you[i + 1].x - (i === 2 ? 38 : 52) - 3) + ' 72', 'marker-end': 'url(#ix-ah)' }, svg);
+    });
+    s('text', { 'class': 'ix-m', x: 20, y: 18, 'font-size': 12 }, svg, PF.formatDay(S.now) + ' 2026 · morning');
+  })();
+
+  /* ---------- the three levels ---------- */
+  (function () {
+    var host = document.getElementById('levels');
+    var ex = { info: 'n-reddit', warn: 'n-crash', action: 'n-timesheet' };
+    var col = { info: '#3b82f6', warn: '#fbbf24', action: '#f97316' };
+    ['info', 'warn', 'action'].forEach(function (lv) {
+      var L = S.levels[lv], n = S.notifications.filter(function (x) { return x.id === ex[lv]; })[0];
+      host.appendChild(h('div', { 'class': 'g-card', style: 'border-left:4px solid ' + col[lv] }, [
+        h('p', { 'class': 'g-eyebrow', text: L.glyph + '  ' + L.label }),
+        h('p', { style: 'margin:0 0 4px;font-weight:600', text: n.title }),
+        h('p', { 'class': 'g-muted', style: 'margin:0;font-size:13px', text: L.rule })
+      ]));
+    });
+  })();
+
+  /* ---------- concept cards ---------- */
+  var thumbs = [];
+  (function () {
+    var host = document.getElementById('cards');
+    IDS.forEach(function (id) {
+      var c = C[id];
+      var thumb = h('div', { 'class': 'ix-thumb' }, [h('div', { 'class': 'ix-thumb-fallback', text: c.name })]);
+      var ifr = h('iframe', { src: 'concepts/' + c.slug + '.html#embed', loading: 'lazy', tabindex: '-1', title: c.name + ' — live preview', 'aria-hidden': 'true' });
+      thumb.appendChild(ifr); thumbs.push(thumb);
+      var tag = id === PICK ? h('span', { 'class': 'ix-tag', text: 'My pick' }) : id === RUNNER ? h('span', { 'class': 'ix-tag ix-tag--alt', text: 'Runner-up' }) : null;
+      host.appendChild(h('article', { 'class': 'ix-card' + (id === PICK ? ' ix-card--pick' : ''), id: 'c' + id }, [
+        h('a', { href: c.page, 'aria-label': 'Open ' + c.name }, thumb),
+        h('h3', {}, [h('span', { 'class': 'ix-num', text: id }), c.name, tag]),
+        h('p', { text: c.tagline }),
+        h('ul', { 'class': 'ix-facts' }, [
+          h('li', {}, [h('b', { text: 'Where' }), h('span', { text: c.placement })]),
+          h('li', {}, [h('b', { text: 'Answering' }), h('span', { text: c.answering })]),
+          h('li', {}, [h('b', { text: 'Attention' }), h('span', { text: c.proactive })])
+        ]),
+        h('div', { 'class': 'ix-pc' }, [
+          h('div', {}, [h('b', { text: 'Good' }), h('ul', { 'class': 'g-pros' }, c.pros.slice(0, 3).map(function (t) { return h('li', { text: t }); }))]),
+          h('div', {}, [h('b', { text: 'Not so good' }), h('ul', { 'class': 'g-cons' }, c.cons.slice(0, 3).map(function (t) { return h('li', { text: t }); }))])
+        ]),
+        h('a', { 'class': 'ix-open', href: c.page, text: 'Open the full page ›' })
+      ]));
+    });
+    function fit() { thumbs.forEach(function (t) { var w = t.clientWidth; var f = t.querySelector('iframe'); if (w && f) f.style.transform = 'scale(' + (w / 1280) + ')'; }); }
+    fit();
+    window.addEventListener('resize', fit);
+    if (window.ResizeObserver) { var ro = new ResizeObserver(fit); thumbs.forEach(function (t) { ro.observe(t); }); }
+  })();
+
+  /* ---------- comparison table ---------- */
+  (function () {
+    var t = document.getElementById('table');
+    var heads = ['Design', 'Where it lives', 'How you answer', 'How it gets your attention', 'Always visible?', 'Clicks to finish', 'Screen space when idle (px)', 'Interruption (1–5)', 'Build effort', 'Link'];
+    t.appendChild(h('thead', {}, h('tr', {}, heads.map(function (x, i) { return h('th', { 'class': i >= 5 && i <= 8 ? 'g-num' : '', text: x }); }))));
+    var tb = h('tbody');
+    IDS.forEach(function (id) {
+      var c = C[id], m = c.metrics;
+      var meter = h('span', { 'class': 'ix-meter', 'aria-hidden': 'true' });
+      for (var i = 1; i <= 5; i++) meter.appendChild(h('i', { 'class': i <= m.interruption ? 'on' : '' }));
+      tb.appendChild(h('tr', { 'class': id === PICK ? 'is-pick' : '' }, [
+        h('td', { text: id + ' ' + c.name }),
+        h('td', { text: c.placement }),
+        h('td', { text: c.answering }),
+        h('td', { text: c.proactive }),
+        h('td', { 'data-tip': c.name + ' · always visible: ' + (c.everywhere ? 'yes — on Home, Routines and inside a chat' : 'no — not on every screen') }, c.everywhere ? h('span', { 'class': 'ix-yes', text: 'Yes' }) : 'No'),
+        h('td', { 'class': 'g-num', 'data-tip': c.name + ' · clicks to finish: ' + m.clicksToResolve + ' clicks (from the notice appearing to it being dismissed)', text: String(m.clicksToResolve) }),
+        h('td', { 'class': 'g-num', 'data-tip': c.name + ' · screen space when idle: ' + m.idleSpacePx + ' px' + (m.idleSpacePx ? ' taken all the time' : ' — nothing shows when nothing is waiting'), text: String(m.idleSpacePx) }),
+        h('td', { 'class': 'g-num', 'data-tip': c.name + ' · interruption: ' + m.interruption + ' of 5' }, [String(m.interruption), meter]),
+        h('td', { 'class': 'g-num', 'data-tip': c.name + ' · build effort: ' + m.buildEffort + ' (' + EFFORT[m.buildEffort] + ')', text: m.buildEffort }),
+        h('td', {}, h('a', { href: c.page, text: 'Open ›' }))
+      ]));
+    });
+    t.appendChild(tb);
+  })();
+
+  /* ---------- chart ---------- */
+  PF.barChart(document.getElementById('chart'), {
+    title: 'Clicks, idle space and interruption, per design',
+    categories: IDS.map(function (id) { return C[id].name; }),
+    series: [
+      { name: 'Clicks to finish', unit: 'clicks', color: '#ff7847', values: IDS.map(function (id) { return C[id].metrics.clicksToResolve; }) },
+      { name: 'Screen space when idle', unit: 'px', color: '#3b82f6', values: IDS.map(function (id) { return C[id].metrics.idleSpacePx; }) },
+      { name: 'Interruption, ×10 for the scale', unit: '(score ×10)', color: '#14b8a6', values: IDS.map(function (id) { return C[id].metrics.interruption * 10; }) }
+    ]
+  });
+
+  /* ---------- pick diagram ---------- */
+  (function () {
+    var svg = document.getElementById('pickdiagram');
+    s('defs', {}, svg).innerHTML = '<marker id="ix-ah2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#ff7847"/></marker>';
+    function box(x, y, w, hgt, title, sub, acc, tip) {
+      var g = s('g', { 'data-tip': tip }, svg);
+      s('rect', { x: x, y: y, width: w, height: hgt, rx: 10, 'class': acc ? 'ix-box ix-box--acc' : 'ix-box' }, g);
+      s('text', { x: x + w / 2, y: y + hgt / 2 - 4, 'text-anchor': 'middle', 'font-size': 15, 'font-weight': 700 }, g, title);
+      s('text', { 'class': 'ix-m', x: x + w / 2, y: y + hgt / 2 + 16, 'text-anchor': 'middle', 'font-size': 12 }, g, sub);
+    }
+    var c1 = C['01'], c4 = C['04'], c6 = C['06'];
+    box(20, 10, 280, 56, '01 ' + c1.name, 'the base: bell on every screen', false, c1.tagline);
+    box(20, 72, 280, 56, 'from 04 ' + c4.name, 'opens by itself when it needs you', false, c4.proactive);
+    box(20, 134, 280, 56, 'from 06 ' + c6.name, 'answers go back into the chat', false, c6.answering);
+    [38, 100, 162].forEach(function (yy) { s('path', { 'class': 'ix-arrow ix-arrow--acc', d: 'M302 ' + yy + ' C 420 ' + yy + ', 420 100, 560 100', 'marker-end': 'url(#ix-ah2)' }, svg); });
+    var m = c1.metrics;
+    box(566, 50, 414, 100, 'The pick', 'bell + self-opening drawer + answers into the chat', true,
+      'Measured on the 01 page: ' + m.clicksToResolve + ' clicks to finish · ' + m.idleSpacePx + ' px when idle · interruption ' + m.interruption + ' of 5 · build effort ' + m.buildEffort);
+  })();
+
+  /* ---------- architecture diagram ---------- */
+  (function () {
+    var svg = document.getElementById('arch');
+    s('defs', {}, svg).innerHTML = '<marker id="ix-ah3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#8c93a8"/></marker><marker id="ix-ah4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#ff7847"/></marker>';
+    function box(x, y, w, hgt, title, code, acc, tip) {
+      var g = s('g', { 'data-tip': tip }, svg);
+      s('rect', { x: x, y: y, width: w, height: hgt, rx: 8, 'class': acc ? 'ix-box ix-box--acc' : 'ix-box' }, g);
+      s('text', { x: x + w / 2, y: y + 24, 'text-anchor': 'middle', 'font-size': 14, 'font-weight': 700 }, g, title);
+      s('text', { 'class': 'ix-mono', x: x + w / 2, y: y + 42, 'text-anchor': 'middle', 'font-size': 11 }, g, code);
+    }
+    function arrow(d, acc) { s('path', { 'class': 'ix-arrow' + (acc ? ' ix-arrow--acc' : ''), d: d, 'marker-end': acc ? 'url(#ix-ah4)' : 'url(#ix-ah3)' }, svg); }
+    box(10, 60, 150, 56, 'Routine chat', 'claude / codex', false, 'The routine runs as an ordinary chat. When it needs you it calls the notify tool.');
+    box(200, 60, 150, 56, 'notify tool', 'toolNotify', false, 'One new tool on the existing peersflow server: title, level, files, questions, to-dos.');
+    box(390, 60, 150, 56, 'Bridge socket', 'delegation-bridge.ts', false, 'The existing local socket between the chat tools and the app.');
+    box(580, 60, 150, 56, 'The app', 'main.ts handleNotify', false, 'Finds which routine run the chat belongs to, stores the notice and tells the window.');
+    box(580, 190, 150, 56, 'Saved on disk', 'notifications.json', false, 'Kept for 180 days, saved a quarter-second after each change, like the routines file.');
+    box(790, 10, 180, 46, 'Home', 'pinned list', true, 'The chosen design shows the notice here.');
+    box(790, 64, 180, 46, 'Routines', 'week board', true, 'The routine card stays orange until the notice is dismissed.');
+    box(790, 118, 180, 46, 'Inside a chat', 'session view', true, 'Same notice, same count, inside any chat.');
+    box(790, 210, 180, 56, 'macOS banner', 'new Notification()', false, 'Side branch: for “something went wrong” and “needs you” only. Clicking it brings Peers Flow forward.');
+    arrow('M160 88 L196 88'); arrow('M350 88 L386 88'); arrow('M540 88 L576 88');
+    arrow('M655 116 L655 186');
+    arrow('M730 80 L786 33'); arrow('M730 88 L786 87'); arrow('M730 96 L786 141');
+    arrow('M730 110 C 760 150, 760 220, 786 236');
+    // answers back
+    arrow('M970 141 L988 141 L988 300 L85 300 L85 122', true);
+    s('text', { x: 470, y: 324, 'text-anchor': 'middle', 'font-size': 13, 'font-weight': 600, fill: '#ff7847', 'data-tip': 'sendNotificationAnswers posts “Answers to your questions: 1) … 4) …” into the routine chat, and the agent carries on.' }, svg, 'Your answers go back into the chat as a message');
+  })();
+
+  PF.fitFrames && PF.fitFrames();
+})();
+</script>
+</body>
+</html>
