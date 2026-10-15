@@ -590,11 +590,14 @@ describe('marking a run done by hand', () => {
     assert.equal(runsOf(h).length, 1);
   });
 
-  it('a missed run can be marked done; a running or successful one cannot', () => {
+  it('a missed or needs-attention run can be marked done; a running or successful one cannot', () => {
     const base = { id: 'x', routineId: 'r1', slotAt: isoOf(at(10, 9)), trigger: 'schedule' as const, startedAt: isoOf(at(10, 9)) };
     assert.equal(markRunDone({ ...base, status: 'missed', endedAt: isoOf(at(10, 9)) }, isoOf(at(10, 10))).status, 'success');
-    assert.throws(() => markRunDone({ ...base, status: 'running' }, isoOf(at(10, 10))), /only a failed or missed run/);
-    assert.throws(() => markRunDone({ ...base, status: 'success' }, isoOf(at(10, 10))), /only a failed or missed run/);
+    const attention = markRunDone({ ...base, status: 'attention' }, isoOf(at(10, 10)));
+    assert.equal(attention.status, 'success');
+    assert.equal(attention.endedAt, isoOf(at(10, 10)));
+    assert.throws(() => markRunDone({ ...base, status: 'running' }, isoOf(at(10, 10))), /only a failed, missed or needs-attention run/);
+    assert.throws(() => markRunDone({ ...base, status: 'success' }, isoOf(at(10, 10))), /only a failed, missed or needs-attention run/);
   });
 });
 
