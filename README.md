@@ -33,7 +33,7 @@ Built to scratch four specific itches working with Claude Code day-to-day:
 
 ## Highlights
 
-- **Peers that delegate to each other (MCP)** — every tracked directory is a *peer*: an agent rooted there with its own skills and MCP connections (Slack, Gmail, …). A built-in **`peersflow` MCP server** (loaded into every spawned session) lets an agent discover its peers (`list_peers`) and **`delegate`** a self-contained goal to one in another directory — that peer runs as a live, watchable session nested under the one that asked, and returns a result the caller can rely on. The same server lets an agent manage the **Routines** tab — `create_routine`, `list_routines`, `update_routine` (also pause/resume), `delete_routine`, `run_routine` — so "run this every morning" in a chat becomes a scheduled routine. Peers are *lateral* collaborators, distinct from Claude's own subagents. (See the **MCP server** entry in the hamburger menu for the tools and live registry.)
+- **Peers that delegate to each other (MCP)** — every tracked directory is a *peer*: an agent rooted there with its own skills and MCP connections (Slack, Gmail, …). A built-in **`peersflow` MCP server** (loaded into every spawned session) lets an agent discover its peers (`list_peers`) and **`delegate`** a self-contained goal to one in another directory — that peer runs as a live, watchable session nested under the one that asked, and returns a result the caller can rely on. The same server lets an agent manage the **Routines** tab — `create_routine`, `list_routines`, `update_routine` (also pause/resume), `delete_routine`, `run_routine` — so "run this every morning" in a chat becomes a scheduled routine. And **`notify`** lets an agent put a notice in the app's bell — files to check, questions only the user can answer, to-dos to do by hand. Peers are *lateral* collaborators, distinct from Claude's own subagents. (See the **MCP server** entry in the hamburger menu for the tools and live registry.)
 - **Pinned conversations as a to-do list** — every spawn is pinned by default; click ✓ Done to archive into the directory's history. ↻ Reopen brings it back.
 - **Per-directory history** — ⋯ menu on each tracked-directory card opens the full list (pinned + done) for that repo.
 - **Live status + auto-titles** — title comes from Claude's auto-generated short name (e.g. "joke delivery response"), description streams in from `state.json/detail` via `fs.watch` so changes appear within tens of milliseconds.
@@ -92,6 +92,37 @@ Catch-up rule: the scheduler checks every 15 s. If the computer was off (or the 
 Data lives in `<userData>/routines.json`.
 
 On first launch the app seeds **Reddit daily**: peer `atlas-of-doors`, prompt `/reddit-daily-routine`, daily at 09:00. If that peer is not tracked, the routine is created disabled and the preview says "Peer not tracked — Edit to pick one". Deleting a seeded routine is permanent; it is not re-created on the next launch.
+
+## Notifications
+
+Every header has a **bell**. Clicking it opens a panel on the right; the page behind stays usable, and Esc or the bell closes it. Agents raise notices with the `notify` tool of the `peersflow` MCP server. There are two levels — no "info": a chat that finished with nothing needed is already a green dot.
+
+- **Needs you** (`action`, orange badge with a count) — the work cannot finish without you. The card lists files to open, questions to answer (yes/no, a choice, or a short text) and to-dos you do by hand. It stays until every question is answered, every to-do is ticked and the answers were sent; only then does **Dismiss** unlock (it says what is still missing).
+- **Warning** (`warn`, small yellow dot) — something went wrong. It stays until you close it with one click.
+
+**Send answers to the agent** posts all answers back into the chat that asked, as one new message, and resumes that chat if it had stopped; the agent carries on from there. If the chat is gone, the card says so and Dismiss still unlocks.
+
+A routine run that fails or is missed raises a warning by itself; marking the run done clears it. When the window is not focused, a "Needs you" notice also shows a macOS banner; clicking it opens the panel on that notice. Notices live in `<userData>/notifications.json` (dismissed ones are kept 30 days).
+
+The LISA routine "Abilitie timesheet — 1st half" calls it like this — and ends its turn right after, since the answers arrive later as a new message:
+
+```json
+{
+  "title": "Abilitie timesheet (1–15 Oct) is ready — needs you",
+  "level": "action",
+  "body": "I prepared the timesheet PDF from this month's commits. Check it, answer the questions below, then send the email to Abilitie yourself.",
+  "files": [{ "path": "~/Desktop/LISA/timesheets/2026-10-abilitie-timesheet.pdf", "label": "October timesheet (PDF)" }],
+  "questions": [
+    { "id": "dayoffs",   "text": "Any days off between 1 and 15 October that I should take out?", "kind": "yesno", "hint": "I found none in your calendar." },
+    { "id": "delegated", "text": "Did you hand any of this work to someone else?", "kind": "yesno" },
+    { "id": "vacation",  "text": "I marked 3 Oct and 10 Oct as vacation — is that right?", "kind": "choice", "choices": ["Yes, both", "Only 3 Oct", "Only 10 Oct", "Neither"] },
+    { "id": "edits",     "text": "Any changes to descriptions or hours before I finalize?", "kind": "text" }
+  ],
+  "todos": [{ "text": "Send the timesheet email to Abilitie yourself — the agent never sends email" }]
+}
+```
+
+`~` is expanded by the app; relative paths resolve against the peer's directory.
 
 ## Requirements
 

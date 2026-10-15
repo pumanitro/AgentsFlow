@@ -4,6 +4,8 @@ import type { Routine, RoutineRun, RoutinesSnapshot } from '../../shared/routine
 import { markRunDone } from '../../shared/routines';
 import { validateRoutineInput } from '../../shared/routine-schedule';
 import { buildMockRoutines } from './mock-routines';
+import type { NotificationsSnapshot, UserNotification } from '../../shared/notifications';
+import { NOTIFICATION_LIMITS, canDismiss, isOpen, missingForDismiss } from '../../shared/notifications';
 
 const STORE_KEY = 'agentsflow:mock:v3';
 
@@ -56,6 +58,7 @@ const listeners = {
   todos: new Set<(t: PinnedTodo[]) => void>(),
   pinnedOrder: new Set<(o: PinnedItemRef[]) => void>(),
   routines: new Set<(s: RoutinesSnapshot) => void>(),
+  notifications: new Set<(s: NotificationsSnapshot) => void>(),
   termData: new Set<(id: string, data: string) => void>(),
   termExit: new Set<(id: string) => void>(),
 };
@@ -186,6 +189,23 @@ export function createMockApi(): AgentsFlowApi {
   const routineState = buildMockRoutines(state.directories, Date.now());
   const routinesSnapshot = (): RoutinesSnapshot => ({ routines: routineState.routines, runs: routineState.runs, now: new Date().toISOString() });
   const fireRoutines = () => { const snap = routinesSnapshot(); listeners.routines.forEach((cb) => cb(snap)); };
+
+  // Notifications, like routines, live in memory only: the two fixtures come
+  // back on every reload so the bell always has something to show.
+  let notifications = buildMockNotifications(Date.now());
+  const notificationsSnapshot = (): NotificationsSnapshot => ({
+    notifications: notifications.filter(isOpen).sort((x, y) => y.createdAt.localeCompare(x.createdAt)),
+    now: new Date().toISOString(),
+  });
+  const fireNotifications = () => { const snap = notificationsSnapshot(); listeners.notifications.forEach((cb) => cb(snap)); };
+  const mutateNotification = (id: string, fn: (n: UserNotification, now: string) => UserNotification): UserNotification => {
+    const cur = notifications.find((n) => n.id === id);
+    if (!cur) throw new Error('notification not found');
+    const next = fn(cur, new Date().toISOString());
+    notifications = notifications.map((n) => (n.id === id ? next : n));
+    fireNotifications();
+    return next;
+  };
 
   // Account pool. The browser demo has no keychain and no CLI, so the pool is
   // static — but the *selection* (which provider, which Codex sign-in) is real
@@ -826,6 +846,31 @@ export function createMockApi(): AgentsFlowApi {
     },
     onRoutinesUpdated: (cb) => { listeners.routines.add(cb); return () => listeners.routines.delete(cb); },
 
+    listNotifications: async () => notificationsSnapshot(),
+    markNotificationRead: async (id) => mutateNotification(id, (n, now) => (n.readAt ? n : { ...n, readAt: now })),
+    answerNotification: async (id, questionId, answer) => mutateNotification(id, (n, now) => mockApplyAnswer(n, questionId, answer, now)),
+    setNotificationTodo: async (id, todoId, done) => mutateNotification(id, (n, now) => {
+      if (!n.todos.some((t) => t.id === todoId)) throw new Error('to-do not found');
+      return { ...n, todos: n.todos.map((t) => (t.id === todoId ? { id: t.id, text: t.text, done, ...(done ? { doneAt: now } : {}) } : t)) };
+    }),
+    sendNotificationAnswers: async (id) => {
+      const cur = notifications.find((n) => n.id === id);
+      if (!cur) throw new Error('notification not found');
+      const unanswered = cur.questions.filter((q) => !q.answer).length;
+      if (unanswered) throw new Error(unanswered === 1 ? '1 question unanswered' : `${unanswered} questions unanswered`);
+      // No chat to deliver into here: pretend the open chat took it, after a beat.
+      await new Promise((r) => setTimeout(r, 600));
+      return mutateNotification(id, (n, now) => ({ ...n, answersDelivery: { at: now, ok: true, via: 'open-chat' } }));
+    },
+    dismissNotification: async (id) => mutateNotification(id, (n, now) => {
+      if (!canDismiss(n)) throw new Error(missingForDismiss(n).join(', '));
+      return { ...n, dismissedAt: now };
+    }),
+    openNotificationFile: async () => ({ status: 'success' }),
+    onNotificationsUpdated: (cb) => { listeners.notifications.add(cb); return () => listeners.notifications.delete(cb); },
+    // Only a macOS banner click pushes this, and the browser demo has none.
+    onNotificationOpen: () => () => {},
+
     listPinnedOrder: async () => state.pinnedOrder,
     reorderPinned: async (orderedRefs) => {
       const convIds = new Set(state.conversations.filter((c) => c.pinned).map((c) => c.id));
@@ -1054,4 +1099,58 @@ export function createMockApi(): AgentsFlowApi {
     unwatchFiles: async () => undefined,
     onFilesUpdated: () => () => undefined,
   };
+}
+
+// ---- Notifications fixtures + the answer rule (a local copy of
+// electron/notifications-mcp.ts applyAnswer: the mock may not import electron/*) ----
+
+function buildMockNotifications(nowMs: number): UserNotification[] {
+  const iso = (minsAgo: number) => new Date(nowMs - minsAgo * 60_000).toISOString();
+  return [
+    {
+      id: 'mock-notif-timesheet',
+      level: 'action',
+      title: 'Abilitie timesheet (1–15 Oct) is ready — needs you',
+      body: 'I prepared the timesheet PDF from this month\'s commits. Check it, answer the questions below, then send the email to Abilitie yourself.',
+      source: { kind: 'routine', conversationTitle: 'Abilitie timesheet · 15 Oct 09:00', peerName: 'LISA', routineName: 'Abilitie timesheet' },
+      createdAt: iso(4),
+      files: [{ path: '/Users/demo/Desktop/LISA/timesheets/2026-10-abilitie-timesheet.pdf', label: 'October timesheet (PDF)' }],
+      questions: [
+        { id: 'dayoffs', text: 'Any days off between 1 and 15 October that I should take out?', kind: 'yesno', hint: 'I found none in your calendar.' },
+        { id: 'delegated', text: 'Did you hand any of this work to someone else?', kind: 'yesno' },
+        { id: 'vacation', text: 'I marked 3 Oct and 10 Oct as vacation — is that right?', kind: 'choice', choices: ['Yes, both', 'Only 3 Oct', 'Only 10 Oct', 'Neither'] },
+        { id: 'edits', text: 'Any changes to descriptions or hours before I finalize?', kind: 'text' },
+      ],
+      todos: [{ id: 't1', text: 'Send the timesheet email to Abilitie yourself — the agent never sends email', done: false }],
+    },
+    {
+      id: 'mock-notif-crash-sweep',
+      level: 'warn',
+      title: 'Crash sweep did not finish',
+      body: 'The chat ended with an error. · Run of 15 Oct 07:00. Open the chat to see why, or use Run now in the Routines tab.',
+      source: { kind: 'routine', routineName: 'Crash sweep', peerName: 'abi', auto: true },
+      createdAt: iso(95),
+      files: [],
+      questions: [],
+      todos: [],
+    },
+  ];
+}
+
+function mockApplyAnswer(n: UserNotification, questionId: string, answer: string, now: string): UserNotification {
+  const q = n.questions.find((x) => x.id === questionId);
+  if (!q) throw new Error('question not found');
+  let value: string;
+  if (q.kind === 'yesno') {
+    value = String(answer).trim().toLowerCase();
+    if (value !== 'yes' && value !== 'no') throw new Error('answer "yes" or "no"');
+  } else if (q.kind === 'choice') {
+    value = String(answer);
+    if (!(q.choices ?? []).includes(value)) throw new Error('pick one of the offered choices');
+  } else {
+    value = String(answer).trim();
+    if (!value) throw new Error('the answer is empty');
+    if (value.length > NOTIFICATION_LIMITS.answer) throw new Error(`the answer is longer than ${NOTIFICATION_LIMITS.answer} characters`);
+  }
+  return { ...n, questions: n.questions.map((x) => (x.id === questionId ? { ...x, answer: value, answeredAt: now } : x)) };
 }

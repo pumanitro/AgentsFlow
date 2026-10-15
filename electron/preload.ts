@@ -1,6 +1,7 @@
 import { contextBridge, ipcRenderer, IpcRendererEvent } from 'electron';
 import type { TrackedDirectory, AccountsSnapshot, AgentsFlowApi, Conversation, GuardSnapshot, KeeperSnapshot, OpenFileNavPayload, PinnedDivider, PinnedItemRef, PinnedTodo, RemoteHostStatus, RotationStatus, SpawnRequest, WorktreeInfo } from '../shared/types';
 import { ROUTINES_IPC, type RoutinesSnapshot } from '../shared/routines';
+import { NOTIFICATIONS_IPC, type NotificationsSnapshot } from '../shared/notifications';
 
 const api: AgentsFlowApi = {
   codexSnapshot: (id, older) => ipcRenderer.invoke('codex:snapshot', id, older),
@@ -172,6 +173,24 @@ const api: AgentsFlowApi = {
     const listener = (_e: IpcRendererEvent, snapshot: RoutinesSnapshot) => cb(snapshot);
     ipcRenderer.on(ROUTINES_IPC.updated, listener);
     return () => ipcRenderer.removeListener(ROUTINES_IPC.updated, listener);
+  },
+
+  listNotifications: () => ipcRenderer.invoke(NOTIFICATIONS_IPC.list),   // 'notifications:list'
+  markNotificationRead: (id) => ipcRenderer.invoke(NOTIFICATIONS_IPC.markRead, id),   // 'notifications:markRead'
+  answerNotification: (id, questionId, answer) => ipcRenderer.invoke(NOTIFICATIONS_IPC.answer, id, questionId, answer),   // 'notifications:answer'
+  setNotificationTodo: (id, todoId, done) => ipcRenderer.invoke(NOTIFICATIONS_IPC.setTodo, id, todoId, done),   // 'notifications:setTodo'
+  sendNotificationAnswers: (id) => ipcRenderer.invoke(NOTIFICATIONS_IPC.sendAnswers, id),   // 'notifications:sendAnswers'
+  dismissNotification: (id) => ipcRenderer.invoke(NOTIFICATIONS_IPC.dismiss, id),   // 'notifications:dismiss'
+  openNotificationFile: (id, filePath) => ipcRenderer.invoke(NOTIFICATIONS_IPC.openFile, id, filePath),   // 'notifications:openFile'
+  onNotificationsUpdated: (cb) => {
+    const listener = (_e: IpcRendererEvent, snapshot: NotificationsSnapshot) => cb(snapshot);
+    ipcRenderer.on(NOTIFICATIONS_IPC.updated, listener);   // 'notifications:updated'
+    return () => ipcRenderer.removeListener(NOTIFICATIONS_IPC.updated, listener);
+  },
+  onNotificationOpen: (cb) => {
+    const listener = (_e: IpcRendererEvent, payload: { id: string }) => cb(payload);
+    ipcRenderer.on(NOTIFICATIONS_IPC.open, listener);   // 'notifications:open'
+    return () => ipcRenderer.removeListener(NOTIFICATIONS_IPC.open, listener);
   },
 
   gitStatus: (dirPath) => ipcRenderer.invoke('git:status', dirPath),

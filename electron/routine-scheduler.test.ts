@@ -597,3 +597,59 @@ describe('marking a run done by hand', () => {
     assert.throws(() => markRunDone({ ...base, status: 'success' }, isoOf(at(10, 10))), /only a failed or missed run/);
   });
 });
+
+describe('onRunEnded: the hook main raises its warning from', () => {
+  it('a failed run calls onRunEnded once', async () => {
+    const ended: [RoutineRun, Routine | null][] = [];
+    const h = harness(at(10, 9, 0) + 1000, { onRunEnded: (run, routine) => { ended.push([run, routine]); } });
+    addRoutine(h);
+    await h.sched.tick();
+    assert.equal(ended.length, 0);
+    h.convs.set('conv-1', conv('conv-1', { state: 'failed', status: '', description: 'boom' }));
+    await h.sched.tick();
+    await h.sched.tick();
+    assert.equal(ended.length, 1);
+    assert.equal(ended[0][0].status, 'failed');
+    assert.equal(ended[0][0].id, runsOf(h)[0].id);
+    assert.equal(ended[0][1]?.id, 'r1');
+  });
+
+  it('a missed slot calls onRunEnded once', async () => {
+    const ended: RoutineRun[] = [];
+    const h = harness(at(10, 12, 0), { onRunEnded: (run) => { ended.push(run); } });
+    addRoutine(h, { createdAt: isoOf(at(9, 0)) });
+    await h.sched.tick();
+    await h.sched.tick();
+    assert.deepEqual(ended.map((r) => [new Date(r.slotAt).getDate(), r.status]), [[9, 'missed']]);
+  });
+
+  it('a later write of the same failed run does not call it again', async () => {
+    let calls = 0;
+    let fail!: (e: Error) => void;
+    // 08:00: no slot is due, so only the manual run exists. Its spawn hangs, the hang
+    // check fails it, then the spawn's own rejection rewrites the same failed run.
+    const h = harness(at(10, 8, 0), {
+      onRunEnded: () => { calls++; },
+      spawn: () => new Promise((_, reject) => { fail = reject; }),
+    });
+    addRoutine(h);
+    const run = await h.sched.runNow('r1');
+    h.setNow(at(10, 8, 3));
+    await h.sched.tick();
+    assert.equal(h.store.getRun(run.id)?.error, 'spawn did not return');
+    assert.equal(calls, 1);
+    fail(new Error('spawn exploded'));
+    await new Promise((r) => setImmediate(r));
+    assert.equal(h.store.getRun(run.id)?.error, 'spawn exploded');
+    assert.equal(calls, 1);
+  });
+
+  it('no deps.onRunEnded → nothing breaks', async () => {
+    const h = harness(at(10, 12, 0));
+    addRoutine(h, { createdAt: isoOf(at(9, 0)) });
+    await h.sched.tick();
+    h.convs.set('conv-1', conv('conv-1', { state: 'failed', status: '', description: 'boom' }));
+    await h.sched.tick();
+    assert.deepEqual(runsOf(h).map((r) => r.status), ['missed', 'failed']);
+  });
+});

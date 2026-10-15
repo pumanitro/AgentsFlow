@@ -129,6 +129,38 @@ export const TOOL_DEFS = [
     },
   },
   {
+    name: 'notify',
+    title: 'Notify the user',
+    description:
+      'Show the user a notification in Peers Flow (a bell at the top of every screen; a panel they open). Use level "action" when the work cannot finish without the user: a file they must check, questions only they can answer, something they must do by hand (send an email, approve, pay). An "action" notice stays until every question is answered and every to-do is ticked. Use level "warn" when something went wrong that the user should know about; it stays until they close it. Never notify when nothing is needed from the user. After calling notify with questions, END YOUR TURN: the answers arrive later in this chat as one new message, and the chat is resumed for you. Never do the user\'s to-dos yourself.',
+    usage: 'notify({ title, level, body?, files?, questions?, todos? })',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        title: { type: 'string', description: 'One line, at most 200 characters, e.g. "Abilitie timesheet is ready — needs you".' },
+        level: { type: 'string', enum: ['warn', 'action'], description: '"action" = the user must do something before the work is finished; "warn" = something went wrong, the user should know.' },
+        body: { type: 'string', description: 'A short plain-words explanation: what happened, what you need. Plain text, at most 4000 characters.' },
+        files: {
+          type: 'array',
+          items: { type: 'object', properties: { path: { type: 'string', description: 'Absolute path, or relative to this peer\'s directory.' }, label: { type: 'string', description: 'Shown instead of the file name, e.g. "October timesheet (PDF)".' } }, required: ['path'], additionalProperties: false },
+          description: 'Files the user should look at. Each gets an Open button (PDFs open in the system viewer). At most 20.',
+        },
+        questions: {
+          type: 'array',
+          items: { type: 'object', properties: { id: { type: 'string', description: 'Optional stable id, e.g. "dayoffs".' }, text: { type: 'string' }, kind: { type: 'string', enum: ['yesno', 'choice', 'text'] }, choices: { type: 'array', items: { type: 'string' }, description: 'kind "choice" only: 2 to 12 options.' }, hint: { type: 'string', description: 'What you found or assumed, e.g. "I found none in your calendar."' } }, required: ['text', 'kind'], additionalProperties: false },
+          description: 'Questions only the user can answer. At most 20. The answers come back to THIS chat as one message once the user presses "Send answers".',
+        },
+        todos: {
+          type: 'array',
+          items: { type: 'object', properties: { text: { type: 'string' } }, required: ['text'], additionalProperties: false },
+          description: 'Things the user must do by hand, e.g. "Send the email yourself". The user ticks them off; you never do them. At most 20.',
+        },
+      },
+      required: ['title', 'level'],
+      additionalProperties: false,
+    },
+  },
+  {
     name: 'whoami',
     title: 'Who and where am I',
     description:
@@ -431,6 +463,14 @@ export function renderBootstrapPrompt(reg: Registry, self?: SelfInfo): string {
   lines.push('- Never open a file automatically when finishing a task, presenting an artifact, or reporting changes. A request for a link, URL, or path must be answered in chat.');
   lines.push('- Without an explicit request to open the file, just provide the link/path; do not add a routine permission question. Do not bypass this rule with shell commands, another tool, or UI automation.');
   lines.push('- This rule also applies to delegated peers. Pass along permission to open a file only when the user has explicitly given it for that file.');
+  lines.push('');
+  lines.push('## Telling the user something (notifications)');
+  lines.push('');
+  lines.push(
+    `- When the work cannot finish without the user — a file they must check, questions only they can answer, something they must do by hand (send an email, approve, pay) — call \`${qualifiedToolName('notify')}\` with level "action": attach the files, list the questions and the to-dos, then END YOUR TURN. The answers arrive later in this chat as one new message; continue from there. Never do the user's to-dos yourself.`,
+  );
+  lines.push('- When something went wrong that the user should know about, call it with level "warn".');
+  lines.push('- Do not notify when nothing is needed from the user — the app already shows that a chat finished.');
   lines.push('');
   lines.push(
     'This agent session runs inside **Peers Flow**, which tracks several project directories. In Peers Flow each tracked directory is a **peer**: a sibling agent rooted in its own directory, with its own skills and MCP connections (Slack, Gmail, …). A peer is NOT one of your subagents — it is a lateral collaborator you can delegate to and rely on.',

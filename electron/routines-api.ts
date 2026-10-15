@@ -29,6 +29,8 @@ export interface RoutineSchedulerDeps {
   /** The chat's session died before it ever started (no transcript): restart it in place with the same prompt. Resolves true when it is back. Optional. */
   restartNeverStarted?: (conv: Conversation) => Promise<boolean>;
   onChange: () => void;                                                 // routines/runs changed → broadcast
+  /** A run just became failed or missed (was neither before). Main raises the user's warning from it. */
+  onRunEnded?: (run: RoutineRun, routine: Routine | null) => void;
   log: (msg: string, detail?: Record<string, unknown>) => void;
   occurrencesBetween?: typeof occurrencesBetween;                        // test seam; default = shared impl
 }

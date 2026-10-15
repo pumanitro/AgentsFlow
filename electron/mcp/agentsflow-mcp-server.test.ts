@@ -79,7 +79,7 @@ describe('MCP server on a remote host (bridge, no store)', () => {
         if (nl < 0) return;
         const req = JSON.parse(buf.slice(0, nl)) as { type: string; id: string };
         received.push(req);
-        const envelope = req.type === 'list_peers' ? { status: 'success', markdown: '# Peers Flow — peer registry\n\nfrom the bridge' } : req.type === 'whoami' ? WHOAMI : req.type === 'add_remote_peer' ? { status: 'success', peer: { displayName: 'studio' } } : req.type === 'routines' ? { status: (req as { op?: string }).op === 'delete' ? 'failure' : 'success', op: (req as { op?: string }).op } : { status: 'failure', error: 'unexpected' };
+        const envelope = req.type === 'list_peers' ? { status: 'success', markdown: '# Peers Flow — peer registry\n\nfrom the bridge' } : req.type === 'whoami' ? WHOAMI : req.type === 'add_remote_peer' ? { status: 'success', peer: { displayName: 'studio' } } : req.type === 'routines' ? { status: (req as { op?: string }).op === 'delete' ? 'failure' : 'success', op: (req as { op?: string }).op } : req.type === 'notify' ? { status: 'success', id: 'n-1' } : { status: 'failure', error: 'unexpected' };
         c.end(`${JSON.stringify({ type: 'result', id: req.id, envelope })}\n`);
       });
     });
@@ -98,10 +98,27 @@ describe('MCP server on a remote host (bridge, no store)', () => {
     assert.equal((r.result!.serverInfo as { name: string }).name, 'peersflow');
   });
 
-  test('tools/list includes whoami, add_remote_peer and the routine tools', async () => {
+  test('tools/list includes whoami, add_remote_peer, notify and the routine tools', async () => {
     const r = await client.call('tools/list');
-    const names = (r.result!.tools as { name: string }[]).map((t) => t.name);
-    assert.deepEqual(names.sort(), ['add_remote_peer', 'create_routine', 'delegate', 'delete_routine', 'list_peers', 'list_routines', 'open_file', 'run_routine', 'update_routine', 'whoami']);
+    const tools = r.result!.tools as { name: string; inputSchema: { required?: string[] } }[];
+    assert.deepEqual(tools.map((t) => t.name).sort(), ['add_remote_peer', 'create_routine', 'delegate', 'delete_routine', 'list_peers', 'list_routines', 'notify', 'open_file', 'run_routine', 'update_routine', 'whoami']);
+    assert.deepEqual(tools.find((t) => t.name === 'notify')!.inputSchema.required, ['title', 'level']);
+  });
+
+  test('notify goes over the bridge with the root conversation id and untouched args', async () => {
+    const args = {
+      title: 'Timesheet is ready — needs you', level: 'action', body: 'Check it.',
+      files: [{ path: 'timesheets/oct.pdf', label: 'October timesheet (PDF)' }],
+      questions: [{ id: 'dayoffs', text: 'Any days off?', kind: 'yesno', hint: 'None found.' }],
+      todos: [{ text: 'Send the email yourself' }],
+    };
+    const r = textOf(await client.call('tools/call', { name: 'notify', arguments: args }));
+    assert.equal(r.isError, false);
+    assert.deepEqual(JSON.parse(r.text), { status: 'success', id: 'n-1' });
+    const req = received.find((q) => q.type === 'notify');
+    assert.ok(req, 'bridge never saw notify');
+    assert.equal(req.rootConversationId, 'conv-1');
+    assert.deepEqual(req.args, args);
   });
 
   test('add_remote_peer maps snake_case args onto the bridge request', async () => {
@@ -177,6 +194,12 @@ describe('MCP server with no bridge', () => {
     const r = textOf(await client.call('tools/call', { name: 'create_routine', arguments: { name: 'x', prompt: 'p', time: '09:00' } }));
     assert.equal(r.isError, true);
     assert.match(r.text, /Routines require the Peers Flow app/);
+  });
+
+  test('notify says it needs the app', async () => {
+    const r = textOf(await client.call('tools/call', { name: 'notify', arguments: { title: 't', level: 'warn' } }));
+    assert.equal(r.isError, true);
+    assert.deepEqual(JSON.parse(r.text), { status: 'failure', error: 'Notifications require the Peers Flow app (this session has no app bridge).' });
   });
 
   test('whoami falls back to what the process can see', async () => {

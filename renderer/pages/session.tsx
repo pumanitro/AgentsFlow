@@ -11,6 +11,7 @@ import { useBackNavKeys, BackNavHint } from '../lib/back-nav';
 import ProviderIcon, { providerName } from '../components/ProviderIcon';
 import ShellArea, { appendShell, ShellNode } from '../components/ShellArea';
 import PaneErrorBoundary from '../components/PaneErrorBoundary';
+import NotificationBell from '../components/notifications/NotificationBell';
 import paneLoading from '../components/PaneLoading';
 
 const CodexChat = dynamic(() => import('../components/CodexChat'), { ssr: false, loading: paneLoading('Codex') });
@@ -356,6 +357,7 @@ export default function SessionPage() {
             title={openFile ? 'Show file editor' : 'Click a file in the sidebar to open it'}
           >File</button>
         </div>
+        <NotificationBell />
         {/* Fork, with the cross-provider move on its ▾. Both need something to
             copy from, so both are dead until this chat has a session (a Codex
             row has no thread until its first turn). */}

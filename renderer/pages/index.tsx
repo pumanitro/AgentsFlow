@@ -20,6 +20,7 @@ import DockedPanes, { TOP_REGION_MIN } from '../components/DockedPanes';
 import { api } from '../lib/ipc';
 import { useUIState } from '../lib/ui-state';
 import { PILL } from '../lib/routine-style';
+import NotificationBell from '../components/notifications/NotificationBell';
 import { BridgeHealth, Conversation, PinnedDivider, PinnedItemRef, PinnedTodo, RemoteHostStatus, TrackedDirectory } from '../../shared/types';
 import { hostKeyOf } from '../../shared/remote';
 import { blockStepDropIndex, marqueeHits, moveRefsTo, refKey } from '../../shared/pinned-selection';
@@ -894,6 +895,7 @@ export default function Home() {
         </div>
         )}
         <div className="flex items-center gap-2" style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}>
+          <NotificationBell />
           {view !== 'stats' && (
             <div role="tablist" aria-label="Main view" className={PILL.wrap}>
               <button role="tab" aria-selected={view !== 'routines'} onClick={() => setView('home')} className={view !== 'routines' ? PILL.on : PILL.off} title="Pinned conversations">Chat</button>

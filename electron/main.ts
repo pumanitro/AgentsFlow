@@ -73,7 +73,7 @@ import { ensureWorkspaceTrusted } from './workspace-trust';
 import { applyRemoteJobState, getLastAgentRows, refreshNow, setPollerForeground, startPoller, stopPoller, syncWatchers, unwatchConversation, watchConversation, watcherStats } from './poller';
 import { bridgeSocketPath, buildBootstrapSystemPrompt, getMcpServerInfo, writeMcpConfigForConversation, writeRemoteMcpConfig } from './mcp-bridge';
 import { buildDelegatePrompt, buildRegistry, renderRegistryMarkdown } from './registry';
-import { startPeersBridge, type AddRemotePeerRequest, type DelegateRequest, type ListPeersRequest, type OpenFileRequest, type PeersBridge, type RoutinesRequest, type WhoamiRequest } from './delegation-bridge';
+import { startPeersBridge, type AddRemotePeerRequest, type DelegateRequest, type ListPeersRequest, type NotifyRequest, type OpenFileRequest, type PeersBridge, type RoutinesRequest, type WhoamiRequest } from './delegation-bridge';
 import { RemoteHosts, setRemoteHosts } from './remote/remote-hosts';
 import { remoteCommand, runRemote } from './remote/remote-exec';
 import { hostKeyOf } from '../shared/remote';
@@ -84,6 +84,19 @@ import type { RoutineScheduler, RoutinesStore } from './routines-api';
 import { createRoutine, handleRoutinesOp, patchRoutine } from './routines-mcp';
 import { formatSlot } from '../shared/routine-schedule';
 import { ROUTINES_IPC, markRunDone, type Routine, type RoutineInput, type RoutinePatch, type RoutineRun, type RoutinesSnapshot } from '../shared/routines';
+import { createNotificationsStore, type NotificationsStore } from './notifications-store';
+import {
+  applyAnswer,
+  applyTodo,
+  buildNotificationFromArgs,
+  buildRunWarning,
+  describeForTool,
+  dismissNotification,
+  formatAnswersMessage,
+  markRead,
+  shouldShowSystemNotification,
+} from './notifications-mcp';
+import { NOTIFICATIONS_IPC, allAnswered, type AnswersDelivery, type NotificationSource, type NotificationsSnapshot, type UserNotification } from '../shared/notifications';
 import {
   buildProbeScript,
   delegationLooksFinished,
@@ -121,6 +134,10 @@ let remoteHosts: RemoteHosts | null = null;
 // handlers below fail politely until then.
 let routinesStore: RoutinesStore | null = null;
 let routineScheduler: RoutineScheduler | null = null;
+// Notifications (the bell + drawer). Created in whenReady before the routines,
+// so a run that fails during the scheduler's first tick can already raise its
+// warning; the IPC handlers below fail politely until then.
+let notificationsStore: NotificationsStore | null = null;
 
 /** hostKey of the machine a tracked dir runs on; undefined = this one. */
 function remoteHostKeyForDir(dir: TrackedDirectory): string | undefined {
@@ -484,6 +501,7 @@ app.whenReady().then(() => {
   }
   createWindow();
   startPoller(() => mainWindow);
+  startNotifications();
   startRoutines();
   perf.startPerfSummary();
   // Live sampler behind the sidebar Performance panel (event-loop lag, CPU).
@@ -547,6 +565,7 @@ app.whenReady().then(() => {
       onWhoami: handleWhoami,
       onAddRemotePeer: handleAddRemotePeer,
       onRoutines: handleRoutines,
+      onNotify: handleNotify,
     });
   } catch (err) {
     console.error('[agentsflow] failed to start peers bridge', err);
@@ -676,6 +695,7 @@ app.on('before-quit', () => {
   // last few mutations (the async debounce window would otherwise drop them).
   try { store.flushSync(); } catch { /* ignore */ }
   try { routineScheduler?.stop(); routinesStore?.flushSync(); } catch { /* ignore */ }
+  try { notificationsStore?.flushSync(); } catch { /* ignore */ }
 });
 
 // ----- IPC -----
@@ -1383,6 +1403,34 @@ async function applySkillContracts(): Promise<void> {
   }
 }
 
+/**
+ * Resume a chat whose session is no longer running, in the background, with
+ * `prompt` as its next user turn. The Keeper's relaunch, and the fallback when
+ * a notification's answers cannot be typed into a live chat.
+ */
+async function relaunchConversation(conv: Conversation, prompt: string): Promise<{ ok: boolean; daemonShort?: string; error?: string }> {
+  const live = store.getConversation(conv.id) ?? conv;
+  if (!live.sessionId) return { ok: false, error: 'no session id' };
+  const cwd = live.worktreePath ?? live.directoryPath;
+  try {
+    const r = await resumeBackground({
+      sessionId: live.sessionId,
+      cwd,
+      prompt,
+      mcpConfigPath: writeMcpConfigForConversation(live.id, cwd),
+      appendSystemPrompt: buildBootstrapSystemPrompt(store.getDirectories()),
+      model: live.model,
+    });
+    if (!r.daemonShort) return { ok: false, error: r.raw.trim().slice(0, 300) || `claude exited ${r.code}` };
+    pushConversationPatch(store.updateConversation(live.id, { daemonShort: r.daemonShort, state: 'starting', status: '' }));
+    syncWatchers();
+    void refreshNow().catch(() => undefined);
+    return { ok: true, daemonShort: r.daemonShort };
+  } catch (err) {
+    return { ok: false, error: (err as Error)?.message ?? String(err) };
+  }
+}
+
 const keeperDeps: keeper.KeeperDeps = {
   // Contracts are declared from inside a chat (/until-done, /forever), never
   // guessed: a chat nobody declared is left alone when it stops.
@@ -1399,28 +1447,7 @@ const keeperDeps: keeper.KeeperDeps = {
   memLevel: () => guard.getMemLevel(),
   readKillsSince: (offset) => readKillLogSince(offset),
   nudge: nudgeConversation,
-  relaunch: async (conv, prompt) => {
-    const live = store.getConversation(conv.id) ?? conv;
-    if (!live.sessionId) return { ok: false, error: 'no session id' };
-    const cwd = live.worktreePath ?? live.directoryPath;
-    try {
-      const r = await resumeBackground({
-        sessionId: live.sessionId,
-        cwd,
-        prompt,
-        mcpConfigPath: writeMcpConfigForConversation(live.id, cwd),
-        appendSystemPrompt: buildBootstrapSystemPrompt(store.getDirectories()),
-        model: live.model,
-      });
-      if (!r.daemonShort) return { ok: false, error: r.raw.trim().slice(0, 300) || `claude exited ${r.code}` };
-      pushConversationPatch(store.updateConversation(live.id, { daemonShort: r.daemonShort, state: 'starting', status: '' }));
-      syncWatchers();
-      void refreshNow().catch(() => undefined);
-      return { ok: true, daemonShort: r.daemonShort };
-    } catch (err) {
-      return { ok: false, error: (err as Error)?.message ?? String(err) };
-    }
-  },
+  relaunch: relaunchConversation,
   notify: notifyUser,
   onSnapshot: (s) => {
     if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('keeper:updated', s);
@@ -1940,6 +1967,15 @@ function startRoutines(): void {
     settleQuietRun: settleQuietRoutineRun,
     restartNeverStarted,
     onChange: broadcastRoutines,
+    // A run that failed or was missed raises one warning in the bell (never a
+    // second one for the same run, even when the scheduler writes it again).
+    onRunEnded: (run, routine) => {
+      if (!notificationsStore) return;
+      if (notificationsStore.findOpen((n) => !!n.source.auto && n.source.runId === run.id)) return;
+      const peer = store.getDirectories().find((d) => d.id === routine?.directoryId)?.displayName ?? null;
+      notificationsStore.add(buildRunWarning(run, routine, peer, uuid(), new Date().toISOString(), formatSlot));
+      broadcastNotifications();
+    },
     log: (m, d) => console.log(`[agentsflow][routines] ${m}`, d ?? {}),
   });
   routineScheduler.start();
@@ -2008,6 +2044,13 @@ ipcMain.handle(ROUTINES_IPC.markRunDone, (_e, runId: string): RoutineRun => {
   const done = store.upsertRun(markRunDone(run, new Date().toISOString()));
   console.log('[agentsflow][routines] run marked done', { routineId: run.routineId, runId, was: run.status, error: run.error });
   broadcastRoutines();
+  // The run is settled by hand, so its automatic warning has nothing left to say.
+  if (notificationsStore) {
+    const now = new Date().toISOString();
+    const stale = notificationsStore.list().filter((n) => n.source.auto && n.source.runId === runId);
+    for (const n of stale) notificationsStore.update(n.id, { dismissedAt: now });
+    if (stale.length) broadcastNotifications();
+  }
   return done;
 });
 
@@ -2027,6 +2070,183 @@ async function handleRoutines(req: RoutinesRequest): Promise<Record<string, unkn
   console.log('[agentsflow][routines] mcp', { op: req.op, status: envelope.status, conversationId: req.rootConversationId, error: envelope.error });
   return envelope;
 }
+
+// ----- Notifications: the bell + drawer (shared/notifications.ts) -----
+// Raised by an agent through the `notify` MCP tool, or by the app itself when
+// a routine run fails or is missed. The rules live in notifications-mcp.ts;
+// this section only loads, saves, pushes and delivers.
+
+function broadcastNotifications(): void {
+  if (mainWindow && !mainWindow.isDestroyed() && notificationsStore) {
+    mainWindow.webContents.send(NOTIFICATIONS_IPC.updated, notificationsStore.snapshot(Date.now()));
+  }
+}
+
+function startNotifications(): void {
+  notificationsStore = createNotificationsStore(path.join(app.getPath('userData'), 'notifications.json'));
+  console.log('[agentsflow][notifications] loaded', { open: notificationsStore.list().length });
+}
+
+function requireNotificationsStore(): NotificationsStore {
+  if (!notificationsStore) throw new Error('notifications are still starting — try again in a moment');
+  return notificationsStore;
+}
+
+function requireNotification(id: string): UserNotification {
+  const n = requireNotificationsStore().get(id);
+  if (!n) throw new Error('notification not found');
+  return n;
+}
+
+/** Store a changed record, push the new list, hand the record back to the caller. */
+function saveNotification(n: UserNotification): UserNotification {
+  const saved = requireNotificationsStore().update(n.id, n);
+  if (!saved) throw new Error('notification not found');
+  broadcastNotifications();
+  return saved;
+}
+
+/**
+ * The macOS banner for an "action" notice raised while the user is elsewhere.
+ * Clicking it brings the window forward and opens the drawer on that notice.
+ */
+const liveBanners = new Set<Notification>();
+
+function showActionBanner(n: UserNotification): void {
+  try {
+    if (!Notification.isSupported()) {
+      console.log('[agentsflow][notifications] banner unsupported', { id: n.id, title: n.title });
+      return;
+    }
+    const banner = new Notification({ title: n.title, body: n.body ?? 'Open Peers Flow to see what is needed.' });
+    // Hold the banner until it is clicked or closed: a garbage-collected
+    // Notification silently drops its click handler on macOS.
+    liveBanners.add(banner);
+    banner.on('close', () => { liveBanners.delete(banner); });
+    banner.on('click', () => {
+      liveBanners.delete(banner);
+      const win = mainWindow;
+      if (!win || win.isDestroyed()) return;
+      try {
+        if (win.isMinimized()) win.restore();
+        win.show();
+        win.focus();
+      } catch { /* best-effort focus */ }
+      win.webContents.send(NOTIFICATIONS_IPC.open, { id: n.id });
+    });
+    banner.show();
+  } catch (err) {
+    console.warn('[agentsflow][notifications] banner failed', { id: n.id, error: (err as Error)?.message ?? err });
+  }
+}
+
+// The `notify` MCP tool: the raw arguments are validated by
+// buildNotificationFromArgs; the source is whatever chat (and routine run) asked.
+async function handleNotify(req: NotifyRequest): Promise<Record<string, unknown>> {
+  if (!notificationsStore) return { status: 'failure', error: 'notifications are still starting — try again in a moment' };
+  const conv = req.rootConversationId ? store.getConversation(req.rootConversationId) : undefined;
+  const dir = conv ? store.getDirectories().find((d) => d.id === conv.directoryId) : undefined;
+  // listRuns is oldest first, so the last match is the newest run of this chat.
+  const run = conv ? routinesStore?.listRuns().filter((r) => r.conversationId === conv.id).pop() : undefined;
+  const routine = run ? routinesStore?.getRoutine(run.routineId) ?? null : null;
+  const source: NotificationSource = { kind: run ? 'routine' : 'chat' };
+  if (req.rootConversationId) source.conversationId = req.rootConversationId;
+  if (conv?.title) source.conversationTitle = conv.title;
+  if (dir) { source.directoryId = dir.id; source.peerName = dir.displayName; }
+  if (run) { source.routineId = run.routineId; source.runId = run.id; }
+  if (routine?.name) source.routineName = routine.name;
+  // `~/` is this Mac's home; a relative path is relative to the peer that asked.
+  // A remote peer's paths are left as given: they are paths on that host.
+  const resolvePath = (p: string): string =>
+    p.startsWith('~/') ? path.join(os.homedir(), p.slice(2))
+      : path.isAbsolute(p) ? path.normalize(p)
+        : dir && !dir.remote ? path.join(dir.path, p)
+          : p;
+  let n: UserNotification;
+  try {
+    n = buildNotificationFromArgs(req.args, { id: uuid(), now: new Date().toISOString(), source, resolvePath });
+  } catch (err) {
+    console.log('[agentsflow][notifications] mcp rejected', { conversationId: req.rootConversationId, error: (err as Error)?.message ?? err });
+    return { status: 'failure', error: (err as Error)?.message ?? String(err) };
+  }
+  notificationsStore.add(n);
+  broadcastNotifications();
+  if (shouldShowSystemNotification(n, !!mainWindow && !mainWindow.isDestroyed() && mainWindow.isFocused())) showActionBanner(n);
+  console.log('[agentsflow][notifications] mcp', { id: n.id, level: n.level, conversationId: req.rootConversationId });
+  return describeForTool(n);
+}
+
+/**
+ * "Send answers": type the user's answers into the chat that asked, as one
+ * user turn. A live chat gets them typed in; a chat whose session has ended is
+ * resumed with them. A failure is recorded on the notice (the drawer shows it,
+ * and a seen failure unlocks Dismiss) — this only rejects on an unanswered question.
+ */
+async function deliverAnswers(id: string): Promise<UserNotification> {
+  const n = requireNotification(id);
+  if (!allAnswered(n)) throw new Error('answer every question before sending');
+  const text = formatAnswersMessage(n);
+  const conv = n.source.conversationId ? store.getConversation(n.source.conversationId) : undefined;
+  let result: Omit<AnswersDelivery, 'at'>;
+  if (!conv) {
+    result = { ok: false, error: 'the chat no longer exists' };
+  } else if (conv.provider === 'codex') {
+    try {
+      await codex.send(conv.id, text);
+      result = { ok: true, via: 'codex' };
+    } catch (err) {
+      result = { ok: false, error: (err as Error)?.message ?? String(err) };
+    }
+  } else {
+    let r: pty.NudgeResult;
+    try {
+      r = await nudgeConversation(conv, text);
+    } catch (err) {
+      r = { ok: false, error: (err as Error)?.message ?? String(err) };
+    }
+    if (r.ok) {
+      result = { ok: true, via: r.via };
+    } else if (/no longer running|attach exited|never opened|no daemon id/.test(r.error)) {
+      // Nobody is there to type into: resume the session with the answers as its prompt.
+      const r2 = await relaunchConversation(conv, text);
+      result = r2.ok ? { ok: true, via: 'resume' } : { ok: false, via: 'resume', error: r2.error };
+    } else {
+      result = { ok: false, error: r.error };
+    }
+  }
+  const delivery: AnswersDelivery = { at: new Date().toISOString(), ...result };
+  console.log('[agentsflow][notifications] answers', { id, conversationId: n.source.conversationId, ok: delivery.ok, via: delivery.via, error: delivery.error });
+  // Re-read: the user may have ticked a to-do while the delivery was in flight.
+  return saveNotification({ ...requireNotification(id), answersDelivery: delivery });
+}
+
+ipcMain.handle(NOTIFICATIONS_IPC.list, (): NotificationsSnapshot =>
+  notificationsStore ? notificationsStore.snapshot(Date.now()) : { notifications: [], now: new Date().toISOString() });
+
+ipcMain.handle(NOTIFICATIONS_IPC.markRead, (_e, id: string): UserNotification =>
+  saveNotification(markRead(requireNotification(id), new Date().toISOString())));
+
+ipcMain.handle(NOTIFICATIONS_IPC.answer, (_e, id: string, questionId: string, answer: string): UserNotification =>
+  saveNotification(applyAnswer(requireNotification(id), questionId, answer, new Date().toISOString())));
+
+ipcMain.handle(NOTIFICATIONS_IPC.setTodo, (_e, id: string, todoId: string, done: boolean): UserNotification =>
+  saveNotification(applyTodo(requireNotification(id), todoId, !!done, new Date().toISOString())));
+
+ipcMain.handle(NOTIFICATIONS_IPC.sendAnswers, (_e, id: string): Promise<UserNotification> => deliverAnswers(id));
+
+ipcMain.handle(NOTIFICATIONS_IPC.dismiss, (_e, id: string): UserNotification => {
+  const n = saveNotification(dismissNotification(requireNotification(id), new Date().toISOString()));
+  console.log('[agentsflow][notifications] dismissed', { id, level: n.level });
+  return n;
+});
+
+// Open goes through the same path as the `open_file` tool: PDFs to the system
+// viewer, everything else into the peer's file view.
+ipcMain.handle(NOTIFICATIONS_IPC.openFile, async (_e, id: string, filePath: string): Promise<{ status: 'success' | 'failure'; error?: string }> => {
+  const n = requireNotification(id);
+  const r = await handleOpenFile({ type: 'open_file', id: `n-${id}`, rootConversationId: n.source.conversationId ?? '', directory: n.source.directoryId ?? '', file: filePath, line: null });
+  return r.status === 'success' ? { status: 'success' } : { status: 'failure', error: typeof r.error === 'string' ? r.error : 'could not open the file' };
+});
 
 // ----- Delegation bridge: the MCP server asks main to spawn a tracked peer ----
 

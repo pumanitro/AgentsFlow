@@ -9,6 +9,7 @@ import PaneErrorBoundary from '../components/PaneErrorBoundary';
 import { appendShell, ShellNode } from '../components/ShellArea';
 import { buildTree, flattenSingleChildDirs, TreeDir } from '../components/file-tree';
 import paneLoading from '../components/PaneLoading';
+import NotificationBell from '../components/notifications/NotificationBell';
 
 const FileTreeSidebar = dynamic(() => import('../components/FileTreeSidebar'), { ssr: false, loading: paneLoading('files') });
 const FileEditor = dynamic(() => import('../components/FileEditor'), { ssr: false, loading: paneLoading('editor') });
@@ -239,6 +240,7 @@ export default function PreviewPage() {
             </>
           )}
         </div>
+        <NotificationBell />
         <button
           onClick={addShell}
           disabled={!dir?.path}

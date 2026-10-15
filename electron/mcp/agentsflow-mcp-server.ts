@@ -17,6 +17,8 @@
  *   • add_remote_peer — track a directory on another machine (ssh), like the app's form.
  *   • list_routines / create_routine / update_routine / delete_routine / run_routine
  *                — the app's Routines tab (scheduled prompts), bridge only.
+ *   • notify     — raise a notification in the app's bell (questions, to-dos,
+ *                  files for the user), bridge only.
  *
  * The same compiled file also runs on a REMOTE peer's host (shipped there with
  * registry.js + locale.js and started by that host's `node`). There it has no
@@ -197,6 +199,25 @@ async function toolRoutines(op: string, args: Record<string, unknown>): Promise<
     60_000,
   );
   if (!envelope) return textContent('Peers Flow did not respond (bridge unavailable or timed out).', true);
+  return textContent(JSON.stringify(envelope, null, 2), envelope.status === 'failure');
+}
+
+/**
+ * Raise a notification in the app's bell. The app validates the arguments
+ * (notifications-mcp.ts), so they travel untouched; like the routines there is
+ * no headless fallback — the bell only exists inside the running app.
+ */
+async function toolNotify(args: Record<string, unknown>): Promise<Record<string, unknown>> {
+  if (!BRIDGE_SOCK) {
+    return textContent(JSON.stringify({ status: 'failure', error: 'Notifications require the Peers Flow app (this session has no app bridge).' }, null, 2), true);
+  }
+  const envelope = await bridgeRequest(
+    { type: 'notify', id: `${Date.now()}-${process.pid}`, rootConversationId: ROOT_CONVERSATION_ID, args },
+    20_000,
+  );
+  if (!envelope) {
+    return textContent(JSON.stringify({ status: 'failure', error: 'Peers Flow did not respond (bridge unavailable or timed out).' }, null, 2), true);
+  }
   return textContent(JSON.stringify(envelope, null, 2), envelope.status === 'failure');
 }
 
@@ -622,6 +643,10 @@ async function handleToolsCall(id: JsonRpcId, params: Record<string, unknown>): 
     }
     if (name === 'open_file') {
       sendResult(id, await toolOpenFile(args as OpenFileArgs));
+      return;
+    }
+    if (name === 'notify') {
+      sendResult(id, await toolNotify(args));
       return;
     }
     if (Object.prototype.hasOwnProperty.call(ROUTINE_TOOL_OPS, name)) {

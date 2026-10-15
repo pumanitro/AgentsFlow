@@ -50,8 +50,14 @@ export function createRoutineScheduler(deps: RoutineSchedulerDeps): RoutineSched
   const iso = (ms: number) => new Date(ms).toISOString();
 
   function write(run: RoutineRun): RoutineRun {
+    const prev = store.getRun(run.id);
     store.upsertRun(run);
     deps.onChange();
+    // Only the transition into failed/missed counts: a later rewrite of the same
+    // failed run (a summary, a late spawn result) must not warn the user twice.
+    if ((run.status === 'failed' || run.status === 'missed') && prev?.status !== run.status) {
+      deps.onRunEnded?.(run, store.getRoutine(run.routineId));
+    }
     return run;
   }
 

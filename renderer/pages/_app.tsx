@@ -3,10 +3,15 @@ import 'xterm/css/xterm.css';
 import '@blocknote/core/fonts/inter.css';
 import '@blocknote/ariakit/style.css';
 import { useEffect, useRef } from 'react';
+import dynamic from 'next/dynamic';
 import { useRouter } from 'next/router';
 import type { AppProps } from 'next/app';
 import { api } from '../lib/ipc';
 import { saveUIState } from '../lib/ui-state';
+import { NotificationsProvider } from '../lib/use-notifications';
+
+// The notifications drawer, mounted once for every page (the bell is in each header).
+const NotificationDrawer = dynamic(() => import('../components/notifications/NotificationDrawer'), { ssr: false });
 
 export default function App({ Component, pageProps }: AppProps) {
   const router = useRouter();
@@ -41,5 +46,10 @@ export default function App({ Component, pageProps }: AppProps) {
     return () => { off(); };
   }, [router]);
 
-  return <Component {...pageProps} />;
+  return (
+    <NotificationsProvider>
+      <Component {...pageProps} />
+      <NotificationDrawer />
+    </NotificationsProvider>
+  );
 }

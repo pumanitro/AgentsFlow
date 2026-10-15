@@ -15,6 +15,7 @@
  *   • whoami    — the asking session's identity (machine, peer, ids).
  *   • add_remote_peer — track a directory on another machine.
  *   • routines  — list / create / update / delete / run a routine (`op`).
+ *   • notify    — raise a notification in the app's bell (the `notify` tool).
  *
  * Protocol: newline-delimited JSON, one request per connection.
  *   → { type, id, rootConversationId, ... }
@@ -77,6 +78,9 @@ export interface RoutinesRequest {
   args: Record<string, unknown>;
 }
 
+// The `notify` tool: raw tool arguments travel untouched, main validates them (notifications-mcp.ts).
+export interface NotifyRequest { type: 'notify'; id: string; rootConversationId: string; args: Record<string, unknown> }
+
 export type BridgeEnvelope = Record<string, unknown>;
 
 export interface BridgeHandlers {
@@ -88,9 +92,10 @@ export interface BridgeHandlers {
   onWhoami?: (req: WhoamiRequest) => Promise<BridgeEnvelope>;
   onAddRemotePeer?: (req: AddRemotePeerRequest) => Promise<BridgeEnvelope>;
   onRoutines?: (req: RoutinesRequest) => Promise<BridgeEnvelope>;
+  onNotify?: (req: NotifyRequest) => Promise<BridgeEnvelope>;
 }
 
-type BridgeRequest = DelegateRequest | OpenFileRequest | ListPeersRequest | WhoamiRequest | AddRemotePeerRequest | RoutinesRequest;
+type BridgeRequest = DelegateRequest | OpenFileRequest | ListPeersRequest | WhoamiRequest | AddRemotePeerRequest | RoutinesRequest | NotifyRequest;
 
 function unsupported(type: string): Promise<BridgeEnvelope> {
   return Promise.resolve({ status: 'failure', error: `${type} not supported by this Peers Flow` });
@@ -151,6 +156,8 @@ export function startPeersBridge(
           run = handlers.onAddRemotePeer ? handlers.onAddRemotePeer(req as AddRemotePeerRequest) : unsupported('add_remote_peer');
         } else if (req.type === 'routines') {
           run = handlers.onRoutines ? handlers.onRoutines(req as RoutinesRequest) : unsupported('routines');
+        } else if (req.type === 'notify') {
+          run = handlers.onNotify ? handlers.onNotify(req as NotifyRequest) : unsupported('notify');
         } else if (req.type === undefined || req.type === 'delegate') run = handlers.onDelegate(req as DelegateRequest);
         // A type this build does not know (a newer MCP server talking to an
         // older app) must fail cleanly, never spawn an agent as a "delegate".

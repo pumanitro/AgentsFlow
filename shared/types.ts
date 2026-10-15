@@ -1,4 +1,5 @@
 import type { Routine, RoutineInput, RoutinePatch, RoutineRun, RoutinesSnapshot } from './routines';   // type-only, cycle is fine
+import type { NotificationsSnapshot, UserNotification } from './notifications';   // type-only, cycle is fine
 
 export type AgentProvider = 'claude' | 'codex';
 
@@ -856,6 +857,18 @@ export interface AgentsFlowApi {
   runRoutineNow: (id: string) => Promise<RoutineRun>;                           // 'routines:runNow'
   markRoutineRunDone: (runId: string) => Promise<RoutineRun>;                   // 'routines:markRunDone' — failed/missed → success, error kept; rejects otherwise
   onRoutinesUpdated: (cb: (snapshot: RoutinesSnapshot) => void) => () => void; // 'routines:updated' — full snapshot on every change
+
+  // ---- Notifications: the bell + drawer (shared/notifications.ts). Optional: in dev the renderer hot-reloads ahead of
+  //      a not-yet-restarted preload, and then the bell simply stays hidden. ----
+  listNotifications?: () => Promise<NotificationsSnapshot>;                                            // 'notifications:list'
+  markNotificationRead?: (id: string) => Promise<UserNotification>;                                   // 'notifications:markRead'
+  answerNotification?: (id: string, questionId: string, answer: string) => Promise<UserNotification>;  // 'notifications:answer'
+  setNotificationTodo?: (id: string, todoId: string, done: boolean) => Promise<UserNotification>;     // 'notifications:setTodo'
+  sendNotificationAnswers?: (id: string) => Promise<UserNotification>;                                // 'notifications:sendAnswers'
+  dismissNotification?: (id: string) => Promise<UserNotification>;                                    // 'notifications:dismiss' — rejects with missingForDismiss
+  openNotificationFile?: (id: string, filePath: string) => Promise<{ status: 'success' | 'failure'; error?: string }>; // 'notifications:openFile'
+  onNotificationsUpdated?: (cb: (snapshot: NotificationsSnapshot) => void) => () => void;             // push 'notifications:updated'
+  onNotificationOpen?: (cb: (payload: { id: string }) => void) => () => void;                          // push 'notifications:open'
 
   gitStatus: (dirPath: string) => Promise<GitStatusResult>;
   listFiles: (dirPath: string) => Promise<FileEntry[]>;
