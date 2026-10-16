@@ -81,8 +81,8 @@ export const ROUTINES_IPC = {
   updated: 'routines:updated',
 } as const;
 
-/** A run that ended badly or is stuck waiting on you can be marked done; a working or already-successful one cannot. */
-export const canMarkRunDone = (run: Pick<RoutineRun, 'status'>) => run.status === 'failed' || run.status === 'missed' || run.status === 'attention';
+/** Any run that is not already a success can be marked done — failed, missed, waiting on you, or still working. */
+export const canMarkRunDone = (run: Pick<RoutineRun, 'status'>) => run.status !== 'success';
 
 /**
  * The owner says this run's work is done after all (e.g. its chat was restarted
@@ -90,7 +90,7 @@ export const canMarkRunDone = (run: Pick<RoutineRun, 'status'>) => run.status ==
  * from now on; the original error stays on it so the history still says what went wrong.
  */
 export function markRunDone(run: RoutineRun, nowIso: string): RoutineRun {
-  if (!canMarkRunDone(run)) throw new Error(`only a failed, missed or needs-attention run can be marked done (this one is ${run.status})`);
+  if (!canMarkRunDone(run)) throw new Error(`this run is already done (${run.status})`);
   return { ...run, status: 'success', markedDoneAt: nowIso, endedAt: run.endedAt ?? nowIso, summary: 'Marked done by you' };
 }
 

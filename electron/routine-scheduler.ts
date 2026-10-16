@@ -90,6 +90,8 @@ export function createRoutineScheduler(deps: RoutineSchedulerDeps): RoutineSched
       // The routine (and its runs) may have been deleted while the spawn was in flight.
       const cur = store.getRun(run.id);
       if (!cur || !store.getRoutine(routine.id)) return;
+      // Marked done by hand while the spawn was in flight: keep the mark, just remember the chat.
+      if (cur.markedDoneAt) { if (patch.conversationId) write({ ...cur, conversationId: patch.conversationId }); return; }
       if (patch.conversationId && cur.status === 'failed' && cur.error === 'spawn did not return') {
         // A slow spawn that the hang check gave up on came back after all: the chat exists, track it.
         write({ ...cur, ...patch, status: 'running', endedAt: undefined, error: undefined });
@@ -186,7 +188,10 @@ export function createRoutineScheduler(deps: RoutineSchedulerDeps): RoutineSched
     try {
       const nowMs = deps.now();
       // Settle live runs first so a run that just finished frees its routine for this tick's slot.
-      for (const run of store.listRuns().filter(isLive)) {
+      for (const listed of store.listRuns().filter(isLive)) {
+        // Re-read: an earlier await in this loop may have let the user mark this run done.
+        const run = store.getRun(listed.id);
+        if (!run || !isLive(run)) continue;
         try { await trackRun(run, nowMs); }
         catch (err: any) { deps.log('track failed', { runId: run.id, error: String(err?.message ?? err) }); }
       }

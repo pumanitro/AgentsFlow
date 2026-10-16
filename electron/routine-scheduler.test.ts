@@ -368,6 +368,28 @@ describe('scheduler rule 4: live run tracking', () => {
     return Object.assign(h, { runId: runsOf(h)[0].id });
   }
 
+  it('a working run marked done stays done while its chat keeps going', async () => {
+    const h = await started();
+    h.store.upsertRun(markRunDone(h.store.getRun(h.runId)!, isoOf(at(10, 9, 5))));
+    h.convs.set('conv-1', conv('conv-1', { state: 'failed', status: '', description: 'boom' }));
+    await h.sched.tick();
+    const r = h.store.getRun(h.runId)!;
+    assert.equal(r.status, 'success');
+    assert.ok(r.markedDoneAt);
+  });
+
+  it('a run marked done while its spawn is in flight keeps the mark and gets its chat', async () => {
+    let h!: Harness;
+    h = harness(at(10, 9, 0) + 1000, {
+      spawn: async (_routine, run) => { h.store.upsertRun(markRunDone(h.store.getRun(run.id)!, isoOf(at(10, 9, 1)))); throw new Error('late failure'); },
+    });
+    addRoutine(h);
+    await h.sched.tick();
+    const r = runsOf(h)[0];
+    assert.equal(r.status, 'success');
+    assert.equal(r.error, undefined);
+  });
+
   it('flips running ↔ attention with the chat', async () => {
     const h = await started();
     h.convs.set('conv-1', conv('conv-1', { state: 'blocked', status: 'waiting' }));
@@ -590,14 +612,14 @@ describe('marking a run done by hand', () => {
     assert.equal(runsOf(h).length, 1);
   });
 
-  it('a missed or needs-attention run can be marked done; a running or successful one cannot', () => {
+  it('any run that is not already a success can be marked done', () => {
     const base = { id: 'x', routineId: 'r1', slotAt: isoOf(at(10, 9)), trigger: 'schedule' as const, startedAt: isoOf(at(10, 9)) };
     assert.equal(markRunDone({ ...base, status: 'missed', endedAt: isoOf(at(10, 9)) }, isoOf(at(10, 10))).status, 'success');
     const attention = markRunDone({ ...base, status: 'attention' }, isoOf(at(10, 10)));
     assert.equal(attention.status, 'success');
     assert.equal(attention.endedAt, isoOf(at(10, 10)));
-    assert.throws(() => markRunDone({ ...base, status: 'running' }, isoOf(at(10, 10))), /only a failed, missed or needs-attention run/);
-    assert.throws(() => markRunDone({ ...base, status: 'success' }, isoOf(at(10, 10))), /only a failed, missed or needs-attention run/);
+    assert.equal(markRunDone({ ...base, status: 'running' }, isoOf(at(10, 10))).status, 'success');
+    assert.throws(() => markRunDone({ ...base, status: 'success' }, isoOf(at(10, 10))), /already done/);
   });
 });
 
