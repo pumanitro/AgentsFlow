@@ -48,6 +48,11 @@ import * as codexAccounts from './codex-accounts';
 import * as handover from './handover';
 import * as rotation from './rotation';
 import * as limitWatch from './limit-watch';
+import * as wisprLearner from './wispr/learner';
+import { createWisprDb, defaultWisprDbPath } from './wispr/wispr-db';
+import { createClaudeTruth } from './wispr/truth-claude';
+import { createCodexTruth } from './wispr/truth-codex';
+import { collectKnownNames } from './wispr/vocabulary';
 import * as keeper from './keeper/keeper';
 import { consumeSkillContractNote, listSkillContractNotes } from './keeper/skill-contracts';
 import * as guard from './guard/guard';
@@ -524,6 +529,17 @@ app.whenReady().then(() => {
   // gets a fresh account and a "continue" rather than sitting dead till morning.
   limitWatch.startLimitWatch(limitWatchDeps);
   // The memory guard samples pressure and judges containers (dry-run unless the
+  // Teach Wispr Flow the words it mishears in our chats, from what was really sent.
+  // Wispr can't see edits made in a terminal, so its own auto-learn misses them here.
+  wisprLearner.startWisprLearner({
+    userDataDir: app.getPath('userData'),
+    db: createWisprDb({ dbPath: defaultWisprDbPath(os.homedir()) }),
+    truth: [
+      createClaudeTruth({ projectsRoot: path.join(os.homedir(), '.claude', 'projects') }),
+      createCodexTruth({ sessionsRoot: path.join(os.homedir(), '.codex', 'sessions') }),
+    ],
+    knownNames: () => collectKnownNames(store.getDirectories().filter((d) => !d.remote).map((d) => d.path), os.homedir()),
+  });
   // user says otherwise); the Keeper holds chats to their run contract. Guard
   // first: the Keeper reads its level.
   guard.startGuard(guardDeps);
@@ -684,6 +700,7 @@ app.on('window-all-closed', () => {
 app.on('before-quit', () => {
   keeper.stopKeeper();
   guard.stopGuard();
+  wisprLearner.stopWisprLearner();
   codex.close();
   try { peersBridge?.stop(); } catch { /* ignore */ }
   // Best effort and not awaited: quitting must not wait on a dead ssh master.
