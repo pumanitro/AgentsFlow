@@ -1,11 +1,11 @@
-import { CATCHUP_LOOKBACK_MS, CATCHUP_OFF_GRACE_MS, routineCatchesUp } from './routines';
+import { CATCHUP_LOOKBACK_MS, CATCHUP_OFF_GRACE_MS, isOnce, routineCatchesUp } from './routines';
 import type { MarkStatus, Routine, RoutineCadence, RoutineRun } from './routines';
 import { addDays, dayKeyStartMs, localDayKey, occurrencesBetween, routineFloorMs } from './routine-schedule';
 
 export interface SlotMark { routine: Routine; slotAt: string; status: MarkStatus; run?: RoutineRun }
 export interface DayCells {
   dayKey: string; isToday: boolean; isPast: boolean;
-  dailies: SlotMark[]; every2days: SlotMark[]; weekdays: SlotMark[]; weekly: SlotMark[]; twiceMonthly: SlotMark[]; monthly: SlotMark[];
+  once: SlotMark[]; dailies: SlotMark[]; every2days: SlotMark[]; weekdays: SlotMark[]; weekly: SlotMark[]; twiceMonthly: SlotMark[]; monthly: SlotMark[];
   score: { done: number; total: number };   // dailies: success count / dailies due that day
 }
 
@@ -45,8 +45,8 @@ export function markStatusFor(run: RoutineRun | undefined, slotMs: number, nowMs
   return rule.catchUp || nowMs - slotMs <= CATCHUP_OFF_GRACE_MS ? 'scheduled' : 'missed';
 }
 
-const BUCKET: Record<RoutineCadence, 'dailies' | 'every2days' | 'weekdays' | 'weekly' | 'twiceMonthly' | 'monthly'> = {
-  daily: 'dailies', every2days: 'every2days', weekdays: 'weekdays', weekly: 'weekly', twiceMonthly: 'twiceMonthly', monthly: 'monthly',
+const BUCKET: Record<RoutineCadence, 'once' | 'dailies' | 'every2days' | 'weekdays' | 'weekly' | 'twiceMonthly' | 'monthly'> = {
+  once: 'once', daily: 'dailies', every2days: 'every2days', weekdays: 'weekdays', weekly: 'weekly', twiceMonthly: 'twiceMonthly', monthly: 'monthly',
 };
 
 // Runs are joined on the slot's instant, not its string, so an ISO written
@@ -62,7 +62,7 @@ export function buildDayCells(routines: Routine[], runs: RoutineRun[], dayKeys: 
       dayKey,
       isToday: dayKey === today,
       isPast: dayKey < today,
-      dailies: [], every2days: [], weekdays: [], weekly: [], twiceMonthly: [], monthly: [],
+      once: [], dailies: [], every2days: [], weekdays: [], weekly: [], twiceMonthly: [], monthly: [],
       score: { done: 0, total: 0 },
     });
   }
@@ -81,7 +81,8 @@ export function buildDayCells(routines: Routine[], runs: RoutineRun[], dayKeys: 
   const newestPastMs = (routine: Routine): number => {
     let ms = newestPast.get(routine.id);
     if (ms === undefined) {
-      const past = occurrencesBetween(routine.schedule, Math.max(routineFloorMs(routine), nowMs - CATCHUP_LOOKBACK_MS), nowMs);
+      const from = isOnce(routine) ? 0 : Math.max(routineFloorMs(routine), nowMs - CATCHUP_LOOKBACK_MS);
+      const past = occurrencesBetween(routine.schedule, from, nowMs);
       ms = past.length ? Date.parse(past[past.length - 1]) : NaN;
       newestPast.set(routine.id, ms);
     }
@@ -123,7 +124,7 @@ export function buildDayCells(routines: Routine[], runs: RoutineRun[], dayKeys: 
   }
 
   for (const cell of cells.values()) {
-    for (const bucket of [cell.dailies, cell.every2days, cell.weekdays, cell.weekly, cell.twiceMonthly, cell.monthly]) {
+    for (const bucket of [cell.once, cell.dailies, cell.every2days, cell.weekdays, cell.weekly, cell.twiceMonthly, cell.monthly]) {
       bucket.sort((a, b) => Date.parse(a.slotAt) - Date.parse(b.slotAt) || a.routine.name.localeCompare(b.routine.name));
     }
     // The health bar has one segment per daily ROUTINE, so a manual re-run of

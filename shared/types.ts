@@ -151,6 +151,10 @@ export interface Conversation {
   contractSource?: ContractSource;
   // The Keeper's own bookkeeping for this chat (see electron/keeper/keeper.ts).
   keeper?: KeeperConvState;
+  // ISO time the chat's peersflow MCP server said hello over the bridge (main
+  // handleHello). Undefined = its Peers Flow tools never came up, or the chat
+  // predates the hello protocol; the routine scheduler warns on a routine run's.
+  mcpReadyAt?: string;
 }
 
 export interface PinnedDivider {

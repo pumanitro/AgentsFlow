@@ -198,23 +198,24 @@ export const TOOL_DEFS = [
     title: 'Create a routine',
     description:
       'Add a routine to the Peers Flow Routines tab, exactly like its "New routine" form: from then on Peers Flow starts a fresh, unattended chat in the chosen peer at each scheduled time and sends it `prompt` as the first message. That chat shares NONE of your conversation context, so `prompt` must be self-contained (a slash command of that peer, e.g. "/reddit-daily-routine", or a full brief). Only call this when the user asks for something to run on a schedule, and tell them the name, peer and schedule you set.',
-    usage: 'create_routine({ name, prompt, time, cadence?, directory?, weekday?, weekdays?, month_days?, start_date?, provider?, model?, icon?, catch_up?, enabled? })',
+    usage: 'create_routine({ name, prompt, time, cadence?, directory?, weekday?, weekdays?, month_days?, start_date?, date?, provider?, model?, icon?, catch_up?, enabled? })',
     inputSchema: {
       type: 'object',
       properties: {
         name: { type: 'string', description: 'Short name shown in the Routines tab, at most 60 characters.' },
         prompt: { type: 'string', description: 'The first message of every run, verbatim. Self-contained: the run knows nothing about this conversation.' },
         directory: { type: 'string', description: 'Peer the routine runs in: its name, absolute path or id, as shown by list_peers. Defaults to the peer this session is rooted in.' },
-        cadence: { type: 'string', enum: ['daily', 'every2days', 'weekdays', 'weekly', 'twiceMonthly', 'monthly'], description: 'How often it runs. Default "daily". "weekdays" = every week on the days listed in `weekdays` (e.g. Monday, Wednesday, Friday); "weekly" = one day a week.' },
+        cadence: { type: 'string', enum: ['once', 'daily', 'every2days', 'weekdays', 'weekly', 'twiceMonthly', 'monthly'], description: 'How often it runs. Default "daily". "once" = a single run on `date` at `time`; if the computer is off then, it runs as soon as the app is back, however many days later. "weekdays" = every week on the days listed in `weekdays` (e.g. Monday, Wednesday, Friday); "weekly" = one day a week.' },
         time: { type: 'string', description: 'Time of day as "HH:MM", 24-hour, in the LOCAL time of the machine Peers Flow runs on, e.g. "09:00".' },
         weekday: { type: 'string', description: 'weekly only: the day name ("monday") or 0–6 with 0 = Sunday. Default Monday.' },
         weekdays: { type: 'array', items: { type: 'string' }, description: 'weekdays only, and required for it: the days of the week it runs on, as day names or 0–6 with 0 = Sunday, e.g. ["monday", "wednesday", "friday"]. At least one day.' },
         month_days: { type: 'array', items: { type: 'number' }, description: 'monthly: one day, e.g. [1]. twiceMonthly: two different days, e.g. [1, 15]. Each 1–28.' },
         start_date: { type: 'string', description: 'every2days only: "YYYY-MM-DD" of a day it runs on; it then runs every second day from there. Default today.' },
+        date: { type: 'string', description: 'once only (required for it): "YYYY-MM-DD", the local day of the single run. Must not be in the past.' },
         provider: { type: 'string', enum: ['claude', 'codex'], description: 'Agent that runs it. Default "claude".' },
         model: { type: 'string', description: 'Model alias for the run (e.g. "opus"). Omit for the default.' },
         icon: { type: 'string', enum: ['reddit', 'mail', 'chart', 'broom', 'bug', 'rocket', 'book', 'bell', 'shield', 'leaf', 'coin', 'star', 'gear', 'globe', 'clock', 'flask'], description: 'Icon shown in the Routines tab.' },
-        catch_up: { type: 'boolean', description: 'Run a slot late if the computer was off at its time. Default true.' },
+        catch_up: { type: 'boolean', description: 'Run a slot late if the computer was off at its time. Default true. Ignored for "once": a one-off always runs late.' },
         enabled: { type: 'boolean', description: 'Pass false to create it paused. Default true.' },
       },
       required: ['name', 'prompt', 'time'],
@@ -226,7 +227,7 @@ export const TOOL_DEFS = [
     title: 'Change a routine',
     description:
       'Change an existing routine: rename it, replace its prompt, move it to another peer, reschedule it, or pause / resume it with `enabled`. Pass only the fields to change. Only call this when the user asks.',
-    usage: 'update_routine({ routine, name?, prompt?, directory?, cadence?, time?, weekday?, weekdays?, month_days?, start_date?, provider?, model?, icon?, catch_up?, enabled? })',
+    usage: 'update_routine({ routine, name?, prompt?, directory?, cadence?, time?, weekday?, weekdays?, month_days?, start_date?, date?, provider?, model?, icon?, catch_up?, enabled? })',
     inputSchema: {
       type: 'object',
       properties: {
@@ -234,12 +235,13 @@ export const TOOL_DEFS = [
         name: { type: 'string', description: 'New name, at most 60 characters.' },
         prompt: { type: 'string', description: 'New first message for every run.' },
         directory: { type: 'string', description: 'Peer to run in from now on: name, absolute path or id.' },
-        cadence: { type: 'string', enum: ['daily', 'every2days', 'weekdays', 'weekly', 'twiceMonthly', 'monthly'], description: 'How often it runs. "weekdays" = every week on the days listed in `weekdays`; "weekly" = one day a week.' },
+        cadence: { type: 'string', enum: ['once', 'daily', 'every2days', 'weekdays', 'weekly', 'twiceMonthly', 'monthly'], description: 'How often it runs. "once" = a single run on `date` at `time`. "weekdays" = every week on the days listed in `weekdays`; "weekly" = one day a week.' },
         time: { type: 'string', description: 'Time of day as "HH:MM", 24-hour, in the LOCAL time of the machine Peers Flow runs on, e.g. "09:00".' },
         weekday: { type: 'string', description: 'weekly only: the day name ("monday") or 0–6 with 0 = Sunday. Default Monday.' },
         weekdays: { type: 'array', items: { type: 'string' }, description: 'weekdays only: the days of the week it runs on, as day names or 0–6 with 0 = Sunday, e.g. ["monday", "wednesday", "friday"]. Replaces the whole list; required when switching to the weekdays cadence.' },
         month_days: { type: 'array', items: { type: 'number' }, description: 'monthly: one day, e.g. [1]. twiceMonthly: two different days, e.g. [1, 15]. Each 1–28.' },
         start_date: { type: 'string', description: 'every2days only: "YYYY-MM-DD" of a day it runs on; it then runs every second day from there. Default today.' },
+        date: { type: 'string', description: 'once only (required for it): "YYYY-MM-DD", the local day of the single run. Must not be in the past.' },
         provider: { type: 'string', enum: ['claude', 'codex'], description: 'Agent that runs it.' },
         model: { type: 'string', description: 'Model alias for the run (e.g. "opus"). Omit for the default.' },
         icon: { type: 'string', enum: ['reddit', 'mail', 'chart', 'broom', 'bug', 'rocket', 'book', 'bell', 'shield', 'leaf', 'coin', 'star', 'gear', 'globe', 'clock', 'flask'], description: 'Icon shown in the Routines tab.' },
@@ -504,7 +506,7 @@ export function renderBootstrapPrompt(reg: Registry, self?: SelfInfo): string {
     `- When the user asks to connect or add a directory on another machine, call \`${qualifiedToolName('add_remote_peer')}\` (user, host, absolute path, ssh options). It tests the connection first and returns the new peer's name to delegate to.`,
   );
   lines.push(
-    `- When the user asks for something to run on a schedule ("every morning", "each Monday"), call \`${qualifiedToolName('create_routine')}\`: it adds a routine to the app's Routines tab, which starts a fresh chat in a peer at each scheduled time. \`${qualifiedToolName('list_routines')}\`, \`${qualifiedToolName('update_routine')}\` (also pauses / resumes), \`${qualifiedToolName('delete_routine')}\` and \`${qualifiedToolName('run_routine')}\` manage them. Never create, change, delete or run a routine the user did not ask for.`,
+    `- When the user asks for something to run on a schedule ("every morning", "each Monday") or once at a set day and time ("tomorrow at 9", "on Friday"; cadence \`once\` + \`date\`), call \`${qualifiedToolName('create_routine')}\`: it adds a routine to the app's Routines tab, which starts a fresh chat in a peer at each scheduled time. \`${qualifiedToolName('list_routines')}\`, \`${qualifiedToolName('update_routine')}\` (also pauses / resumes), \`${qualifiedToolName('delete_routine')}\` and \`${qualifiedToolName('run_routine')}\` manage them. Never create, change, delete or run a routine the user did not ask for.`,
   );
   lines.push(
     `- Only after an explicit user request to open / show / pull up / display a specific file in the IDE or a viewer, use \`${qualifiedToolName('open_file')}\`. Peers Flow is the IDE you are running inside; this tool brings the file up in its file view. Defaults to the peer you're rooted in; pass \`directory\` to target another peer, and \`line\` to land on a specific line.`,

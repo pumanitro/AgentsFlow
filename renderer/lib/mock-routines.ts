@@ -18,6 +18,7 @@ function mockSlots(s: RoutineSchedule, fromMs: number, toMs: number): number[] {
     if (day.getTime() >= toMs) break;
     let fires = false;
     switch (s.cadence) {
+      case 'once': fires = dayKey(day) === s.date; break;
       case 'daily': fires = true; break;
       case 'every2days': {
         const a = anchor ? Date.UTC(anchor[0], anchor[1] - 1, anchor[2]) : 0;

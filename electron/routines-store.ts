@@ -51,6 +51,7 @@ function sanitizeSchedule(s: any): RoutineSchedule | null {
     if (days.length) out.monthDays = days;
   }
   if (typeof s.anchorDate === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(s.anchorDate)) out.anchorDate = s.anchorDate;
+  if (typeof s.date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(s.date)) out.date = s.date;
   return out;
 }
 

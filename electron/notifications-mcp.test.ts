@@ -5,6 +5,7 @@ import * as os from 'os';
 import * as path from 'path';
 import {
   buildNotificationFromArgs,
+  buildMcpMissingWarning,
   buildRunWarning,
   describeForTool,
   dismissNotification,
@@ -126,6 +127,29 @@ describe('read, dismiss', () => {
     assert.equal(isOpen(store.get('n-1')!), false);
     assert.deepEqual(Object.keys(snap).sort(), ['notifications', 'now']);
     assert.deepEqual(countsOf(store.list()), { action: 0, warn: 1 });
+  });
+});
+
+describe('buildMcpMissingWarning', () => {
+  const routine = { id: 'r1', name: 'Council day', directoryId: 'dir-1' } as Routine;
+  const slot = (iso: string) => `slot(${iso})`;
+  const run: RoutineRun = { id: 'run-9', routineId: 'r1', slotAt: '2026-10-23T03:00:00.000Z', trigger: 'schedule', status: 'running', startedAt: '2026-10-23T03:00:05.000Z', conversationId: 'conv-4' };
+
+  it('a warn naming the routine, the slot and the way out; the source is NOT auto', () => {
+    const n = buildMcpMissingWarning(run, routine, 'atlas-of-doors', 'm-1', NOW, slot);
+    assert.deepEqual(n, {
+      id: 'm-1', level: 'warn', title: 'Council day: Peers Flow tools never connected',
+      body: 'Its chat (run of slot(2026-10-23T03:00:00.000Z)) started without the peersflow MCP server, so it cannot delegate, notify or start another routine. Open the chat to see what it did; use Run now in the Routines tab to run it again.',
+      source: { kind: 'routine', routineId: 'r1', runId: 'run-9', conversationId: 'conv-4', routineName: 'Council day', directoryId: 'dir-1', peerName: 'atlas-of-doors' },
+      createdAt: NOW, files: [],
+    });
+  });
+
+  it('an unknown routine and peer fall back to plain words', () => {
+    const n = buildMcpMissingWarning({ ...run, conversationId: undefined }, null, null, 'm-2', NOW, slot);
+    assert.equal(n.title, 'A routine: Peers Flow tools never connected');
+    assert.ok(n.title.endsWith('Peers Flow tools never connected'));
+    assert.deepEqual(n.source, { kind: 'routine', routineId: 'r1', runId: 'run-9' });
   });
 });
 

@@ -732,3 +732,12 @@ process.on('SIGTERM', shutdown);
 process.on('SIGINT', shutdown);
 
 log(`started · store=${STORE_PATH || '(none)'} · bridge=${BRIDGE_SOCK ? 'yes' : 'no'} · remote=${process.env.PEERSFLOW_REMOTE === '1'} · depth=${DEPTH}`);
+// Tell the app this chat's Peers Flow tools are up (main stamps Conversation.mcpReadyAt);
+// a routine chat that never says hello gets a bell warning. Fire-and-forget: stdout
+// stays protocol-only, and a failure is at most bridgeRequest's one stderr line.
+if (BRIDGE_SOCK && ROOT_CONVERSATION_ID) {
+  void bridgeRequest(
+    { type: 'hello', id: `${Date.now()}-${process.pid}`, rootConversationId: ROOT_CONVERSATION_ID, pid: process.pid, startedAt: new Date().toISOString() },
+    5_000,
+  );
+}

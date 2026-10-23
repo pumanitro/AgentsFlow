@@ -78,7 +78,7 @@ import { ensureWorkspaceTrusted } from './workspace-trust';
 import { applyRemoteJobState, getLastAgentRows, refreshNow, setPollerForeground, startPoller, stopPoller, syncWatchers, unwatchConversation, watchConversation, watcherStats } from './poller';
 import { bridgeSocketPath, buildBootstrapSystemPrompt, getMcpServerInfo, writeMcpConfigForConversation, writeRemoteMcpConfig } from './mcp-bridge';
 import { buildDelegatePrompt, buildRegistry, renderRegistryMarkdown } from './registry';
-import { startPeersBridge, type AddRemotePeerRequest, type DelegateRequest, type ListPeersRequest, type NotifyRequest, type OpenFileRequest, type PeersBridge, type RoutinesRequest, type WhoamiRequest } from './delegation-bridge';
+import { startPeersBridge, type AddRemotePeerRequest, type DelegateRequest, type HelloRequest, type ListPeersRequest, type NotifyRequest, type OpenFileRequest, type PeersBridge, type RoutinesRequest, type WhoamiRequest } from './delegation-bridge';
 import { RemoteHosts, setRemoteHosts } from './remote/remote-hosts';
 import { remoteCommand, runRemote } from './remote/remote-exec';
 import { hostKeyOf } from '../shared/remote';
@@ -91,6 +91,7 @@ import { formatSlot } from '../shared/routine-schedule';
 import { ROUTINES_IPC, markRunDone, type Routine, type RoutineInput, type RoutinePatch, type RoutineRun, type RoutinesSnapshot } from '../shared/routines';
 import { createNotificationsStore, type NotificationsStore } from './notifications-store';
 import {
+  buildMcpMissingWarning,
   buildNotificationFromArgs,
   buildRunWarning,
   describeForTool,
@@ -528,7 +529,6 @@ app.whenReady().then(() => {
   // And catch the walls the threshold misses: a chat that reports a rate limit
   // gets a fresh account and a "continue" rather than sitting dead till morning.
   limitWatch.startLimitWatch(limitWatchDeps);
-  // The memory guard samples pressure and judges containers (dry-run unless the
   // Teach Wispr Flow the words it mishears in our chats, from what was really sent.
   // Wispr can't see edits made in a terminal, so its own auto-learn misses them here.
   wisprLearner.startWisprLearner({
@@ -540,6 +540,7 @@ app.whenReady().then(() => {
     ],
     knownNames: () => collectKnownNames(store.getDirectories().filter((d) => !d.remote).map((d) => d.path), os.homedir()),
   });
+  // The memory guard samples pressure and judges containers (dry-run unless the
   // user says otherwise); the Keeper holds chats to their run contract. Guard
   // first: the Keeper reads its level.
   guard.startGuard(guardDeps);
@@ -579,6 +580,7 @@ app.whenReady().then(() => {
       onAddRemotePeer: handleAddRemotePeer,
       onRoutines: handleRoutines,
       onNotify: handleNotify,
+      onHello: handleHello,
     });
   } catch (err) {
     console.error('[agentsflow] failed to start peers bridge', err);
@@ -698,9 +700,9 @@ app.on('window-all-closed', () => {
 });
 
 app.on('before-quit', () => {
+  wisprLearner.stopWisprLearner();
   keeper.stopKeeper();
   guard.stopGuard();
-  wisprLearner.stopWisprLearner();
   codex.close();
   try { peersBridge?.stop(); } catch { /* ignore */ }
   // Best effort and not awaited: quitting must not wait on a dead ssh master.
@@ -1990,6 +1992,16 @@ function startRoutines(): void {
       notificationsStore.add(buildRunWarning(run, routine, peer, uuid(), new Date().toISOString(), formatSlot));
       broadcastNotifications();
     },
+    // The run's chat never heard from its peersflow MCP server: one warning in
+    // the bell per run, so the owner knows it ran without delegate / notify.
+    onMcpMissing: (run, routine, conv) => {
+      console.log('[agentsflow][routines] peersflow MCP never connected', { runId: run.id, conversationId: conv.id });
+      if (!notificationsStore) return;
+      if (notificationsStore.findOpen((n) => n.source.runId === run.id && n.title.endsWith('Peers Flow tools never connected'))) return;
+      const peer = store.getDirectories().find((d) => d.id === routine?.directoryId)?.displayName ?? null;
+      notificationsStore.add(buildMcpMissingWarning(run, routine, peer, uuid(), new Date().toISOString(), formatSlot));
+      broadcastNotifications();
+    },
     log: (m, d) => console.log(`[agentsflow][routines] ${m}`, d ?? {}),
   });
   routineScheduler.start();
@@ -2036,7 +2048,7 @@ ipcMain.handle(ROUTINES_IPC.create, (_e, input: RoutineInput): Routine => {
 });
 
 ipcMain.handle(ROUTINES_IPC.update, (_e, id: string, patch: RoutinePatch): Routine => {
-  const r = patchRoutine(requireRoutinesStore(), id, patch, store.getDirectories());
+  const r = patchRoutine(requireRoutinesStore(), id, patch, store.getDirectories(), Date.now());
   broadcastRoutines();
   return r;
 });
@@ -2491,6 +2503,15 @@ async function handleWhoami(req: WhoamiRequest): Promise<Record<string, unknown>
   if (!conv) return { status: 'failure', error: 'unknown conversation' };
   const dir = store.getDirectories().find((d) => d.id === conv.directoryId);
   return whoamiEnvelope(conv, dir, os.hostname());
+}
+
+/** `hello`: the chat's MCP server just started — stamp the chat as having its Peers Flow tools. */
+async function handleHello(req: HelloRequest): Promise<Record<string, unknown>> {
+  if (store.getConversation(req.rootConversationId)) {
+    store.updateConversation(req.rootConversationId, { mcpReadyAt: new Date().toISOString() });
+    broadcastConversations();
+  }
+  return { status: 'success' };
 }
 
 ipcMain.handle('convs:updateTitle', (_e, id: string, title: string) => {

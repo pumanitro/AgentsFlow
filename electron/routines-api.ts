@@ -31,6 +31,8 @@ export interface RoutineSchedulerDeps {
   onChange: () => void;                                                 // routines/runs changed → broadcast
   /** A run just became failed or missed (was neither before). Main raises the user's warning from it. */
   onRunEnded?: (run: RoutineRun, routine: Routine | null) => void;
+  /** A run this scheduler dispatched is still running MCP_HELLO_GRACE_MS after start and its chat never got conv.mcpReadyAt (the peersflow MCP server never said hello). Fired at most once per run; the run row is not touched. */
+  onMcpMissing?: (run: RoutineRun, routine: Routine | null, conv: Conversation) => void;
   log: (msg: string, detail?: Record<string, unknown>) => void;
   occurrencesBetween?: typeof occurrencesBetween;                        // test seam; default = shared impl
 }

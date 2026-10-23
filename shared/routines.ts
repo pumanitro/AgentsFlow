@@ -1,9 +1,9 @@
 import type { AgentProvider, Conversation } from './types';
 
-export type RoutineCadence = 'daily' | 'every2days' | 'weekdays' | 'weekly' | 'twiceMonthly' | 'monthly';
-export const CADENCES: RoutineCadence[] = ['daily', 'every2days', 'weekdays', 'weekly', 'twiceMonthly', 'monthly'];
+export type RoutineCadence = 'once' | 'daily' | 'every2days' | 'weekdays' | 'weekly' | 'twiceMonthly' | 'monthly';
+export const CADENCES: RoutineCadence[] = ['once', 'daily', 'every2days', 'weekdays', 'weekly', 'twiceMonthly', 'monthly'];
 export const CADENCE_GROUP_LABEL: Record<RoutineCadence, string> = {
-  daily: 'DAILY', every2days: 'EVERY 2 DAYS', weekdays: 'CUSTOM DAYS', weekly: 'WEEKLY', twiceMonthly: 'TWICE A MONTH', monthly: 'MONTHLY',
+  once: 'ONCE', daily: 'DAILY', every2days: 'EVERY 2 DAYS', weekdays: 'CUSTOM DAYS', weekly: 'WEEKLY', twiceMonthly: 'TWICE A MONTH', monthly: 'MONTHLY',
 };
 
 export interface RoutineSchedule {
@@ -13,6 +13,7 @@ export interface RoutineSchedule {
   weekdays?: number[];     // weekdays: the days it runs on, each 0..6 (0 = Sunday), at least one, distinct, ascending. No default: without it the routine never fires
   monthDays?: number[];    // monthly: [d]; twiceMonthly: [d1, d2]; each 1..28. Defaults [1] / [1, 15]
   anchorDate?: string;     // every2days: 'YYYY-MM-DD' local; fires on days whose calendar-day distance from it is even. Default: createdAt's local date
+  date?: string;           // once: 'YYYY-MM-DD' local, the one day it runs. Required: without it the routine never fires
 }
 
 export type RoutineIcon = 'reddit' | 'mail' | 'chart' | 'broom' | 'bug' | 'rocket' | 'book' | 'bell' | 'shield' | 'leaf' | 'coin' | 'star' | 'gear' | 'globe' | 'clock' | 'flask';
@@ -102,10 +103,13 @@ export const RUNS_RETENTION_DAYS = 180;                   // runs older than thi
 export const RUNS_SNAPSHOT_DAYS = 120;                    // runs older than this are not sent to the renderer
 export const MAX_RUNNING_PER_ROUTINE = 1;                 // a new slot waits while the previous run is live
 
-/** Catch-up is on unless the routine says otherwise, so files written before the switch existed keep running late slots. */
-export function routineCatchesUp(r: Pick<Routine, 'catchUp'>): boolean {
-  return r.catchUp !== false;
+/** Catch-up is on unless the routine says otherwise, so files written before the switch existed keep running late slots. A one-off always catches up: its single slot runs however late the app wakes for it. */
+export function routineCatchesUp(r: Pick<Routine, 'catchUp'> & { schedule?: Pick<RoutineSchedule, 'cadence'> }): boolean {
+  return r.schedule?.cadence === 'once' || r.catchUp !== false;
 }
+
+/** A one-off's single slot is never "too old": the scheduler and the boards look for it with no floor and no look-back window. */
+export const isOnce = (r: { schedule: Pick<RoutineSchedule, 'cadence'> }) => r.schedule.cadence === 'once';
 
 /**
  * The run status a chat's live fields imply. null = no signal yet (starting /

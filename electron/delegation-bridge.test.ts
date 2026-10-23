@@ -47,6 +47,7 @@ describe('delegation bridge with every handler', () => {
     onAddRemotePeer: async (r) => { seen.push(`add_remote_peer:${r.user}@${r.host}:${r.path}`); return { status: 'success', peer: { displayName: 'pf-peer' } }; },
     onRoutines: async (r) => { seen.push(`routines:${r.op}:${JSON.stringify(r.args)}`); return { status: 'success', via: 'routines' }; },
     onNotify: async (r) => { seen.push(`notify:${r.rootConversationId}:${JSON.stringify(r.args)}`); return { status: 'success', via: 'notify' }; },
+    onHello: async (r) => { seen.push(`hello:${r.rootConversationId}:${r.pid}:${r.startedAt}`); return { status: 'success' }; },
   };
   let bridge: PeersBridge;
   before(async () => { bridge = startPeersBridge(sock, handlers); await waitListening(bridge); });
@@ -98,6 +99,11 @@ describe('delegation bridge with every handler', () => {
     assert.equal(seen[seen.length - 1], `notify:conv-9:${JSON.stringify(args)}`);
   });
 
+  test('hello routes to onHello with pid and startedAt', async () => {
+    const r = await ask(JSON.stringify({ type: 'hello', id: 'h1', rootConversationId: 'conv-9', pid: 4242, startedAt: '2026-10-23T05:57:00.000Z' }));
+    assert.deepEqual(r, { type: 'result', id: 'h1', envelope: { status: 'success' } });
+  });
+
   test('a type this build does not know fails and is never run as a delegate', async () => {
     const r = await ask(JSON.stringify({ type: 'from_the_future', id: 'f1', rootConversationId: 'c', directory: 'arrow', goal: 'g' }));
     assert.deepEqual(r.envelope, { status: 'failure', error: 'from_the_future not supported by this Peers Flow' });
@@ -120,7 +126,7 @@ describe('delegation bridge with every handler', () => {
   });
 
   test('every request reached exactly its handler', () => {
-    assert.deepEqual(seen, ['delegate:arrow', 'delegate:legacy', 'open_file:README.md', 'list_peers:conv-9', 'whoami:conv-9', 'add_remote_peer:patryk@h:/p', 'routines:create:{"name":"Reddit daily"}', 'notify:conv-9:{"title":"  Timesheet  ","level":"action","questions":[{"text":"Days off?","kind":"yesno","extra":1}]}']);
+    assert.deepEqual(seen, ['delegate:arrow', 'delegate:legacy', 'open_file:README.md', 'list_peers:conv-9', 'whoami:conv-9', 'add_remote_peer:patryk@h:/p', 'routines:create:{"name":"Reddit daily"}', 'notify:conv-9:{"title":"  Timesheet  ","level":"action","questions":[{"text":"Days off?","kind":"yesno","extra":1}]}', 'hello:conv-9:4242:2026-10-23T05:57:00.000Z']);
   });
 });
 
@@ -154,6 +160,8 @@ describe('delegation bridge without the optional handlers', () => {
     assert.deepEqual(a.envelope, { status: 'failure', error: 'add_remote_peer not supported by this Peers Flow' });
     const n = await askOn(JSON.stringify({ type: 'notify', id: 'n', rootConversationId: 'c', args: { title: 't', level: 'warn' } }));
     assert.deepEqual(n.envelope, { status: 'failure', error: 'notify not supported by this Peers Flow' });
+    const h = await askOn(JSON.stringify({ type: 'hello', id: 'h', rootConversationId: 'c', pid: 1, startedAt: '2026-10-23T05:57:00.000Z' }));
+    assert.deepEqual(h.envelope, { status: 'failure', error: 'hello not supported by this Peers Flow' });
     assert.equal(delegated, 0);
   });
 

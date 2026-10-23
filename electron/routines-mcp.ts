@@ -32,7 +32,7 @@ type Dirs = TrackedDirectory[];
 
 /** Validate and store a new routine. Throws a one-line human message. */
 export function createRoutine(store: RoutinesStore, input: RoutineInput, dirs: Dirs, nowIso: string, id: string): Routine {
-  const err = validateRoutineInput(input, dirs);
+  const err = validateRoutineInput(input, dirs, Date.parse(nowIso));
   if (err) throw new Error(err);
   return store.addRoutine({
     id,
@@ -52,13 +52,15 @@ export function createRoutine(store: RoutinesStore, input: RoutineInput, dirs: D
 }
 
 /** Validate and apply a patch. Throws a one-line human message. */
-export function patchRoutine(store: RoutinesStore, id: string, patch: RoutinePatch, dirs: Dirs): Routine {
+export function patchRoutine(store: RoutinesStore, id: string, patch: RoutinePatch, dirs: Dirs, nowMs?: number): Routine {
   const cur = store.getRoutine(id);
   if (!cur) throw new Error('routine not found');
   const merged = { ...cur, ...patch };
   if (merged.enabled && !merged.directoryId) throw new Error('pick a directory before enabling');
   if (patch.catchUp !== undefined && typeof patch.catchUp !== 'boolean') throw new Error('catch-up must be on or off');
-  const err = validateRoutineInput(merged, dirs);
+  // Only a moved one-off is held to "not in the past"; an untouched one whose day went by can still be renamed or paused.
+  const moved = patch.schedule && (patch.schedule.cadence !== cur.schedule.cadence || patch.schedule.date !== cur.schedule.date || patch.schedule.time !== cur.schedule.time);
+  const err = validateRoutineInput(merged, dirs, moved ? nowMs : undefined);
   // A plain pause of a routine whose peer has since gone must still succeed.
   if (err && (merged.enabled || patch.schedule || patch.name !== undefined || patch.prompt !== undefined)) throw new Error(err);
   return store.updateRoutine(id, patch)!;
@@ -67,7 +69,7 @@ export function patchRoutine(store: RoutinesStore, id: string, patch: RoutinePat
 // ---- tool arguments → routine fields ----
 
 const WEEKDAYS = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
-const SCHEDULE_KEYS = ['cadence', 'time', 'weekday', 'weekdays', 'month_days', 'start_date'] as const;
+const SCHEDULE_KEYS = ['cadence', 'time', 'weekday', 'weekdays', 'month_days', 'start_date', 'date'] as const;
 
 type Args = Record<string, unknown>;
 
@@ -110,8 +112,15 @@ export function scheduleFromArgs(args: Args, base: RoutineSchedule | null, nowMs
   if (args.weekdays !== undefined && cadence !== 'weekdays') {
     throw new Error(`\`weekdays\` only goes with cadence "weekdays", not "${cadence}" — pass cadence: "weekdays"${cadence === 'weekly' ? ', or use `weekday` for one day a week' : ''}`);
   }
+  if (args.date !== undefined && cadence !== 'once') {
+    throw new Error(`\`date\` only goes with cadence "once", not "${cadence}" — pass cadence: "once" for a routine that runs a single time`);
+  }
   const out: RoutineSchedule = { cadence, time };
-  if (cadence === 'weekdays') {
+  if (cadence === 'once') {
+    const date = str(args.date) ?? kept?.date;
+    if (!date) throw new Error('`date` is required for cadence "once": the day it runs, "YYYY-MM-DD" (local)');
+    out.date = date;
+  } else if (cadence === 'weekdays') {
     const days = args.weekdays !== undefined ? parseWeekdays(args.weekdays) : kept?.weekdays;
     if (!days?.length) throw new Error('`weekdays` is required for cadence "weekdays": the days it runs on, e.g. ["monday", "wednesday", "friday"]');
     out.weekdays = days;
@@ -186,6 +195,7 @@ function describeRoutine(r: Routine, deps: RoutinesToolDeps): Record<string, unk
     icon: r.icon,
     cadence: r.schedule.cadence,
     ...(r.schedule.cadence === 'weekdays' ? { weekdays: normalizeWeekdays(r.schedule.weekdays).map((d) => WEEKDAYS[d]) } : {}),
+    ...(r.schedule.cadence === 'once' ? { date: r.schedule.date ?? null } : {}),
     schedule: cadenceLabel(r.schedule),
     enabled: r.enabled,
     catchUp: routineCatchesUp(r),
@@ -253,7 +263,7 @@ export async function handleRoutinesOp(op: string, rawArgs: unknown, deps: Routi
           patch.enabled = args.enabled;
         }
         if (Object.keys(patch).length === 0) throw new Error('nothing to change — pass at least one field besides `routine`');
-        const routine = patchRoutine(store, cur.id, patch, dirs);
+        const routine = patchRoutine(store, cur.id, patch, dirs, deps.now());
         deps.onChange();
         return { status: 'success', routine: describeRoutine(routine, deps) };
       }

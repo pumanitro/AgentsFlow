@@ -58,8 +58,9 @@ export function dayDistance(a: string, b: string): number {
   return Math.round((Date.UTC(by, bm - 1, bd) - Date.UTC(ay, am - 1, ad)) / 86_400_000);
 }
 
-/** max(createdAt, enabledAt ?? 0). */
-export function routineFloorMs(r: Pick<Routine, 'createdAt' | 'enabledAt'>): number {
+/** max(createdAt, enabledAt ?? 0); 0 for a one-off, whose single slot counts whenever it was set. */
+export function routineFloorMs(r: Pick<Routine, 'createdAt' | 'enabledAt'> & { schedule?: Pick<RoutineSchedule, 'cadence'> }): number {
+  if (r.schedule?.cadence === 'once') return 0;
   const created = Date.parse(r.createdAt);
   const enabled = r.enabledAt ? Date.parse(r.enabledAt) : 0;
   return Math.max(Number.isFinite(created) ? created : 0, Number.isFinite(enabled) ? enabled : 0);
@@ -67,6 +68,8 @@ export function routineFloorMs(r: Pick<Routine, 'createdAt' | 'enabledAt'>): num
 
 function firesOn(schedule: RoutineSchedule, key: string, date: Date): boolean {
   switch (schedule.cadence) {
+    case 'once':
+      return key === schedule.date;
     case 'daily':
       return true;
     case 'every2days': {
@@ -97,6 +100,13 @@ export function normalizeWeekdays(days: unknown): number[] {
 export function occurrencesBetween(schedule: RoutineSchedule, fromMs: number, toMs: number): string[] {
   const t = parseTime(schedule.time);
   if (!t || !(fromMs < toMs)) return [];
+  if (schedule.cadence === 'once') {
+    // One slot ever; computed directly so a window from 0 (no floor) costs nothing.
+    if (!schedule.date || !isDayKey(schedule.date)) return [];
+    const [y, m, d] = schedule.date.split('-').map(Number);
+    const slot = new Date(y, m - 1, d, t.hh, t.mm).getTime();
+    return slot >= fromMs && slot < toMs ? [new Date(slot).toISOString()] : [];
+  }
   const out: string[] = [];
   const lastKey = localDayKey(toMs);
   const [y, m, d] = localDayKey(fromMs).split('-').map(Number);
@@ -111,8 +121,9 @@ export function occurrencesBetween(schedule: RoutineSchedule, fromMs: number, to
   return out;
 }
 
-/** Strictly after; searches ≤ 62 days. */
+/** Strictly after; searches ≤ 62 days (a one-off's date is found however far away). */
 export function nextOccurrence(schedule: RoutineSchedule, afterMs: number): string | null {
+  if (schedule.cadence === 'once') return occurrencesBetween(schedule, afterMs + 1, Number.MAX_SAFE_INTEGER)[0] ?? null;
   const until = dayKeyStartMs(addDays(localDayKey(afterMs), NEXT_SEARCH_DAYS + 1));
   return occurrencesBetween(schedule, afterMs + 1, until)[0] ?? null;
 }
@@ -123,10 +134,15 @@ function ordinal(n: number): string {
   return `${n}${suffix}`;
 }
 
-/** '09:00' | '09:00 (every 2 days)' | '06:00 (Mon, Wed, Fri)' | '09:00 (Mondays)' | '12:00 (1st and 15th)' | '07:00 (1st)' */
+/** '09:00 (once, 25 Oct 2026)' | '09:00' | '09:00 (every 2 days)' | '06:00 (Mon, Wed, Fri)' | '09:00 (Mondays)' | '12:00 (1st and 15th)' | '07:00 (1st)' */
 export function cadenceLabel(schedule: RoutineSchedule): string {
   const time = schedule.time;
   switch (schedule.cadence) {
+    case 'once': {
+      if (!schedule.date) return `${time} (once, no date)`;
+      const [y, m, d] = schedule.date.split('-').map(Number);
+      return `${time} (once, ${d} ${MONTHS[m - 1] ?? '?'} ${y})`;
+    }
     case 'daily':
       return time;
     case 'every2days':
@@ -156,10 +172,12 @@ export function formatSlot(slotIso: string): string {
   return `${d.getDate()} ${MONTHS[d.getMonth()]} ${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
 }
 
-/** time '09:00', weekday 1, weekdays [1, 3, 5], monthDays [1]/[1,15], anchorDate = localDayKey(nowMs). */
+/** time '09:00', weekday 1, weekdays [1, 3, 5], monthDays [1]/[1,15], anchorDate = localDayKey(nowMs), date = tomorrow. */
 export function defaultSchedule(cadence: RoutineCadence, nowMs: number): RoutineSchedule {
   const time = '09:00';
   switch (cadence) {
+    case 'once':
+      return { cadence, time, date: addDays(localDayKey(nowMs), 1) };
     case 'every2days':
       return { cadence, time, anchorDate: localDayKey(nowMs) };
     case 'weekdays':
@@ -174,7 +192,7 @@ export function defaultSchedule(cadence: RoutineCadence, nowMs: number): Routine
   }
 }
 
-function isDayKey(key: string): boolean {
+export function isDayKey(key: string): boolean {
   const m = DAY_KEY.exec(key);
   if (!m) return false;
   // Round-trip through the constructor to reject 2026-02-30 and friends.
@@ -183,8 +201,11 @@ function isDayKey(key: string): boolean {
   return dt.getFullYear() === y && dt.getMonth() === mo - 1 && dt.getDate() === d;
 }
 
-/** null = ok, else a one-line human message. Checks: name 1..60 after trim; directoryId ∈ dirs; prompt non-empty; catchUp undefined or boolean; schedule shape per cadence (time parses; weekday 0..6; weekdays 1..7 distinct entries, each 0..6; monthDays 1..28, 1 or 2 distinct entries; anchorDate 'YYYY-MM-DD'). */
-export function validateRoutineInput(input: RoutineInput, dirs: Pick<TrackedDirectory, 'id'>[]): string | null {
+/** How far in the past a one-off may be set and still be accepted: the form's own minute, not "yesterday by mistake". */
+const ONCE_PAST_SLACK_MS = 5 * 60 * 1000;
+
+/** null = ok, else a one-line human message. Checks: name 1..60 after trim; directoryId ∈ dirs; prompt non-empty; catchUp undefined or boolean; schedule shape per cadence (time parses; weekday 0..6; weekdays 1..7 distinct entries, each 0..6; monthDays 1..28, 1 or 2 distinct entries; anchorDate / date 'YYYY-MM-DD'). With `nowMs` (a new or re-dated schedule) a one-off must not lie in the past. */
+export function validateRoutineInput(input: RoutineInput, dirs: Pick<TrackedDirectory, 'id'>[], nowMs?: number): string | null {
   const name = (input.name ?? '').trim();
   if (!name) return 'name is required';
   if (name.length > 60) return 'name must be 60 characters or fewer';
@@ -195,6 +216,12 @@ export function validateRoutineInput(input: RoutineInput, dirs: Pick<TrackedDire
   if (!s) return 'schedule is required';
   if (!parseTime(s.time)) return 'time must be HH:MM';
   switch (s.cadence) {
+    case 'once': {
+      if (!s.date || !isDayKey(s.date)) return 'a one-off needs its date as YYYY-MM-DD';
+      if (nowMs === undefined) return null;
+      const slot = occurrencesBetween(s, 0, Number.MAX_SAFE_INTEGER)[0];
+      return slot && Date.parse(slot) < nowMs - ONCE_PAST_SLACK_MS ? 'that date and time has already passed — pick a later one' : null;
+    }
     case 'daily':
       return null;
     case 'every2days':

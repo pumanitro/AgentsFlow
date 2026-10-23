@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { CADENCES, CADENCE_GROUP_LABEL, ROUTINE_ICONS, routineCatchesUp } from '../../../shared/routines';
 import type { AgentProvider } from '../../../shared/types';
 import type { RoutineCadence, RoutineIcon, RoutineInput, RoutineSchedule } from '../../../shared/routines';
-import { localDayKey, normalizeWeekdays, validateRoutineInput } from '../../../shared/routine-schedule';
+import { addDays, localDayKey, normalizeWeekdays, validateRoutineInput } from '../../../shared/routine-schedule';
 import { CLAUDE_MODELS } from '../../lib/models';
 import type { RoutineFormProps } from './props';
 import { CadenceIcon, RoutineGlyph } from './marks';
@@ -38,6 +38,9 @@ export default function RoutineForm({ mode, initial, dirs, error, onSubmit, onCa
   const [provider, setProvider] = useState<AgentProvider>(initial?.provider ?? 'claude');
   const [model, setModel] = useState(initial?.model ?? '');
   const [cadence, setCadence] = useState<RoutineCadence>(initial?.schedule.cadence ?? 'daily');
+  // "Run once" is a checkbox over the repeating cadences; unticking it brings back the last one picked.
+  const [repeatCadence, setRepeatCadence] = useState<RoutineCadence>(initial && initial.schedule.cadence !== 'once' ? initial.schedule.cadence : 'daily');
+  const [onceDate, setOnceDate] = useState(initial?.schedule.date ?? addDays(localDayKey(Date.now()), 1));
   const [time, setTime] = useState(initial?.schedule.time ?? '09:00');
   const [weekday, setWeekday] = useState(initial?.schedule.weekday ?? 1);
   const [weekdays, setWeekdays] = useState<number[]>(initial?.schedule.weekdays ?? [1, 3, 5]);
@@ -64,20 +67,23 @@ export default function RoutineForm({ mode, initial, dirs, error, onSubmit, onCa
     if (cadence === 'monthly') schedule.monthDays = [day1];
     if (cadence === 'twiceMonthly') schedule.monthDays = [day1, day2];
     if (cadence === 'every2days') schedule.anchorDate = anchorDate;
+    if (cadence === 'once') schedule.date = onceDate;
     return {
       name: name.trim(), directoryId, prompt: prompt.trim(), schedule, provider,
       model: provider === 'claude' && model ? model : undefined, icon, catchUp,
     };
-  }, [name, directoryId, prompt, cadence, time, weekdays, weekday, day1, day2, anchorDate, provider, model, icon, catchUp]);
+  }, [name, directoryId, prompt, cadence, time, weekdays, weekday, day1, day2, anchorDate, onceDate, provider, model, icon, catchUp]);
 
-  const problem = validateRoutineInput(input, dirs);
+  // A one-off must not be set in the past — unless it is an existing one whose day simply went by and is left as it was.
+  const onceMoved = cadence === 'once' && (initial?.schedule.cadence !== 'once' || initial.schedule.date !== onceDate || initial.schedule.time !== time);
+  const problem = validateRoutineInput(input, dirs, onceMoved ? Date.now() : undefined);
   // Attach the one-line message to the field it is about (best effort on its wording).
   const lower = (problem ?? '').toLowerCase();
   const at = (...words: string[]) => (touched && problem && words.some((w) => lower.includes(w)) ? problem : null);
   const nameErr = at('name');
   const peerErr = at('director', 'peer');
   const promptErr = at('prompt');
-  const schedErr = at('time', 'weekday', 'day', 'schedule', 'anchor');
+  const schedErr = at('time', 'weekday', 'day', 'schedule', 'anchor', 'date', 'one-off', 'passed');
   // An empty day row says so at once, not only after a save attempt.
   const daysErr = cadence === 'weekdays' && weekdays.length === 0 ? 'Pick at least one day — a routine with no days would never run.' : null;
   const toggleWeekday = (d: number) => setWeekdays((cur) => (cur.includes(d) ? cur.filter((x) => x !== d) : [...cur, d]));
@@ -150,19 +156,37 @@ export default function RoutineForm({ mode, initial, dirs, error, onSubmit, onCa
             )}
           </div>
 
+          <label className="flex items-center gap-2 text-sm text-text cursor-pointer">
+            <input
+              type="checkbox"
+              checked={cadence === 'once'}
+              onChange={(e) => setCadence(e.target.checked ? 'once' : repeatCadence)}
+              className="accent-[#ff7847]"
+            />
+            <CadenceIcon cadence="once" size={12} className="text-muted" />
+            Run once — on one day, then never again
+          </label>
+
+          {cadence !== 'once' && (
           <Field label="Cadence" error={daysErr ? null : schedErr}>
             <div className="flex flex-wrap gap-x-4 gap-y-1.5 text-sm text-text">
-              {CADENCES.map((c) => (
+              {CADENCES.filter((c) => c !== 'once').map((c) => (
                 <label key={c} className="flex items-center gap-1.5 cursor-pointer">
-                  <input type="radio" name="routine-cadence" checked={cadence === c} onChange={() => setCadence(c)} className="accent-[#ff7847]" />
+                  <input type="radio" name="routine-cadence" checked={cadence === c} onChange={() => { setCadence(c); setRepeatCadence(c); }} className="accent-[#ff7847]" />
                   <CadenceIcon cadence={c} size={12} className="text-muted" />
                   {CADENCE_GROUP_LABEL[c].charAt(0) + CADENCE_GROUP_LABEL[c].slice(1).toLowerCase()}
                 </label>
               ))}
             </div>
           </Field>
+          )}
 
           <div className="flex flex-wrap gap-4">
+            {cadence === 'once' && (
+              <Field label="Date" error={schedErr}>
+                <input type="date" value={onceDate} min={localDayKey(Date.now())} onChange={(e) => setOnceDate(e.target.value)} className={`${FIELD} w-40`} />
+              </Field>
+            )}
             <Field label="Time">
               <input type="time" value={time} onChange={(e) => setTime(e.target.value)} className={`${FIELD} w-32`} />
             </Field>
@@ -211,6 +235,11 @@ export default function RoutineForm({ mode, initial, dirs, error, onSubmit, onCa
             )}
           </div>
 
+          {cadence === 'once' ? (
+            <div className="text-[11px] text-subtle">
+              If the computer is off at that time, it runs as soon as it&apos;s back on — even days later. It runs only once either way.
+            </div>
+          ) : (
           <div>
             <label className="flex items-start gap-2 text-sm text-text cursor-pointer">
               <input type="checkbox" checked={catchUp} onChange={(e) => setCatchUp(e.target.checked)} className="mt-0.5 accent-[#ff7847]" />
@@ -218,6 +247,7 @@ export default function RoutineForm({ mode, initial, dirs, error, onSubmit, onCa
             </label>
             <div className="text-[11px] text-subtle mt-1 ml-6">Off: a missed time is skipped and shown as missed.</div>
           </div>
+          )}
 
           <Field label="Icon">
             <div className="grid grid-cols-8 gap-1.5" role="radiogroup" aria-label="Icon">

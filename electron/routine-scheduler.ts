@@ -6,6 +6,7 @@ import {
   CATCHUP_OFF_GRACE_MS,
   RUN_TIMEOUT_MS,
   SCHEDULER_TICK_MS,
+  isOnce,
   routineCatchesUp,
   runStatusFromConversation,
   type Routine,
@@ -23,6 +24,8 @@ const QUIET_TICKS = 3;
 const SPAWN_HANG_MS = 2 * 60_000;
 // After a restart the poller needs a beat to replace the chat's stale 'failed' state.
 const RESTART_GRACE_MS = 60_000;
+/** A chat's peersflow MCP server says hello over the bridge within seconds of starting; two minutes of silence means it never came up. */
+export const MCP_HELLO_GRACE_MS = 120_000;
 
 /** The daemon's verdict for a worker that died before its session started: nothing ran, so it is safe to start again. */
 export const isPreInitCrash = (detail: string | undefined) => /\bbefore init\b/.test(detail || '');
@@ -31,6 +34,7 @@ const isLive = (r: RoutineRun) => (r.status === 'running' || r.status === 'atten
 
 /** Same as the shared helper; kept local too so a routine's floor holds even before that helper is filled in. */
 function floorMs(r: Routine): number {
+  if (isOnce(r)) return 0;
   const own = Math.max(Date.parse(r.createdAt) || 0, r.enabledAt ? Date.parse(r.enabledAt) || 0 : 0);
   return Math.max(own, routineFloorMs(r));
 }
@@ -46,6 +50,10 @@ export function createRoutineScheduler(deps: RoutineSchedulerDeps): RoutineSched
   const settling = new Set<string>();
   // runId → when its never-started chat was restarted. One restart per run.
   const restarted = new Map<string, number>();
+  // Runs this instance started (a run already in the store at app start may predate
+  // the hello protocol), and those already warned about a missing MCP server.
+  const dispatchedHere = new Set<string>();
+  const mcpWarned = new Set<string>();
 
   const iso = (ms: number) => new Date(ms).toISOString();
 
@@ -64,6 +72,8 @@ export function createRoutineScheduler(deps: RoutineSchedulerDeps): RoutineSched
   function endRun(run: RoutineRun, status: 'success' | 'failed', nowMs: number, extra: Partial<RoutineRun>): void {
     quietTicks.delete(run.id);
     restarted.delete(run.id);
+    dispatchedHere.delete(run.id);
+    mcpWarned.delete(run.id);
     write({ ...run, ...extra, status, endedAt: iso(nowMs) });
     deps.log('run ended', { routineId: run.routineId, runId: run.id, status, error: extra.error });
   }
@@ -75,6 +85,7 @@ export function createRoutineScheduler(deps: RoutineSchedulerDeps): RoutineSched
    */
   function dispatch(routine: Routine, slotAt: string, trigger: RunTrigger, nowMs: number): { run: RoutineRun; done: Promise<void> } {
     const run: RoutineRun = { id: uuid(), routineId: routine.id, slotAt, trigger, status: 'running', startedAt: iso(nowMs) };
+    dispatchedHere.add(run.id);
     write(run);
     deps.log('dispatch', { routineId: routine.id, routine: routine.name, slotAt, trigger, runId: run.id });
     const done = (async () => {
@@ -110,7 +121,9 @@ export function createRoutineScheduler(deps: RoutineSchedulerDeps): RoutineSched
   function planRoutine(routine: Routine, nowMs: number, dirIds: Set<string>, pending: Promise<void>[]): void {
     // A paused or peer-less routine records nothing: no runs, and no missed marks either.
     if (!routine.enabled || !routine.directoryId || !dirIds.has(routine.directoryId)) return;
-    const from = Math.max(floorMs(routine), nowMs - CATCHUP_LOOKBACK_MS);
+    // A one-off is looked for with no look-back limit: however long the computer
+    // was off, its single slot still runs when the app is back.
+    const from = isOnce(routine) ? 0 : Math.max(floorMs(routine), nowMs - CATCHUP_LOOKBACK_MS);
     if (from >= nowMs) return;
     const slots = occ(routine.schedule, from, nowMs);
     const due = slots.filter((slot) => !store.findRun(routine.id, slot));
@@ -140,6 +153,12 @@ export function createRoutineScheduler(deps: RoutineSchedulerDeps): RoutineSched
       return;
     }
     const s = runStatusFromConversation(conv);
+    // The chat runs, but its peersflow tools never said hello: warn once, leave the run alone.
+    if (run.status === 'running' && dispatchedHere.has(run.id) && !mcpWarned.has(run.id) && !conv.mcpReadyAt
+      && s !== 'failed' && s !== 'success' && age > MCP_HELLO_GRACE_MS) {
+      mcpWarned.add(run.id);
+      deps.onMcpMissing?.(run, store.getRoutine(run.routineId), conv);
+    }
     const restartedAt = restarted.get(run.id);
     if (s === 'failed' && restartedAt !== undefined && nowMs - restartedAt < RESTART_GRACE_MS) return;
     if (s === 'failed' && restartedAt === undefined && deps.restartNeverStarted && isPreInitCrash(conv.description)) {

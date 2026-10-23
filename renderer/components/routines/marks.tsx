@@ -26,6 +26,14 @@ export function CadenceIcon({ cadence, size = 12, className }: { cadence: Routin
     width: size, height: size, viewBox: '0 0 12 12', className, 'aria-hidden': true as const,
     fill: 'none', stroke: 'currentColor', strokeWidth: 1, strokeLinecap: 'round' as const,
   };
+  if (cadence === 'once') { // a pin: one spot on the calendar
+    return (
+      <svg {...common}>
+        <path d="M6 11s3.6-3.6 3.6-6.2a3.6 3.6 0 0 0-7.2 0C2.4 7.4 6 11 6 11z" />
+        <circle cx="6" cy="4.8" r="1.3" fill="currentColor" stroke="none" />
+      </svg>
+    );
+  }
   if (cadence === 'daily') { // sun: disc + 8 rays
     return (
       <svg {...common}>

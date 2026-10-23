@@ -16,6 +16,8 @@
  *   • add_remote_peer — track a directory on another machine.
  *   • routines  — list / create / update / delete / run a routine (`op`).
  *   • notify    — raise a notification in the app's bell (the `notify` tool).
+ *   • hello     — the MCP server announcing it started, so main can stamp the
+ *                 chat as having its Peers Flow tools (Conversation.mcpReadyAt).
  *
  * Protocol: newline-delimited JSON, one request per connection.
  *   → { type, id, rootConversationId, ... }
@@ -81,6 +83,10 @@ export interface RoutinesRequest {
 // The `notify` tool: raw tool arguments travel untouched, main validates them (notifications-mcp.ts).
 export interface NotifyRequest { type: 'notify'; id: string; rootConversationId: string; args: Record<string, unknown> }
 
+// Sent once, fire-and-forget, by the MCP server right after it starts. A routine
+// chat that never says hello ran without its tools; the scheduler warns about it.
+export interface HelloRequest { type: 'hello'; id: string; rootConversationId: string; pid: number; startedAt: string }
+
 export type BridgeEnvelope = Record<string, unknown>;
 
 export interface BridgeHandlers {
@@ -93,9 +99,10 @@ export interface BridgeHandlers {
   onAddRemotePeer?: (req: AddRemotePeerRequest) => Promise<BridgeEnvelope>;
   onRoutines?: (req: RoutinesRequest) => Promise<BridgeEnvelope>;
   onNotify?: (req: NotifyRequest) => Promise<BridgeEnvelope>;
+  onHello?: (req: HelloRequest) => Promise<BridgeEnvelope>;
 }
 
-type BridgeRequest = DelegateRequest | OpenFileRequest | ListPeersRequest | WhoamiRequest | AddRemotePeerRequest | RoutinesRequest | NotifyRequest;
+type BridgeRequest = DelegateRequest | OpenFileRequest | ListPeersRequest | WhoamiRequest | AddRemotePeerRequest | RoutinesRequest | NotifyRequest | HelloRequest;
 
 function unsupported(type: string): Promise<BridgeEnvelope> {
   return Promise.resolve({ status: 'failure', error: `${type} not supported by this Peers Flow` });
@@ -158,6 +165,8 @@ export function startPeersBridge(
           run = handlers.onRoutines ? handlers.onRoutines(req as RoutinesRequest) : unsupported('routines');
         } else if (req.type === 'notify') {
           run = handlers.onNotify ? handlers.onNotify(req as NotifyRequest) : unsupported('notify');
+        } else if (req.type === 'hello') {
+          run = handlers.onHello ? handlers.onHello(req as HelloRequest) : unsupported('hello');
         } else if (req.type === undefined || req.type === 'delegate') run = handlers.onDelegate(req as DelegateRequest);
         // A type this build does not know (a newer MCP server talking to an
         // older app) must fail cleanly, never spawn an agent as a "delegate".

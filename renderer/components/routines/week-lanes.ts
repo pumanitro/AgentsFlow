@@ -4,7 +4,7 @@ import type { DayCells, SlotMark } from '../../../shared/routine-board';
 // Pure placement for the week lanes board: which lanes exist and which marks
 // sit in each lane on each day. No React here so a test can target it.
 
-export type WeekLaneId = 'daily' | 'every2days' | 'weekdays' | 'weekly' | 'monthly';
+export type WeekLaneId = 'once' | 'daily' | 'every2days' | 'weekdays' | 'weekly' | 'monthly';
 
 export interface WeekLane {
   id: WeekLaneId;
@@ -14,6 +14,7 @@ export interface WeekLane {
 }
 
 const LANES: { id: WeekLaneId; label: string; cadence: RoutineCadence; cadences: RoutineCadence[] }[] = [
+  { id: 'once', label: 'ONCE', cadence: 'once', cadences: ['once'] },
   { id: 'daily', label: 'DAILY', cadence: 'daily', cadences: ['daily'] },
   { id: 'every2days', label: 'EVERY 2 DAYS', cadence: 'every2days', cadences: ['every2days'] },
   { id: 'weekdays', label: 'CUSTOM DAYS', cadence: 'weekdays', cadences: ['weekdays'] },
@@ -29,7 +30,8 @@ function bySlotThenName(a: SlotMark, b: SlotMark): number {
 function marksOf(day: DayCells, cadences: RoutineCadence[]): SlotMark[] {
   const out: SlotMark[] = [];
   for (const c of cadences) {
-    if (c === 'daily') out.push(...day.dailies);
+    if (c === 'once') out.push(...day.once);
+    else if (c === 'daily') out.push(...day.dailies);
     else if (c === 'every2days') out.push(...day.every2days);
     else if (c === 'weekdays') out.push(...day.weekdays);
     else if (c === 'weekly') out.push(...day.weekly);

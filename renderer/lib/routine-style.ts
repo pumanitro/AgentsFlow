@@ -29,6 +29,7 @@ export const STATUS_CARD: Record<MarkStatus, string> = {
 };
 // Cadence hue — the LEFT edge of a chip, the sidebar group marker, the cadence icon's tint. Chosen away from the four status hues.
 export const CADENCE_COLOR: Record<RoutineCadence, string> = {
+  once: '#fb7185',         // rose
   daily: '#2dd4bf',        // teal
   every2days: '#a78bfa',   // violet
   weekdays: '#7dd3fc',     // sky

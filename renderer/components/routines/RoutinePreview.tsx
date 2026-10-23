@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { canMarkRunDone, routineCatchesUp } from '../../../shared/routines';
-import { cadenceLabel, formatSlot, nextOccurrence } from '../../../shared/routine-schedule';
+import { cadenceLabel, formatSlot, nextOccurrence, occurrencesBetween } from '../../../shared/routine-schedule';
 import { STATUS_LABEL, STATUS_TEXT } from '../../lib/routine-style';
 import type { RoutinePreviewProps } from './props';
 import { RoutineGlyph, StatusMark } from './marks';
@@ -27,6 +27,10 @@ export default function RoutinePreview(props: RoutinePreviewProps) {
   );
   const next = routine.enabled ? nextOccurrence(routine.schedule, nowMs) : null;
   const catchUp = routineCatchesUp(routine);
+  const once = routine.schedule.cadence === 'once';
+  // A one-off with no slot ahead has either run already or is overdue (the computer was off) and starts on the next check.
+  const onceSlot = once ? occurrencesBetween(routine.schedule, 0, Number.MAX_SAFE_INTEGER)[0] : undefined;
+  const onceRan = !!onceSlot && history.some((r) => Date.parse(r.slotAt) === Date.parse(onceSlot));
 
   return (
     <aside className="w-80 shrink-0 min-h-0 flex flex-col border-l border-border bg-panel/40" aria-label="Routine details">
@@ -44,8 +48,15 @@ export default function RoutinePreview(props: RoutinePreviewProps) {
 
       <div className="shrink-0 px-4 py-3 border-b border-border space-y-3">
         <div className="text-xs text-muted">
-          {routine.enabled ? (next ? <>Next run: <span className="text-text">{formatSlot(next)}</span></> : 'Next run: —') : <span className="text-warn">Paused</span>}
+          {routine.enabled
+            ? (next ? <>Next run: <span className="text-text">{formatSlot(next)}</span></>
+              : once ? (onceRan ? 'Ran once — nothing more scheduled' : 'Overdue — starts within a minute')
+              : 'Next run: —')
+            : <span className="text-warn">Paused</span>}
         </div>
+        {once ? (
+          <div className="text-xs text-muted">Runs even if the computer was off at that time — as soon as it is back on.</div>
+        ) : (
         <div className="flex items-center gap-2 text-xs text-muted">
           <span>Run later if missed:</span>
           <button
@@ -64,6 +75,7 @@ export default function RoutinePreview(props: RoutinePreviewProps) {
             <span className="text-text">{catchUp ? 'On' : 'Off'}</span>
           </button>
         </div>
+        )}
         {confirming ? (
           <div className="flex items-center gap-2 text-xs">
             <span className="text-text">Delete routine and its run history?</span>

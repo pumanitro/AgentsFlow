@@ -14,15 +14,58 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { app } from 'electron';
+import { readCurrentRuntime, stageMcpRuntime, type McpRuntime } from './mcp-runtime';
 import { buildRegistry, renderBootstrapPrompt, SERVER_ID, TOOL_DEFS, type SelfInfo } from './registry';
 import { getRemoteHosts } from './remote/remote-hosts';
 import type { McpServerInfo, TrackedDirectory } from '../shared/types';
 
 const SERVER_NAME = SERVER_ID;
 
-/** Compiled standalone server. __dirname at runtime is dist/electron/electron. */
-export function mcpServerScriptPath(): string {
+/** Compiled standalone server in the build tree. __dirname at runtime is dist/electron/electron. */
+export function buildTreeServerScriptPath(): string {
   return path.join(__dirname, 'mcp', 'agentsflow-mcp-server.js');
+}
+/** Where the server's require closure is staged (see mcp-runtime.ts). */
+export function mcpRuntimeStageRoot(): string {
+  return path.join(app.getPath('userData'), 'mcp-runtime');
+}
+
+// Last runtime staged by this process; the fallback when a later stage fails.
+let lastRuntime: McpRuntime | null = null;
+const loggedStageFailures = new Set<string>();
+
+function errMsg(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
+/**
+ * The script every local mcp-config runs: a copy staged under userData, since
+ * `claude` reading it from the build tree under ~/Desktop intermittently fails
+ * with EPERM. Re-staged on every call (three small files, a no-op when the
+ * hash is unchanged) so a rebuilt dist/ reaches the next spawn without a
+ * restart. Never throws: falls back to the last staged copy (this process's,
+ * else the one current.json names), then to the build tree.
+ */
+export function mcpServerScriptPath(): string {
+  const stageRoot = mcpRuntimeStageRoot();
+  try {
+    // bundleRoot = dist/electron, so MCP_RUNTIME_FILES' 'electron/...' land on dist/electron/electron/...
+    const rt = stageMcpRuntime({ bundleRoot: path.join(__dirname, '..'), stageRoot });
+    if (rt.hash !== lastRuntime?.hash) console.log(`[agentsflow][mcp-runtime] staged ${rt.hash} → ${rt.dir}`);
+    lastRuntime = rt;
+    return rt.serverScript;
+  } catch (err) {
+    const msg = errMsg(err);
+    const fallback = (lastRuntime && fs.existsSync(lastRuntime.serverScript) ? lastRuntime : null) ?? readCurrentRuntime(stageRoot);
+    const key = `${fallback?.hash ?? 'tree'}:${msg}`;
+    if (!loggedStageFailures.has(key)) {
+      loggedStageFailures.add(key);
+      if (fallback) console.warn(`[agentsflow][mcp-runtime] staging failed, using staged ${fallback.hash}: ${msg}`);
+      else console.warn(`[agentsflow][mcp-runtime] staging failed, using the build tree: ${msg}`);
+    }
+    if (fallback) return fallback.serverScript;
+    return buildTreeServerScriptPath();
+  }
 }
 export function storeJsonPath(): string {
   return path.join(app.getPath('userData'), 'store.json');

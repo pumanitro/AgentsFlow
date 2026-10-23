@@ -4,7 +4,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { createRoutinesStore } from './routines-store';
-import { createRoutineScheduler } from './routine-scheduler';
+import { MCP_HELLO_GRACE_MS, createRoutineScheduler } from './routine-scheduler';
 import type { RoutineSchedulerDeps } from './routines-api';
 import type { Conversation, TrackedDirectory } from '../shared/types';
 import { CATCHUP_LOOKBACK_MS, CATCHUP_OFF_GRACE_MS, markRunDone } from '../shared/routines';
@@ -676,5 +676,74 @@ describe('onRunEnded: the hook main raises its warning from', () => {
     h.convs.set('conv-1', conv('conv-1', { state: 'failed', status: '', description: 'boom' }));
     await h.sched.tick();
     assert.deepEqual(runsOf(h).map((r) => r.status), ['missed', 'failed']);
+  });
+});
+
+describe('scheduler: a routine chat whose peersflow MCP server never said hello', () => {
+  const T = at(10, 8, 0);   // no slot due at 08:00, so only the manual run exists
+  const missing = () => {
+    const calls: { run: RoutineRun; routine: Routine | null; conv: Conversation }[] = [];
+    return { calls, onMcpMissing: (run: RoutineRun, routine: Routine | null, c: Conversation) => { calls.push({ run, routine, conv: c }); } };
+  };
+
+  it('warns exactly once, after MCP_HELLO_GRACE_MS, and leaves the run row alone', async () => {
+    assert.equal(MCP_HELLO_GRACE_MS, 120_000);
+    const m = missing();
+    const h = harness(T, { onMcpMissing: m.onMcpMissing });
+    addRoutine(h);
+    const run = await h.sched.runNow('r1');
+    await new Promise((r) => setImmediate(r));
+    h.setNow(T + 60_000);
+    await h.sched.tick();
+    assert.equal(m.calls.length, 0);
+    h.setNow(T + 121_000);
+    await h.sched.tick();
+    assert.equal(m.calls.length, 1);
+    assert.equal(m.calls[0].run.id, run.id);
+    assert.equal(m.calls[0].routine?.id, 'r1');
+    assert.equal(m.calls[0].conv.id, 'conv-1');
+    h.setNow(T + 136_000);
+    await h.sched.tick();
+    assert.equal(m.calls.length, 1);
+    const cur = h.store.getRun(run.id)!;
+    assert.equal(cur.status, 'running');
+    assert.equal(cur.error, undefined);
+  });
+
+  it('a chat that said hello (conv.mcpReadyAt) is never warned about', async () => {
+    const m = missing();
+    const h = harness(T, { onMcpMissing: m.onMcpMissing });
+    addRoutine(h);
+    await h.sched.runNow('r1');
+    await new Promise((r) => setImmediate(r));
+    h.convs.set('conv-1', conv('conv-1', { mcpReadyAt: isoOf(T + 3_000) }));
+    for (const dt of [60_000, 121_000, 136_000]) { h.setNow(T + dt); await h.sched.tick(); }
+    assert.equal(m.calls.length, 0);
+  });
+
+  it('a run already in the store when the scheduler started (app restart) is never warned about', async () => {
+    const m = missing();
+    const h = harness(T, { onMcpMissing: m.onMcpMissing });
+    addRoutine(h);
+    h.store.upsertRun({ id: 'old', routineId: 'r1', slotAt: isoOf(T), trigger: 'manual', status: 'running', startedAt: isoOf(T), conversationId: 'c-old' });
+    h.convs.set('c-old', conv('c-old', {}));
+    for (const dt of [60_000, 121_000, 136_000]) { h.setNow(T + dt); await h.sched.tick(); }
+    assert.equal(m.calls.length, 0);
+    assert.equal(h.store.getRun('old')?.status, 'running');
+  });
+
+  it('a chat that already finished by the grace deadline is never warned about', async () => {
+    const m = missing();
+    const h = harness(T, { onMcpMissing: m.onMcpMissing });
+    addRoutine(h);
+    const run = await h.sched.runNow('r1');
+    await new Promise((r) => setImmediate(r));
+    h.setNow(T + 60_000);
+    await h.sched.tick();
+    h.convs.set('conv-1', conv('conv-1', { state: 'done', status: 'idle' }));
+    h.setNow(T + 121_000);
+    await h.sched.tick();
+    assert.equal(m.calls.length, 0);
+    assert.equal(h.store.getRun(run.id)?.status, 'success');
   });
 });

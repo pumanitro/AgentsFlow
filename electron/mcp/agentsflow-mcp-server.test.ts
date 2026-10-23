@@ -98,6 +98,15 @@ describe('MCP server on a remote host (bridge, no store)', () => {
     assert.equal((r.result!.serverInfo as { name: string }).name, 'peersflow');
   });
 
+  test('says hello over the bridge once at start, with its pid and the root conversation', async () => {
+    for (let i = 0; i < 200 && !received.some((q) => q.type === 'hello'); i++) await new Promise((r) => setTimeout(r, 10));
+    const hellos = received.filter((q) => q.type === 'hello');
+    assert.equal(hellos.length, 1);
+    assert.equal(hellos[0].rootConversationId, 'conv-1');
+    assert.equal(hellos[0].pid, client.child.pid);
+    assert.ok(!Number.isNaN(Date.parse(String(hellos[0].startedAt))));
+  });
+
   test('tools/list includes whoami, add_remote_peer, notify and the routine tools', async () => {
     const r = await client.call('tools/list');
     const tools = r.result!.tools as { name: string; inputSchema: { required?: string[] } }[];

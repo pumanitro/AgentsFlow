@@ -6,7 +6,7 @@ import type { DayCells, SlotMark } from '../../../shared/routine-board';
 export const MAX_CHIPS = 3;
 
 export interface MonthCellLayout {
-  chips: SlotMark[];       // weekly / twice-monthly / monthly, at most MAX_CHIPS
+  chips: SlotMark[];       // one-off / weekly / twice-monthly / monthly, at most MAX_CHIPS
   overflow: SlotMark[];    // the rest, listed in the "+n" chip's tooltip
   circles: SlotMark[];     // every-2-days and custom-days marks
   dailies: SlotMark[];     // one health-bar segment each
@@ -21,7 +21,7 @@ export function bySlotThenName(a: SlotMark, b: SlotMark): number {
 }
 
 export function arrangeMonthCell(cell: DayCells): MonthCellLayout {
-  const all = [...cell.weekly, ...cell.twiceMonthly, ...cell.monthly].sort(bySlotThenName);
+  const all = [...cell.once, ...cell.weekly, ...cell.twiceMonthly, ...cell.monthly].sort(bySlotThenName);
   const fold = all.length > MAX_CHIPS;
   const isFuture = !cell.isPast && !cell.isToday;
   const { done, total } = cell.score;

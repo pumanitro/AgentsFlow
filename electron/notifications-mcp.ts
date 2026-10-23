@@ -123,6 +123,29 @@ export function buildRunWarning(
   return { id, level: 'warn', title, body, source, createdAt: now, files: [] };
 }
 
+/**
+ * The app's own warning for a routine chat that started without its peersflow
+ * MCP server (it never said hello over the bridge). Not `auto`: the run may still
+ * succeed, and marking it done must not silently clear this.
+ */
+export function buildMcpMissingWarning(
+  run: RoutineRun,
+  routine: Routine | null,
+  peerName: string | null,
+  id: string,
+  now: string,
+  formatSlot: (iso: string) => string,
+): UserNotification {
+  const title = `${routine?.name ?? 'A routine'}: Peers Flow tools never connected`;
+  const body = `Its chat (run of ${formatSlot(run.slotAt)}) started without the peersflow MCP server, so it cannot delegate, notify or start another routine. Open the chat to see what it did; use Run now in the Routines tab to run it again.`;
+  const source: NotificationSource = { kind: 'routine', routineId: run.routineId, runId: run.id };
+  if (run.conversationId) source.conversationId = run.conversationId;
+  if (routine?.name) source.routineName = routine.name;
+  if (routine?.directoryId) source.directoryId = routine.directoryId;
+  if (peerName) source.peerName = peerName;
+  return { id, level: 'warn', title, body, source, createdAt: now, files: [] };
+}
+
 /** A macOS banner only for something that needs the user, and only when they are not looking at the app. */
 export function shouldShowSystemNotification(n: UserNotification, windowFocused: boolean): boolean {
   return n.level === 'action' && !windowFocused;
