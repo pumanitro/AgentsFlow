@@ -541,6 +541,16 @@ export const store = {
     save();
     return account;
   },
+  updateAccount(id: string, patch: Partial<Account>): Account | null {
+    const s = load();
+    const current = s.accounts.find((a) => a.id === id);
+    if (!current) return null;
+    // Runtime-only fields never reach disk.
+    const { hasToken: _hasToken, needsLogin: _needsLogin, ...next } = { ...current, ...patch };
+    s.accounts = s.accounts.map((a) => (a.id === id ? next : a));
+    save();
+    return next;
+  },
   removeAccount(id: string): void {
     const s = load();
     s.accounts = s.accounts.filter((a) => a.id !== id);

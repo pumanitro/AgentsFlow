@@ -42,8 +42,11 @@ function resolveIconPath(): string | null {
 const ICON_PATH = resolveIconPath();
 
 import { store } from './store';
-import { getUsage, getUsageForService, resetUsageCache } from './usage';
+import { getUsage, getUsageForService, getUsageForToken, resetUsageCache } from './usage';
 import * as accounts from './accounts';
+import * as llt from './long-lived-token';
+import { cancelMint, mintTokenFor } from './token-mint';
+import { TOKEN_READS_USAGE } from './token-policy';
 import * as codexAccounts from './codex-accounts';
 import * as handover from './handover';
 import * as rotation from './rotation';
@@ -122,7 +125,7 @@ import * as remoteFs from './remote/remote-fs';
 import { deleteAttachmentFiles, pastedImagesRoot, prunePastedImages, sweepOrphanAttachments, todayDateSlug } from './attachments';
 import { noteDirForPath, sweepNoteDir, sweepNoteImages } from './note-images';
 import { disableLeftArrowAgents } from './attach-guard';
-import { Account, AccountsSnapshot, AddAccountResult, AddRemoteRequest, AgentProvider, BridgeHealth, ChatKind, CodexModel, Conversation, FileEntry, GuardPins, PerfReportResult, PinnedDivider, PinnedItemRef, PinnedTodo, ProbeAccountResult, ProbeCodexResult, RemoteHostStatus, RemoteProbeResult, RotationPolicy, RunContract, SlashCommand, SpawnRequest, SwitchAccountResult, SwitchCodexResult, TrackedDirectory, UsageResult } from '../shared/types';
+import { Account, AccountsSnapshot, AddAccountResult, MintTokenResult, AddRemoteRequest, AgentProvider, BridgeHealth, ChatKind, CodexModel, Conversation, FileEntry, GuardPins, PerfReportResult, PinnedDivider, PinnedItemRef, PinnedTodo, ProbeAccountResult, ProbeCodexResult, RemoteHostStatus, RemoteProbeResult, RotationPolicy, RunContract, SlashCommand, SpawnRequest, SwitchAccountResult, SwitchCodexResult, TrackedDirectory, UsageResult } from '../shared/types';
 
 const isDev = process.env.NODE_ENV === 'development';
 const loadURL = isDev ? null : serve({ directory: path.join(__dirname, '..', '..', '..', 'renderer', 'out') });
@@ -529,7 +532,17 @@ app.whenReady().then(() => {
   // the signed-in slot if it is the stale one. Started before anything can
   // spawn a session: a launch after the app has been closed for hours is exactly
   // when the main slot is most likely to be found stranded.
-  accounts.startCredentialSync(credentialSyncDeps);
+  //
+  // Long-lived tokens are loaded first: the sync is what installs the active
+  // account's token into that slot, and with an empty cache it would treat a
+  // tokenised account as an ordinary sign-in for its first tick.
+  accounts.configureTokenSource(llt.tokenFor);
+  void llt.loadTokenCache(store.getAccounts())
+    .catch((err) => console.warn('[agentsflow][accounts] could not load long-lived tokens', (err as Error)?.message ?? err))
+    .finally(() => {
+      accounts.startCredentialSync(credentialSyncDeps);
+      broadcastAccounts();
+    });
   // Watch the active account's meters and switch before it hits the wall. Opt-in
   // (disabled by default); the loop no-ops until the user enables it.
   rotation.startRotation(rotationDeps);
@@ -934,7 +947,7 @@ ipcMain.handle('bridge:health', () => bridgeHealthSnapshot());
 
 // Live plan-usage meters for the sidebar Usage panel. Read-only against the
 // authenticated `/usage` endpoint; cached briefly inside getUsage().
-ipcMain.handle('usage:get', (_e, force?: boolean) => getUsage(Boolean(force)));
+ipcMain.handle('usage:get', (_e, force?: boolean) => activeUsage(Boolean(force)));
 
 // Live sample for the sidebar Performance panel. Registered on the RAW handle
 // so the monitor's own polling never shows up in the slow-op table it renders.
@@ -975,16 +988,26 @@ rawIpcHandle('perf:report', async (_e: unknown, rangeMin: number): Promise<PerfR
 
 // Only ever set for the unrepairable case — see AccountsSnapshot.authIssue.
 let authIssue: string | null = null;
+// Whether the signed-in slot holds the active account's long-lived token, as
+// last seen by a switch or a reconcile tick — see AccountsSnapshot.tokenMode.
+let mainOnToken = false;
 
 function accountsSnapshot(): AccountsSnapshot {
   const codexPool = store.getCodexAccounts();
   return {
     accounts: store.getAccounts().map((a) => {
       const needsLogin = accounts.revokedReason(a.id);
-      return needsLogin ? { ...a, needsLogin } : a;
+      const tokenRejected = llt.tokenRejectedReason(a.id);
+      return {
+        ...a,
+        ...(needsLogin ? { needsLogin } : {}),
+        hasToken: llt.hasToken(a.id),
+        ...(tokenRejected ? { tokenRejected } : {}),
+      };
     }),
     activeId: store.getActiveAccountId(),
     authIssue,
+    tokenMode: mainOnToken,
     codexAccounts: codexPool,
     // Read from the CLI's own auth.json rather than remembered: the user can
     // run `codex login` outside the app, and then the pool's idea of who is
@@ -1019,11 +1042,28 @@ function applyReconcile(account: Account, result: accounts.ReconcileResult): voi
     console.log('[agentsflow][accounts] reconcile', { email: account.email, outcome: result.outcome });
   }
 
+  const wasOnToken = mainOnToken;
+  mainOnToken = result.outcome === 'installed-token' || (result.outcome === 'in-sync' && Boolean(result.onToken));
+
   switch (result.outcome) {
     case 'in-sync':
     case 'adopted-main':
       // Routine. Nothing to tell anyone: this is the loop doing its job.
       authIssue = null;
+      break;
+
+    case 'installed-token':
+      // The slot now runs on the account's one-year token. Meters read from
+      // that slot are stale for whoever held it before.
+      resetUsageCache();
+      authIssue = null;
+      break;
+
+    case 'token-rejected':
+      // Claude Code threw the token out. Stop installing it — tokenFor() goes
+      // quiet for this account, so the next tick restores the stored sign-in.
+      llt.markTokenRejected(account.id, result.error);
+      authIssue = result.error;
       break;
 
     case 'repaired-main':
@@ -1055,7 +1095,7 @@ function applyReconcile(account: Account, result: accounts.ReconcileResult): voi
   }
 
   // Broadcast on change only — this runs every minute.
-  if (authIssue !== previousIssue || result.outcome === 'repaired-main') {
+  if (authIssue !== previousIssue || result.outcome === 'repaired-main' || mainOnToken !== wasOnToken || result.outcome === 'token-rejected') {
     broadcastAccounts();
   }
 }
@@ -1114,6 +1154,7 @@ ipcMain.handle('accounts:remove', async (_e, id: string) => {
   if (!account) return;
   store.removeAccount(id);
   accounts.clearRevoked(id);
+  await llt.forgetToken(id).catch((err) => console.warn('[agentsflow][accounts] could not forget the token', { email: account.email, error: (err as Error)?.message ?? err }));
   await accounts.destroyVault(account.configDir);
   broadcastAccounts();
 });
@@ -1125,6 +1166,7 @@ ipcMain.handle('accounts:switch', async (_e, id: string): Promise<SwitchAccountR
       activeId: store.getActiveAccountId(),
       onSwitched: (a) => store.setActiveAccountId(a.id),
     });
+    mainOnToken = Boolean(llt.tokenFor(account.id));
     resetUsageCache();
     broadcastAccounts();
     return { ok: true, account };
@@ -1148,6 +1190,50 @@ ipcMain.handle('accounts:usage', (_e, id: string, force?: boolean) => {
     return { ok: false, reason: 'no-auth', error: 'Account not found.' } as const;
   }
   return accountUsage(account, Boolean(force));
+});
+
+// The app's own `claude setup-token`: one browser consent mints a one-year
+// token for this account. It goes into the keychain, never the store, and —
+// when the account is the active one — straight into the signed-in slot.
+ipcMain.handle('accounts:mintToken', async (_e, id: string): Promise<MintTokenResult> => {
+  const account = store.getAccounts().find((a) => a.id === id);
+  if (!account) return { ok: false, reason: 'unknown', error: 'That account is no longer in the pool.' };
+  const outcome = await mintTokenFor(account, { openUrl: (u) => shell.openExternal(u) });
+  if (!outcome.ok) return outcome;
+  try {
+    await llt.storeToken(id, outcome.token);
+  } catch (err) {
+    return { ok: false, reason: 'unknown', error: `The token was minted but the keychain refused it: ${(err as Error)?.message ?? err}` };
+  }
+  store.updateAccount(id, {
+    tokenExpiresAt: new Date(outcome.expiresAt).toISOString(),
+    tokenMintedAt: new Date().toISOString(),
+    tokenScopes: outcome.scopes,
+    ...(outcome.learned?.accountUuid ? { accountUuid: outcome.learned.accountUuid } : {}),
+    ...(outcome.learned?.orgId ? { orgId: outcome.learned.orgId } : {}),
+  });
+  console.log('[agentsflow][accounts] long-lived token saved', { email: account.email });
+  if (id === store.getActiveAccountId()) {
+    // Install now rather than on the next reconcile tick: the user is looking.
+    try {
+      await accounts.switchTo(id, {
+        accounts: store.getAccounts(),
+        activeId: store.getActiveAccountId(),
+        onSwitched: (a) => store.setActiveAccountId(a.id),
+      });
+      mainOnToken = true;
+      resetUsageCache();
+    } catch (err) {
+      console.warn('[agentsflow][accounts] token saved, install deferred to the next sync', { email: account.email, error: (err as Error)?.message ?? err });
+    }
+  }
+  broadcastAccounts();
+  const row = accountsSnapshot().accounts.find((a) => a.id === id);
+  return row ? { ok: true, account: row } : { ok: false, reason: 'unknown', error: 'The account vanished while its token was saved.' };
+});
+
+ipcMain.handle('accounts:cancelMintToken', (_e, id: string) => {
+  cancelMint(id);
 });
 
 // ----- The Codex pool -----
@@ -1233,13 +1319,17 @@ ipcMain.handle('codexAccounts:saveCurrent', (_e, label?: string): SwitchCodexRes
 // than in the renderer so an overnight run keeps rotating with the window shut.
 
 async function accountUsage(account: Account, force: boolean): Promise<UsageResult> {
+  const token = llt.tokenFor(account.id);
+  if (TOKEN_READS_USAGE && token) return getUsageForToken(account.id, token, force, account.subscriptionType);
   const service = accounts.serviceNameFor(account.configDir);
   // A standby account's access token dies hours after the daily keep-warm
   // sweep, so freshen it just before reading. Never the active account, whose
   // refresh token the running CLI is holding — and an unknown active id proves
   // nothing about which account that is, so it means "leave every one alone".
   const activeId = store.getActiveAccountId();
-  if (account.id === activeId) return getUsageForService(service, force);
+  // A tokenised active account no longer shares its sign-in with the CLI (the
+  // slot holds its token), so the app refreshes that vault like a standby one.
+  if (account.id === activeId && !llt.hasToken(account.id)) return getUsageForService(service, force);
   // No recorded active account is a state that does not self-heal, so it must
   // not simply disable freshening — that would restore the overnight blindness
   // permanently. Fall back to the login's own identity, and act only on a
@@ -1262,18 +1352,28 @@ async function accountUsage(account: Account, force: boolean): Promise<UsageResu
   return reminted ? getUsageForService(service, true) : result;
 }
 
+/**
+ * The active account's meters. A slot holding a long-lived token may not be
+ * allowed to read them, so a tokenised active account reads through its vault.
+ */
+function activeUsage(force: boolean): Promise<UsageResult> {
+  const active = store.getAccounts().find((a) => a.id === store.getActiveAccountId());
+  return active && llt.hasToken(active.id) ? accountUsage(active, force) : getUsage(force);
+}
+
 const rotationDeps: rotation.RotationDeps = {
   getPolicy: () => store.getRotationPolicy(),
   getAccounts: () => store.getAccounts(),
   getActiveId: () => store.getActiveAccountId(),
   getAccountUsage: (account, force) => accountUsage(account, force),
-  getActiveUsage: (force) => getUsage(force),
+  getActiveUsage: (force) => activeUsage(force),
   switchTo: async (accountId) => {
     const account = await accounts.switchTo(accountId, {
       accounts: store.getAccounts(),
       activeId: store.getActiveAccountId(),
       onSwitched: (a) => store.setActiveAccountId(a.id),
     });
+    mainOnToken = Boolean(llt.tokenFor(account.id));
     resetUsageCache();
     broadcastAccounts();
     return account;
@@ -1294,6 +1394,13 @@ const rotationDeps: rotation.RotationDeps = {
 // state lasted 87 minutes with four healthy accounts in the pool.)
 accounts.onAccountRevoked((account, reason) => {
   const isActive = account.id === store.getActiveAccountId();
+  // A tokenised account's chats do not run on the revoked sign-in — only its
+  // meters do. Say so, and do not flee a login nothing is using.
+  if (isActive && llt.hasToken(account.id)) {
+    authIssue = `${account.email}'s stored sign-in was revoked. Its chats keep running on the one-year token, but its meters are unreadable until you sign it in again.`;
+    broadcastAccounts();
+    return;
+  }
   if (isActive) authIssue = reason;
   broadcastAccounts();
   if (!isActive) return;
@@ -1466,7 +1573,7 @@ const keeperDeps: keeper.KeeperDeps = {
   isWalled: (conv) => limitWatch.readLimitHit(conv) !== null,
   // Unreadable usage counts as headroom: a meter that cannot be read must not
   // silence the Keeper, and a genuinely walled chat is caught by isWalled.
-  poolHasHeadroom: () => getUsage(false).then((r) => !(r.ok && (worstMeter(r)?.percent ?? 0) >= 100)).catch(() => true),
+  poolHasHeadroom: () => activeUsage(false).then((r) => !(r.ok && (worstMeter(r)?.percent ?? 0) >= 100)).catch(() => true),
   memLevel: () => guard.getMemLevel(),
   readKillsSince: (offset) => readKillLogSince(offset),
   nudge: nudgeConversation,

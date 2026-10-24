@@ -519,6 +519,8 @@ export function createMockApi(): AgentsFlowApi {
       { id: 'gpt-5.1-codex-mini', displayName: 'GPT-5.1 Codex mini', isDefault: false },
       { id: 'gpt-5.1', displayName: 'GPT-5.1', isDefault: false },
     ],
+    mintAccountToken: async () => ({ ok: false as const, reason: 'unknown' as const, error: 'Generating a token needs the desktop app.' }),
+    cancelMintAccountToken: async () => {},
     getAccountUsage: async (id: string) => ({
       ok: true as const,
       snapshot: {

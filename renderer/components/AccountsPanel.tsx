@@ -7,6 +7,8 @@ import ProviderIcon, { providerName } from './ProviderIcon';
 import type { CSSProperties, ReactNode } from 'react';
 import type { Account, AgentProvider, CodexAccount, CodexAccountStatus, RotationPolicy, RotationStatus, UsageMeter, UsageResult } from '../../shared/types';
 import { worstMeter } from '../../shared/usage';
+import { formatTokenDate, tokenStatus } from '../../shared/token-status';
+import type { TokenState } from '../../shared/token-status';
 
 const Terminal = dynamic(() => import('./Terminal'), { ssr: false });
 
@@ -202,6 +204,28 @@ const SEVERITY_COLOR: Record<UsageMeter['severity'], string> = {
   danger: '#ef4444',
 };
 
+// A bordered badge, not a faint word: whether chats on an account can run
+// without a sign-in is the first thing the row has to say.
+const TOKEN_BADGE: Record<TokenState, string> = {
+  ok: 'border-ok/50 bg-ok/10 text-ok',
+  expiring: 'border-warn/70 bg-warn/15 text-warn',
+  expired: 'border-err/70 bg-err/15 text-err',
+  missing: 'border-err/70 bg-err/15 text-err',
+  rejected: 'border-err/70 bg-err/15 text-err',
+  none: 'border-border text-muted',
+};
+
+// The row's token action is a link on the meter line, coloured like the badge
+// it fixes, so it costs the row no extra line.
+const TOKEN_ACTION: Record<TokenState, string> = {
+  ok: 'text-muted hover:text-text',
+  expiring: 'text-warn',
+  expired: 'text-err',
+  missing: 'text-err',
+  rejected: 'text-err',
+  none: 'text-info',
+};
+
 /** The percent that matters for an account at a glance: its binding limit. */
 // The number shown here has to be the number rotation switches on, or the panel
 // reads "43%" next to an account whose agents are being refused. Both sides now
@@ -218,6 +242,7 @@ function AccountRow({
   masked,
   onSwitch,
   onRemove,
+  onToken,
 }: {
   account: Account;
   active: boolean;
@@ -226,80 +251,341 @@ function AccountRow({
   masked: boolean;
   onSwitch: () => void;
   onRemove: () => void;
+  onToken: () => void;
 }) {
   const meter = bindingMeter(usage);
   const color = meter ? SEVERITY_COLOR[meter.severity] : '#6b7280';
+  const token = tokenStatus(account);
+  // A dead sign-in only blocks the account when there is no token to run on:
+  // with one, chats keep working and only the meters go blind.
+  const deadLogin = Boolean(account.needsLogin) && !account.hasToken;
+  const expiresMs = account.tokenExpiresAt ? Date.parse(account.tokenExpiresAt) : NaN;
+  const until = Number.isFinite(expiresMs) ? formatTokenDate(expiresMs) : null;
+  const tokenTitle = account.needsLogin && account.hasToken
+    ? `${token.title} Its meters need a fresh sign-in; chats keep running on the token.`
+    : token.title;
   return (
     <div
       className={`group flex items-center gap-2 px-3 py-1.5 ${
         active ? 'bg-info/10 border-l-2 border-info' : 'border-l-2 border-transparent hover:bg-panel2/60'
       }`}
     >
-      <button
-        onClick={onSwitch}
-        disabled={active || busy || Boolean(account.needsLogin)}
-        className="flex-1 min-w-0 text-left disabled:cursor-default"
-        // Hover tooltips are a leak of their own: with emails hidden, they say
-        // what the button does without saying whose account it is.
-        title={
-          account.needsLogin
-            ? (masked ? 'This account was signed out by the server — remove it and add it again' : account.needsLogin)
-            : active ? 'This account is signed in' : masked ? 'Switch to this account' : `Switch to ${account.email || account.label || 'this account'}`
-        }
-      >
-        <div className="flex items-baseline gap-1.5">
-          <span
-            className={`text-[12px] truncate ${active ? 'text-text font-semibold' : 'text-text'} ${masked ? 'select-none' : ''}`}
+      <div className="flex-1 min-w-0 flex flex-col">
+        <button
+          onClick={onSwitch}
+          disabled={active || busy || deadLogin}
+          className="w-full min-w-0 text-left disabled:cursor-default"
+          // Hover tooltips are a leak of their own: with emails hidden, they say
+          // what the button does without saying whose account it is.
+          title={
+            deadLogin
+              ? (masked ? 'This account was signed out by the server — remove it and add it again' : account.needsLogin)
+              : active ? 'This account is signed in' : masked ? 'Switch to this account' : `Switch to ${account.email || account.label || 'this account'}`
+          }
+        >
+          {/* Three stacked lines — name, badges, meter — so no badge ever
+              squeezes the name: line 1 is the account and nothing else. */}
+          <div
+            className={`block text-[12px] leading-tight truncate ${active ? 'text-text font-semibold' : 'text-text'} ${masked ? 'select-none' : ''}`}
             style={masked ? MASK : undefined}
             // A user-given label replaces the address on the row, so the address
             // stays one hover away — masked rows keep it hidden.
             title={!masked && account.label && account.email ? account.email : undefined}
           >
             {account.label || account.email}
-          </span>
-          {active && (
-            <span className="text-[9px] uppercase tracking-wider text-info shrink-0">active</span>
-          )}
-          {/* A dead sign-in, as opposed to meters that merely could not be
-              read: rotation will never use this account again until it is
-              re-added, and the row has to say so rather than show "?". */}
-          {account.needsLogin && (
-            <span className="text-[9px] uppercase tracking-wider text-danger shrink-0">sign in again</span>
-          )}
-          {meter ? (
-            <span className="ml-auto text-[11px] font-mono shrink-0" style={{ color }}>
-              {meter.percent}%
-            </span>
-          ) : usage ? (
-            // Blind is not fine: an account whose meters cannot be read is
-            // exactly the account rotation can never switch to.
-            <span
-              className="ml-auto text-[11px] font-mono shrink-0 text-warning"
-              title={usage.ok ? 'No meters returned' : `Meters unreadable — ${usage.error}`}
-            >
-              ?
-            </span>
-          ) : null}
+          </div>
+          {/* A healthy token is the normal state, so it is a date, not a badge:
+              folded into ACTIVE on the active row, muted text elsewhere. Only
+              the states that need doing something about get a bordered badge. */}
+          <div className="mt-0.5 min-w-0 flex items-center gap-1.5 leading-none">
+            {active && (
+              <span
+                className="text-[9px] uppercase tracking-wider text-info shrink-0 whitespace-nowrap"
+                title={token.state === 'ok' ? tokenTitle : undefined}
+              >
+                active{token.state === 'ok' && until ? ` · until ${until}` : ''}
+              </span>
+            )}
+            {!active && token.state === 'ok' && until && (
+              <span className="text-[10px] text-muted shrink-0 whitespace-nowrap" title={tokenTitle}>
+                until {until}
+              </span>
+            )}
+            {token.state !== 'ok' && (
+              <span
+                className={`shrink-0 whitespace-nowrap rounded border px-1 py-px text-[9px] leading-tight uppercase tracking-wider font-semibold ${TOKEN_BADGE[token.state]}`}
+                title={tokenTitle}
+              >
+                {token.state === 'expiring' ? token.label.replace(/^token · /, '') : token.label}
+              </span>
+            )}
+            {/* A dead sign-in, as opposed to meters that merely could not be
+                read: rotation will never use this account again until it is
+                re-added, and the row has to say so rather than show "?". With a
+                token it is not dead — the badge's hover text says so instead. */}
+            {deadLogin && (
+              <span className="text-[9px] uppercase tracking-wider text-err shrink-0">sign in again</span>
+            )}
+            {meter ? (
+              <span className="ml-auto text-[11px] font-mono shrink-0" style={{ color }}>
+                {meter.percent}%
+              </span>
+            ) : usage ? (
+              // Blind is not fine: an account whose meters cannot be read is
+              // exactly the account rotation can never switch to.
+              <span
+                className="ml-auto text-[11px] font-mono shrink-0 text-warn"
+                title={usage.ok ? 'No meters returned' : `Meters unreadable — ${usage.error}`}
+              >
+                ?
+              </span>
+            ) : null}
+          </div>
+          {/* No provider/organisation/plan line: the section header above already
+              says Claude, and the org id and subscription word said nothing the
+              user acts on. */}
+        </button>
+        {/* The meter shares its line with the token action, so the fix costs
+            the row no extra line. Always on screen while the account has no
+            working token — it is the fix, not a menu item; a healthy token
+            only offers renewal on hover. */}
+        <div className="mt-1 flex items-center gap-2">
+          <div className="flex-1 h-1 rounded-full overflow-hidden" style={{ backgroundColor: 'rgba(255,255,255,0.08)' }}>
+            <div
+              className="h-full rounded-full"
+              style={{ width: `${meter?.percent ?? 0}%`, background: color }}
+            />
+          </div>
+          <button
+            onClick={onToken}
+            disabled={busy}
+            className={`shrink-0 text-[10px] leading-none font-semibold hover:underline underline-offset-2 disabled:opacity-40 ${TOKEN_ACTION[token.state]} ${
+              token.state === 'ok' ? 'opacity-0 group-hover:opacity-100 focus:opacity-100' : ''
+            }`}
+            title={
+              token.state === 'ok'
+                ? 'Make a fresh one-year token for this account'
+                : 'Make a one-year token so chats on this account never ask you to sign in'
+            }
+          >
+            {token.state === 'ok' ? 'Renew' : token.state === 'rejected' ? 'Generate again' : 'Generate token'}
+          </button>
         </div>
-        {/* No provider/organisation/plan line: the section header above already
-            says Claude, and the org id and subscription word said nothing the
-            user acts on. */}
-        <div className="mt-1 h-1 rounded-full overflow-hidden" style={{ backgroundColor: 'rgba(255,255,255,0.08)' }}>
-          <div
-            className="h-full rounded-full"
-            style={{ width: `${meter?.percent ?? 0}%`, background: color }}
-          />
-        </div>
-      </button>
+      </div>
       <button
         onClick={onRemove}
         disabled={busy}
-        className="shrink-0 opacity-0 group-hover:opacity-100 text-subtle hover:text-danger px-1 rounded disabled:opacity-30"
+        className="shrink-0 opacity-0 group-hover:opacity-100 text-subtle hover:text-err px-1 rounded disabled:opacity-30"
         title={masked ? 'Remove this account from the pool' : `Remove ${account.label || account.orgName || account.email} from the pool`}
         aria-label={masked ? 'Remove this account' : `Remove ${account.label || account.orgName || account.email}`}
       >
         ✕
       </button>
+    </div>
+  );
+}
+
+// How long the "a browser tab is opening" instruction stays the headline before
+// the step settles into waiting for the click.
+const TOKEN_OPENING_MS = 3000;
+
+type TokenPhase =
+  | { kind: 'opening' }
+  | { kind: 'waiting' }
+  | { kind: 'ok'; expiresAt: string | undefined }
+  | { kind: 'error'; message: string };
+
+const MINT_FALLBACK: Record<string, string> = {
+  cancelled: 'Cancelled — no token was made.',
+  timeout: 'Nothing came back from the browser in time.',
+  denied: 'The browser tab said no — the token was not made.',
+  mismatch: 'The browser was signed in to a different Claude account.',
+  network: 'Could not reach Claude to save the token.',
+  busy: 'A token is already being made for this account.',
+};
+
+/**
+ * Makes this account's one-year token: opens the browser, waits for the
+ * "Authorize" click, and says plainly how it went. Starts on mount — whoever
+ * shows it has already decided a token is wanted.
+ *
+ * One `mintAccountToken` call is the whole flow (it resolves when the browser
+ * part ends), so "opening" and "waiting" are the same call seen at two moments.
+ */
+function TokenStep({
+  accountId,
+  email,
+  masked = false,
+  onDone,
+  onSkip,
+}: {
+  accountId: string;
+  email: string;
+  masked?: boolean;
+  onDone: () => void;
+  onSkip?: () => void;
+}) {
+  const [phase, setPhase] = useState<TokenPhase>({ kind: 'opening' });
+  const [attempt, setAttempt] = useState(0);
+  const inFlight = useRef(false);
+
+  useEffect(() => {
+    let stale = false;
+    setPhase({ kind: 'opening' });
+    const settle = setTimeout(() => {
+      if (!stale) setPhase((p) => (p.kind === 'opening' ? { kind: 'waiting' } : p));
+    }, TOKEN_OPENING_MS);
+    // Deferred a tick: strict mode mounts, unmounts and remounts at once, and
+    // only the surviving mount may open a browser tab.
+    const start = setTimeout(() => {
+      inFlight.current = true;
+      void api().mintAccountToken(accountId).then(
+        (r) => {
+          inFlight.current = false;
+          if (stale) return;
+          setPhase(r.ok
+            ? { kind: 'ok', expiresAt: r.account.tokenExpiresAt }
+            : { kind: 'error', message: r.error || MINT_FALLBACK[r.reason] || 'The token could not be made.' });
+        },
+        (err: unknown) => {
+          inFlight.current = false;
+          if (!stale) setPhase({ kind: 'error', message: (err as Error)?.message || 'The token could not be made.' });
+        },
+      );
+    }, 0);
+    return () => {
+      stale = true;
+      clearTimeout(settle);
+      clearTimeout(start);
+      // Leaving mid-flow must not leave a browser flow listening behind us.
+      if (inFlight.current) void api().cancelMintAccountToken(accountId).catch(() => {});
+    };
+  }, [accountId, attempt]);
+
+  const cancel = () => { void api().cancelMintAccountToken(accountId).catch(() => {}); };
+  const who = <span className={masked ? 'select-none' : 'text-text'} style={masked ? MASK : undefined}>{email}</span>;
+  const pending = phase.kind === 'opening' || phase.kind === 'waiting';
+  const parsed = phase.kind === 'ok' && phase.expiresAt ? Date.parse(phase.expiresAt) : NaN;
+  const until = Number.isFinite(parsed) ? formatTokenDate(parsed) : 'about a year from now';
+
+  return (
+    <div className="flex flex-col items-center gap-3 text-center">
+      {pending && (
+        <>
+          <span className="inline-block w-6 h-6 rounded-full border-2 border-border border-t-accent animate-spin" aria-hidden />
+          <div className="text-[13px] text-text font-semibold">
+            {phase.kind === 'opening' ? 'Opening the browser…' : 'Waiting for you to click Authorize…'}
+          </div>
+          <div className="text-[11px] text-muted max-w-sm leading-relaxed">
+            A browser tab is opening — make sure it is signed in to claude.ai as {who}, then click{' '}
+            <strong className="text-text">Authorize</strong>.
+          </div>
+          <div className="flex gap-2">
+            <button
+              onClick={cancel}
+              className="text-[12px] px-3 py-1 rounded border border-border text-text hover:bg-panel2"
+            >
+              Cancel
+            </button>
+            {onSkip && (
+              <button onClick={onSkip} className="text-[12px] px-3 py-1 rounded text-muted hover:text-text hover:bg-panel2">
+                Skip for now
+              </button>
+            )}
+          </div>
+        </>
+      )}
+      {phase.kind === 'ok' && (
+        <>
+          <span className="text-[28px] leading-none text-ok" aria-hidden="true">✓</span>
+          <div className="text-[13px] text-text font-semibold">Token saved — valid until {until}.</div>
+          <div className="text-[11px] text-muted max-w-sm leading-relaxed">
+            Chats on this account never need to sign in again.
+          </div>
+          <button
+            onClick={onDone}
+            className="mt-1 text-[12px] px-3 py-1 rounded border border-ok/60 text-ok hover:bg-ok/10"
+          >
+            Done
+          </button>
+        </>
+      )}
+      {phase.kind === 'error' && (
+        <>
+          <div className="w-full max-w-sm px-3 py-2 rounded border border-err/50 bg-err/10 text-[12px] text-err leading-relaxed">
+            {maskEmails(phase.message, masked)}
+          </div>
+          <div className="flex gap-2">
+            <button
+              onClick={() => setAttempt((n) => n + 1)}
+              className="text-[12px] px-3 py-1 rounded border border-info text-info hover:bg-info/15"
+            >
+              Try again
+            </button>
+            {onSkip ? (
+              <button onClick={onSkip} className="text-[12px] px-3 py-1 rounded text-muted hover:text-text hover:bg-panel2">
+                Skip for now
+              </button>
+            ) : (
+              <button onClick={onDone} className="text-[12px] px-3 py-1 rounded border border-border text-text hover:bg-panel2">
+                Close
+              </button>
+            )}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+/** Plain-words version of what a token is, shared by the modal and the ⓘ. */
+const TOKEN_EXPLAINER =
+  'Generating a token gives this account a one-year key. Switching to the account puts that key into the slot Claude Code reads, so nothing ever has to refresh or sign in again; the stored sign-in is kept only to read its meters.';
+
+/** Generate or renew one account's token, from the row's button. */
+function TokenModal({
+  account,
+  masked,
+  onClose,
+}: {
+  account: Account;
+  masked: boolean;
+  onClose: () => void;
+}) {
+  // Escape always gets you out; the step's own cleanup cancels a flow in progress.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return;
+      e.preventDefault();
+      e.stopPropagation();
+      onClose();
+    };
+    window.addEventListener('keydown', onKey, true);
+    return () => window.removeEventListener('keydown', onKey, true);
+  }, [onClose]);
+
+  const name = account.label || account.email;
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-6">
+      <div className="w-full max-w-lg flex flex-col rounded-lg border border-border bg-panel overflow-hidden">
+        <div className="shrink-0 px-4 py-3 border-b border-border">
+          <div className="flex items-center gap-2">
+            <span className="w-1 h-4 rounded-full bg-accent shrink-0" aria-hidden="true" />
+            <span className="text-[13px] text-text font-semibold flex items-center gap-1.5 min-w-0">
+              <ProviderIcon provider="claude" size={13} />
+              <span className="shrink-0">Token for</span>
+              <span className={`truncate ${masked ? 'select-none' : ''}`} style={masked ? MASK : undefined}>{name}</span>
+            </span>
+            <button onClick={onClose} className="ml-auto shrink-0 text-[12px] text-subtle hover:text-text px-2 py-0.5 rounded hover:bg-panel2">
+              Close (Esc)
+            </button>
+          </div>
+          <p className="mt-2 text-[11px] text-muted leading-relaxed">{TOKEN_EXPLAINER}</p>
+        </div>
+        <div className="p-6">
+          <TokenStep accountId={account.id} email={account.email} masked={masked} onDone={onClose} />
+        </div>
+      </div>
     </div>
   );
 }
@@ -320,6 +606,7 @@ function AddAccountModal({
   email,
   cwd,
   provider = 'claude',
+  masked = false,
   onDone,
   onCancel,
 }: {
@@ -328,6 +615,7 @@ function AddAccountModal({
   email: string;
   cwd: string;
   provider?: AgentProvider;
+  masked?: boolean;
   onDone: () => void;
   onCancel: (reason?: string) => void;
 }) {
@@ -336,6 +624,9 @@ function AddAccountModal({
   // tab, so without an explicit "this worked" the user is left staring at a
   // terminal wondering whether anything happened.
   const [signedIn, setSignedIn] = useState<string | null>(null);
+  // The new Claude account, kept so the token step that follows the sign-in
+  // knows which account to make the token for.
+  const [added, setAdded] = useState<Account | null>(null);
   const settled = useRef(false);
 
   useEffect(() => {
@@ -359,6 +650,7 @@ function AddAccountModal({
         if (stop) return;
         if (r.status === 'ok') {
           settled.current = true;
+          setAdded(r.account);
           setSignedIn([r.account.label || r.account.orgName, r.account.email, r.account.subscriptionType].filter(Boolean).join(' · '));
         } else if (r.status === 'mismatch' || r.status === 'duplicate') {
           settled.current = true;
@@ -394,7 +686,7 @@ function AddAccountModal({
             <span className="w-1 h-4 rounded-full bg-accent shrink-0" aria-hidden="true" />
             <span className="text-[13px] text-text font-semibold flex items-center gap-1.5">
               <ProviderIcon provider={provider} size={13} />
-              {provider === 'codex' ? 'Sign in to Codex' : `Sign in as ${email}`}
+              {provider === 'codex' ? 'Sign in to Codex' : maskEmails(`Sign in as ${email}`, masked)}
             </span>
             <button
               onClick={() => (signedIn ? onDone() : onCancel())}
@@ -403,7 +695,12 @@ function AddAccountModal({
               {signedIn ? 'Close' : 'Cancel (Esc)'}
             </button>
           </div>
-          {signedIn ? (
+          {signedIn && added ? (
+            <p className="mt-2 text-[11px] text-muted leading-relaxed">
+              Signed in. One last step: make this account's one-year token, so its chats never stop
+              to ask you to sign in again.
+            </p>
+          ) : signedIn ? (
             <p className="mt-2 text-[11px] text-muted leading-relaxed">
               Done — nothing else is needed here.
             </p>
@@ -415,7 +712,7 @@ function AddAccountModal({
                 <strong className="text-text">once</strong>; switching to it later never opens a
                 browser.
               </p>
-              <p className="mt-1 text-[11px] text-warning leading-relaxed">
+              <p className="mt-1 text-[11px] text-warn leading-relaxed">
                 Your browser can only hold one ChatGPT session, so if you are already signed in as
                 another account, use an incognito window or a separate Chrome profile — otherwise
                 this will authorise the account you are already signed in as.
@@ -428,7 +725,7 @@ function AddAccountModal({
                 terminal below if it asks. This happens <strong className="text-text">once</strong>{' '}
                 for this account; switching to it later never opens a browser.
               </p>
-              <p className="mt-1 text-[11px] text-warning leading-relaxed">
+              <p className="mt-1 text-[11px] text-warn leading-relaxed">
                 Your browser can only hold one claude.ai session, so if you are already signed in as
                 another account, use an incognito window or a separate Chrome profile — otherwise
                 this will authorise the account you are already signed in as. For memberships sharing
@@ -440,13 +737,21 @@ function AddAccountModal({
 
         {error ? (
           <div className="p-4 flex-1 min-h-0 overflow-y-auto">
-            <div className="text-[12px] text-danger leading-relaxed">{error}</div>
+            <div className="text-[12px] text-err leading-relaxed">{error}</div>
             <button
               onClick={() => onCancel(error)}
               className="mt-3 text-[12px] px-3 py-1 rounded border border-border text-text hover:bg-panel2"
             >
               Close
             </button>
+          </div>
+        ) : signedIn && added ? (
+          <div className="p-6 flex-1 min-h-0 overflow-y-auto flex flex-col items-center justify-center gap-4 text-center">
+            <div className="text-[12px] text-muted">
+              <span className="text-ok" aria-hidden="true">✓ </span>
+              Signed in as {maskEmails(signedIn, masked)}
+            </div>
+            <TokenStep accountId={added.id} email={added.email} masked={masked} onDone={onDone} onSkip={onDone} />
           </div>
         ) : signedIn ? (
           <div className="p-6 flex-1 min-h-0 flex flex-col items-center justify-center gap-3 text-center">
@@ -531,7 +836,7 @@ function CodexRow({
       <button
         onClick={onRemove}
         disabled={busy}
-        className="shrink-0 opacity-0 group-hover:opacity-100 text-subtle hover:text-danger px-1 rounded disabled:opacity-30"
+        className="shrink-0 opacity-0 group-hover:opacity-100 text-subtle hover:text-err px-1 rounded disabled:opacity-30"
         title={masked ? 'Remove this Codex sign-in' : `Remove ${name}`}
         aria-label={masked ? 'Remove this Codex sign-in' : `Remove ${name}`}
       >
@@ -625,6 +930,8 @@ export default function AccountsPanel() {
   const [pending, setPending] = useState<{ pendingId: string; shellId: string; email: string; cwd: string; provider: AgentProvider } | null>(null);
   const [policy, setPolicy] = useState<RotationPolicy>({ enabled: false, threshold: 95, resumeOnLimit: true });
   const [rotationStatus, setRotationStatus] = useState<RotationStatus | null>(null);
+  // The account whose token is being made from its row button, if any.
+  const [tokenFor, setTokenFor] = useState<Account | null>(null);
   const mounted = useRef(true);
 
   // Declared before every other effect here on purpose: effects run in source
@@ -884,6 +1191,7 @@ export default function AccountsPanel() {
                     masked={masked}
                     onSwitch={() => switchTo(account.id)}
                     onRemove={() => remove(account)}
+                    onToken={() => setTokenFor(account)}
                   />
                 ))}
 
@@ -891,12 +1199,12 @@ export default function AccountsPanel() {
                     silently on a timer; this banner is only for the residue that
                     needs a human, so it stays absent essentially always. */}
                 {snapshot.authIssue && (
-                  <div className="mx-3 my-1.5 px-2 py-1.5 rounded border border-warning/40 bg-warning/10 text-[11px] text-warning leading-relaxed">
+                  <div className="mx-3 my-1.5 px-2 py-1.5 rounded border border-warn/40 bg-warn/10 text-[11px] text-warn leading-relaxed">
                     <div>{maskEmails(snapshot.authIssue, masked)}</div>
                     <button
                       onClick={() => void repair()}
                       disabled={repairing}
-                      className="mt-1 text-[11px] px-2 py-0.5 rounded border border-warning/50 text-warning hover:bg-warning/15 disabled:opacity-40"
+                      className="mt-1 text-[11px] px-2 py-0.5 rounded border border-warn/50 text-warn hover:bg-warn/15 disabled:opacity-40"
                     >
                       {repairing ? 'Checking…' : 'Check again'}
                     </button>
@@ -904,7 +1212,7 @@ export default function AccountsPanel() {
                 )}
 
                 {error && (
-                  <div className="mx-3 my-1.5 px-2 py-1.5 rounded border border-danger/40 bg-danger/10 text-[11px] text-danger leading-relaxed">
+                  <div className="mx-3 my-1.5 px-2 py-1.5 rounded border border-err/40 bg-err/10 text-[11px] text-err leading-relaxed">
                     {maskEmails(error, masked)}
                   </div>
                 )}
@@ -986,6 +1294,8 @@ export default function AccountsPanel() {
                           Runs in the background even with the window closed, so an overnight run
                           rolls onto the next Claude account in this pool instead of hitting the
                           wall. It never crosses to Codex: a chat keeps the provider it started on.
+                          An account with a token can be switched to even when its stored sign-in has
+                          lapsed — its key goes into the signed-in slot.
                         </InfoHint>
                       </span>
                     </label>
@@ -1012,7 +1322,7 @@ export default function AccountsPanel() {
                       </span>
                     </label>
                     {rotationStatus?.disabledReason && (
-                      <p className="mt-1 text-[10px] text-danger leading-relaxed">
+                      <p className="mt-1 text-[10px] text-err leading-relaxed">
                         {maskEmails(rotationStatus.disabledReason, masked)}
                       </p>
                     )}
@@ -1051,7 +1361,7 @@ export default function AccountsPanel() {
                 ))}
 
                 {codexError && (
-                  <div className="mx-3 my-1.5 px-2 py-1.5 rounded border border-danger/40 bg-danger/10 text-[11px] text-danger leading-relaxed">
+                  <div className="mx-3 my-1.5 px-2 py-1.5 rounded border border-err/40 bg-err/10 text-[11px] text-err leading-relaxed">
                     {maskEmails(codexError, masked)}
                   </div>
                 )}
@@ -1102,6 +1412,7 @@ export default function AccountsPanel() {
           email={pending.email}
           cwd={pending.cwd}
           provider={pending.provider}
+          masked={masked}
           // Either way the login shell has done its job — leaving it running
           // would leak a PTY per account added.
           onDone={() => {
@@ -1120,6 +1431,17 @@ export default function AccountsPanel() {
             else void api().cancelAddAccount(pendingId).catch(() => {});
             void loadAccounts();
             if (provider === 'codex') void loadCodex();
+          }}
+        />
+      )}
+
+      {tokenFor && (
+        <TokenModal
+          account={tokenFor}
+          masked={masked}
+          onClose={() => {
+            setTokenFor(null);
+            void loadAccounts();
           }}
         />
       )}

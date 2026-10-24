@@ -10,3 +10,4 @@ renderer/.next-dev
 .agentsflow/
 
 SETUP.local.md
+.dist-scoped/

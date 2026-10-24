@@ -9,6 +9,7 @@ import {
   createVaultDir,
   evaluateLogin,
   isEmailAddress,
+  isTokenBlob,
   mergeOAuthAccount,
   mergeOAuthInto,
   newerCreds,
@@ -19,6 +20,7 @@ import {
   serviceNameFor,
   slugForEmail,
   TokenRefreshError,
+  tokenCredsFor,
 } from './accounts';
 import type { OAuthCredentials } from './accounts';
 import type { Account } from '../shared/types';
@@ -406,4 +408,37 @@ test('repeated-email login attempts use independent vaults and keychain services
 
 test('API-key authentication cannot complete a subscription-vault login', () => {
   assert.equal(parseAuthStatus(JSON.stringify({ loggedIn: true, authMethod: 'api_key' })).loggedIn, false);
+});
+
+// ---------------------------------------------------------------------------
+// Token-slot mode — what the CLI reads for an account with a one-year token
+// ---------------------------------------------------------------------------
+
+test('tokenCredsFor: carries no refresh token, so nothing can ever race it', () => {
+  const c = tokenCredsFor({ tokenExpiresAt: '2027-10-24T00:00:00.000Z' }, 'tok',
+    { accessToken: 'oauth', refreshToken: 'refresh', refreshTokenExpiresAt: 1, rateLimitTier: 'tier-x', subscriptionType: 'pro' });
+  assert.equal(c.accessToken, 'tok');
+  assert.equal(c.refreshToken, undefined);
+  assert.equal(c.refreshTokenExpiresAt, undefined);
+  assert.equal(c.rateLimitTier, 'tier-x');
+  assert.equal(c.subscriptionType, 'pro', 'the vault fills in what the account does not record');
+});
+
+test('tokenCredsFor: expiry comes from tokenExpiresAt, else a year from now', () => {
+  assert.equal(tokenCredsFor({ tokenExpiresAt: '2027-10-24T00:00:00.000Z' }, 't').expiresAt, Date.parse('2027-10-24T00:00:00.000Z'));
+  const now = 1_000_000;
+  assert.equal(tokenCredsFor({}, 't', null, now).expiresAt, now + 365 * 864e5);
+  assert.equal(tokenCredsFor({ tokenExpiresAt: 'garbage' }, 't', null, now).expiresAt, now + 365 * 864e5);
+});
+
+test('tokenCredsFor: scopes default to inference-only; the account outranks the vault', () => {
+  assert.deepEqual(tokenCredsFor({}, 't').scopes, ['user:inference']);
+  assert.deepEqual(tokenCredsFor({ tokenScopes: ['user:inference', 'user:profile'] }, 't').scopes, ['user:inference', 'user:profile']);
+  assert.equal(tokenCredsFor({ subscriptionType: 'max' }, 't', { accessToken: 'a', subscriptionType: 'pro' }).subscriptionType, 'max');
+});
+
+test('isTokenBlob: a refresh-less blob is a token; a login or an empty slot is not', () => {
+  assert.equal(isTokenBlob({ accessToken: 'tok', expiresAt: 1 }), true);
+  assert.equal(isTokenBlob({ accessToken: 'a', refreshToken: 'r' }), false);
+  assert.equal(isTokenBlob(null), false);
 });

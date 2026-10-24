@@ -402,10 +402,17 @@ const freshenDistrustedAt = new Map<string, number>();
  * every case a caller's `activeId` could be wrong about.
  */
 async function holdsMainSlot(account: Account, creds: OAuthCredentials): Promise<boolean> {
+  const mainCreds = parseOAuth(await readSlotRaw(MAIN_SERVICE));
+  // Token-slot mode: a main slot with no refresh token means no CLI process
+  // holds ANY refresh family, so there is nobody to race and the app is the
+  // vault's only refresher. (A main copy identical to these creds is still
+  // refused below — it is the same refresh-less login, and there is nothing a
+  // refresh could buy it.) See "Token-slot mode".
+  if (isTokenBlob(mainCreds) && mainCreds!.accessToken !== creds.accessToken) return false;
   const signedInAs = cachedLoginIdentity();
   if (signedInAs.accountUuid && signedInAs.accountUuid === account.accountUuid &&
       compareMembership(signedInAs, account) !== 'different') return true;
-  return sameCreds(parseOAuth(await readSlotRaw(MAIN_SERVICE)), creds);
+  return sameCreds(mainCreds, creds);
 }
 
 /**
@@ -793,6 +800,70 @@ export function evaluateLogin(opts: {
 }
 
 // ---------------------------------------------------------------------------
+// Token-slot mode — a long-lived token in the main slot instead of a login
+// ---------------------------------------------------------------------------
+// When an account has a long-lived token the main slot gets THAT instead of its
+// OAuth creds: {accessToken: token, expiresAt: +1y, scopes, no refreshToken}.
+// The CLI never refreshes a token a year from expiry, so nothing races. The
+// vault keeps the account's refreshing login purely for meters/identity, and
+// the app is its only refresher.
+//
+// Everything above was written for a main slot that is a COPY of the vault, so
+// three things go wrong the moment it is not, and each has its rule:
+//   • Adopt-into-vault. The token blob's +1y expiry makes `newerCreds` call main
+//     the newer copy, and the reconcile tick would mirror it into the vault —
+//     overwriting the only copy of that account's refresh family. So a tokenised
+//     account is recognised (main holds its token → in-sync, nothing written)
+//     before `newerCreds` is ever consulted, and no path copies a refresh-less
+//     main blob into a vault: sync-back and adoption both need a refresh token.
+//   • Frozen freshen. `holdsMainSlot` answers true for the active account by
+//     identity, so the vault would never be refreshed again — the CLI no longer
+//     does it either — and by night the meters go blind and rotation switches
+//     blind. A refresh-less main slot therefore answers "nobody races the vault"
+//     there, and keep-warm sends the active vault down the standby branch.
+//   • Re-install loop. If the server refuses the token the CLI clears the slot,
+//     and the timer would put the same dead token back every minute. Main found
+//     EMPTY within TOKEN_REINSTALL_WINDOW_MS of our own install is the CLI's
+//     verdict: `token-rejected`, and main.ts stops offering the token (tokenFor →
+//     undefined), so the next tick repairs from the vault exactly as today.
+// The timer only ever installs over a main slot that provably belongs to this
+// account, or over an empty one. Without a token every path is today's.
+
+const TOKEN_REINSTALL_WINDOW_MS = 10 * 60 * 1000;
+const TOKEN_LIFETIME_MS = 365 * 24 * 60 * 60 * 1000;
+
+let tokenSource: (accountId: string) => string | undefined = () => undefined;
+/** When we last wrote each account's token into the main slot. */
+const tokenInstalledAt = new Map<string, number>();
+
+/** Injected once by main (llt.tokenFor). Default: () => undefined ⇒ every path behaves exactly as today. */
+export function configureTokenSource(fn: (accountId: string) => string | undefined): void {
+  tokenSource = fn;
+  tokenInstalledAt.clear();
+}
+
+/** Pure. The blob the CLI reads for a tokenised account. No refreshToken, no refreshTokenExpiresAt. */
+export function tokenCredsFor(
+  account: Pick<Account, 'tokenExpiresAt' | 'tokenScopes' | 'subscriptionType'>,
+  token: string,
+  vaultCreds?: OAuthCredentials | null,
+  now = Date.now(),
+): OAuthCredentials {
+  return {
+    accessToken: token,
+    expiresAt: Date.parse(account.tokenExpiresAt ?? '') || now + TOKEN_LIFETIME_MS,
+    scopes: account.tokenScopes ?? ['user:inference'],
+    subscriptionType: account.subscriptionType ?? vaultCreds?.subscriptionType,
+    rateLimitTier: vaultCreds?.rateLimitTier,
+  };
+}
+
+/** Pure. A main-slot blob the CLI cannot refresh — a long-lived token. */
+export function isTokenBlob(creds: OAuthCredentials | null): boolean {
+  return Boolean(creds && !creds.refreshToken);
+}
+
+// ---------------------------------------------------------------------------
 // Switching
 // ---------------------------------------------------------------------------
 
@@ -821,19 +892,25 @@ async function doSwitch(targetId: string, deps: SwitchDeps): Promise<Account> {
   const target = deps.accounts.find((a) => a.id === targetId);
   if (!target) throw new Error('account not found');
 
+  const token = tokenSource(target.id);
+
   // Switching to the account already in the main slot is a reconcile, not a
   // switch: its vault copy may well be the older of the two, and installing that
   // over the CLI's live token would break the very session doing the asking.
-  if (isCurrentMembership(target)) {
+  // With a token that is not in main yet (a token just generated for the active
+  // account) it IS a switch — the one that installs the token.
+  if (isCurrentMembership(target) &&
+      (!token || parseOAuth(await readSlotRaw(MAIN_SERVICE))?.accessToken === token)) {
     const result = await reconcileActive(target, deps.accounts);
-    if (!['in-sync', 'adopted-main', 'repaired-main'].includes(result.outcome)) throw new Error('Could not verify the current Claude membership. Check its sign-in before switching.');
+    if (!['in-sync', 'adopted-main', 'repaired-main', 'installed-token'].includes(result.outcome)) throw new Error('Could not verify the current Claude membership. Check its sign-in before switching.');
     deps.onSwitched(target);
     return target;
   }
 
   const targetService = serviceNameFor(target.configDir);
   let targetCreds = parseOAuth(await readSlotRaw(targetService));
-  if (!targetCreds) {
+  // A token switches without the stored login — that only feeds the meters.
+  if (!targetCreds && !token) {
     throw new Error(`${target.email} is not signed in any more — remove it and add it again.`);
   }
 
@@ -841,11 +918,13 @@ async function doSwitch(targetId: string, deps: SwitchDeps): Promise<Account> {
   //    outgoing account. Losing it would strand that vault on a spent token.
   //    Only when main is genuinely the newer copy, though — a main slot that has
   //    gone stale must not be allowed to overwrite live credentials on its way
-  //    out, which would turn one broken account into two.
+  //    out, which would turn one broken account into two. A token blob in main
+  //    is never synced back: it has no refresh family to preserve, and copying
+  //    it would overwrite the outgoing vault's only one (see Token-slot mode).
   const mainBlob = await readSlotRaw(MAIN_SERVICE);
   const mainCreds = parseOAuth(mainBlob);
   const outgoing = deps.accounts.find((a) => isCurrentMembership(a));
-  if (mainCreds && outgoing && outgoing.id !== target.id) {
+  if (mainCreds?.refreshToken && outgoing && (outgoing.id !== target.id || token)) {
     const outgoingService = serviceNameFor(outgoing.configDir);
     const outgoingVault = parseOAuth(await readSlotRaw(outgoingService));
     if (newerCreds(mainCreds, outgoingVault) === 'main') {
@@ -857,26 +936,30 @@ async function doSwitch(targetId: string, deps: SwitchDeps): Promise<Account> {
   if (mainBlob) await writeSlotRaw(BACKUP_SERVICE, mainBlob);
 
   // 3. Refresh if the stored token is stale. Abort the whole switch on failure
-  //    so we never install credentials that would 401 on first use.
-  targetCreds = await ensureFresh(target, targetCreds);
+  //    so we never install credentials that would 401 on first use. A token
+  //    needs no refresh, and the vault login is not what gets installed.
+  if (!token) targetCreds = await ensureFresh(target, targetCreds!);
 
   // 4. Write — merging, so MCP server tokens in the same blob survive.
-  await writeSlotRaw(MAIN_SERVICE, mergeOAuthInto(mainBlob, targetCreds));
+  const installed = token ? tokenCredsFor(target, token, targetCreds) : targetCreds!;
+  await writeSlotRaw(MAIN_SERVICE, mergeOAuthInto(mainBlob, installed));
 
   // 5. Verify the slot really holds what we intended before committing.
   const readback = parseOAuth(await readSlotRaw(MAIN_SERVICE));
-  if (!readback || readback.accessToken !== targetCreds.accessToken) {
+  if (!readback || readback.accessToken !== installed.accessToken) {
     if (mainBlob) await writeSlotRaw(MAIN_SERVICE, mainBlob); // put it back
     throw new Error('keychain write could not be verified — nothing was changed');
   }
 
   // 6. Swap the recorded identity so the CLI agrees about who is signed in.
   await patchMainConfigIdentity(target.configDir);
+  if (token) tokenInstalledAt.set(target.id, Date.now());
 
   console.log('[agentsflow][accounts] switched', {
     to: target.email,
     uuid: target.accountUuid,
     from: outgoing?.email ?? '(pre-existing login)',
+    ...(token ? { installed: true } : {}),
   });
   deps.onSwitched(target);
   return target;
@@ -935,12 +1018,23 @@ export function newerCreds(
 }
 
 export type ReconcileResult =
-  /** The two copies already agree — the overwhelmingly common case, and free. */
-  | { outcome: 'in-sync' }
+  /**
+   * The two copies already agree — the overwhelmingly common case, and free.
+   * `onToken`: main holds this account's long-lived token (nothing written,
+   * vault untouched).
+   */
+  | { outcome: 'in-sync'; onToken?: true }
   /** The CLI rotated the tokens; the vault has been re-mirrored from main. */
   | { outcome: 'adopted-main' }
   /** Main was stale or wiped; the live credentials have been put back. */
   | { outcome: 'repaired-main' }
+  /** Main now holds the account's long-lived token (written from the timer). */
+  | { outcome: 'installed-token' }
+  /**
+   * Main found EMPTY within TOKEN_REINSTALL_WINDOW_MS of our install — the CLI
+   * cleared the token it was refused. The caller must mark the token rejected.
+   */
+  | { outcome: 'token-rejected'; error: string }
   /** Main is stale or wiped AND the vault copy is dead too — only a sign-in fixes this. */
   | { outcome: 'revoked'; error: string }
   /** Main belongs to a login that is not the account we think is active. */
@@ -974,6 +1068,9 @@ async function doReconcile(account: Account, pool: Account[], getLoginIdentity: 
   const mainBlob = await readSlotRaw(MAIN_SERVICE);
   const mainCreds = parseOAuth(mainBlob);
   const vaultCreds = parseOAuth(await readSlotRaw(vaultService));
+
+  const token = tokenSource(account.id);
+  if (token) return reconcileToken(account, pool, getLoginIdentity, token, mainBlob, mainCreds, vaultCreds);
 
   const source = newerCreds(mainCreds, vaultCreds);
   // Tested before the agreement check below: two empty slots technically agree,
@@ -1042,6 +1139,75 @@ async function doReconcile(account: Account, pool: Account[], getLoginIdentity: 
       return { outcome: 'repaired-main' };
     }
   }
+}
+
+/**
+ * doReconcile for an account with a long-lived token. The literal rule order is
+ * the design (see "Token-slot mode"): recognise the token before anything can
+ * compare expiries, never install over a login we cannot prove is this
+ * account's, and read an emptied slot right after an install as a refusal.
+ */
+async function reconcileToken(
+  account: Account,
+  pool: Account[],
+  getLoginIdentity: () => ClaudeMembership,
+  token: string,
+  mainBlob: Record<string, unknown> | null,
+  mainCreds: OAuthCredentials | null,
+  vaultCreds: OAuthCredentials | null,
+): Promise<ReconcileResult> {
+  // 1. Already running on it — read-only, as the happy path must be.
+  if (mainCreds?.accessToken === token) return { outcome: 'in-sync', onToken: true };
+
+  // 2. Another pooled account's token.
+  if (mainCreds) {
+    const tokenOwner = pool.find((a) => a.id !== account.id && tokenSource(a.id) === mainCreds.accessToken);
+    if (tokenOwner) return { outcome: 'foreign', ownerAccountId: tokenOwner.id };
+  }
+
+  // 3. A login we cannot prove is this account's is never installed over.
+  const login = getLoginIdentity();
+  if (mainCreds && compareMembership(login, account) !== 'same') {
+    const owner = pool.find((a) => compareMembership(a, login) === 'same');
+    return { outcome: 'foreign', ownerAccountId: owner?.id };
+  }
+
+  // 4. Emptied right after our install: the CLI threw the token out.
+  const installedAt = tokenInstalledAt.get(account.id);
+  if (!mainCreds && installedAt !== undefined && Date.now() - installedAt < TOKEN_REINSTALL_WINDOW_MS) {
+    tokenInstalledAt.delete(account.id);
+    console.warn('[agentsflow][accounts] the signed-in slot was cleared right after its token was installed', {
+      email: account.email,
+      outcome: 'token-rejected',
+    });
+    return {
+      outcome: 'token-rejected',
+      error: `Claude Code refused ${account.email}'s one-year token and cleared it — chats are back on the stored sign-in. Generate the token again.`,
+    };
+  }
+
+  // 5. Main is this account's refreshing login: if it is the newer copy, its
+  //    refresh family is the live one — preserve it before the token replaces it.
+  let meterCreds = vaultCreds;
+  if (mainCreds?.refreshToken && newerCreds(mainCreds, vaultCreds) === 'main') {
+    await writeOAuthToSlot(serviceNameFor(account.configDir), mainCreds);
+    meterCreds = mainCreds;
+  }
+
+  // 6. Install, verify, and say who is signed in.
+  await writeSlotRaw(MAIN_SERVICE, mergeOAuthInto(mainBlob, tokenCredsFor(account, token, meterCreds)));
+  const readback = parseOAuth(await readSlotRaw(MAIN_SERVICE));
+  if (!readback || readback.accessToken !== token) {
+    return { outcome: 'failed', error: 'The keychain would not accept the one-year token.' };
+  }
+  await patchMainConfigIdentity(account.configDir);
+  tokenInstalledAt.set(account.id, Date.now());
+  console.log('[agentsflow][accounts] put the one-year token into the signed-in slot', {
+    email: account.email,
+    outcome: 'installed-token',
+    installed: true,
+  });
+  return { outcome: 'installed-token' };
 }
 
 // The loop. Runs in the main process so it keeps the login healthy with the
@@ -1151,7 +1317,10 @@ async function keepActiveWarm(account: Account): Promise<void> {
 export async function keepWarm(accounts: Account[], activeId?: string | null): Promise<void> {
   for (const account of accounts) {
     try {
-      if (activeId && account.id === activeId) {
+      // The active account is mirrored, not rotated — unless main holds a token,
+      // in which case no CLI refreshes its vault any more and it is kept warm
+      // like a standby one (holdsMainSlot lets it through; see Token-slot mode).
+      if (activeId && account.id === activeId && !isTokenBlob(parseOAuth(await readSlotRaw(MAIN_SERVICE)))) {
         await keepActiveWarm(account);
         continue;
       }

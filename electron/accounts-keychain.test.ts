@@ -18,7 +18,7 @@ import { execFileSync } from 'child_process';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { freshenAccountToken, keepWarm, reconcileActive, serviceNameFor } from './accounts';
+import { configureTokenSource, freshenAccountToken, keepWarm, reconcileActive, serviceNameFor, switchTo } from './accounts';
 import type { OAuthCredentials } from './accounts';
 import type { Account } from '../shared/types';
 
@@ -40,6 +40,10 @@ describe('credential reconciliation (keychain)', { skip: keychainUsable() ? fals
   let vaultDir: string;
   let VAULT: string;
   let account: Account;
+  // A second vault, for the switch cases (created lazily by them).
+  let vaultDir2 = '';
+  let VAULT2 = '';
+  const BACKUP = 'Claude Code-credentials-agentsflow-backup';
 
   const write = (service: string, blob: unknown) =>
     execFileSync('security', ['add-generic-password', '-U', '-a', TEST_KEYCHAIN_ACCOUNT, '-s', service, '-w', JSON.stringify(blob)]);
@@ -71,9 +75,13 @@ describe('credential reconciliation (keychain)', { skip: keychainUsable() ? fals
   });
 
   after(() => {
+    configureTokenSource(() => undefined);
     drop(MAIN);
     drop(VAULT);
+    drop(BACKUP);
+    if (VAULT2) drop(VAULT2);
     try { fs.rmSync(vaultDir, { recursive: true, force: true }); } catch { /* ignore */ }
+    if (vaultDir2) try { fs.rmSync(vaultDir2, { recursive: true, force: true }); } catch { /* ignore */ }
     if (realUser === undefined) delete process.env.USER;
     else process.env.USER = realUser;
   });
@@ -295,5 +303,178 @@ describe('credential reconciliation (keychain)', { skip: keychainUsable() ? fals
     });
 
     assert.equal(tried, true, 'the rejection-driven pass must still reach the endpoint');
+  });
+
+  // -------------------------------------------------------------------------
+  // Token-slot mode — the main slot holds a one-year token, not a login
+  // -------------------------------------------------------------------------
+  // The token source is injected exactly as main.ts does it; every case sets
+  // its own (which also forgets earlier installs), and `after` puts back the
+  // default that makes every other case above behave as before.
+
+  const tokens = new Map<string, string>();
+  const tokenMode = (entries: Array<[string, string]>) => {
+    tokens.clear();
+    for (const [id, t] of entries) tokens.set(id, t);
+    configureTokenSource((id) => tokens.get(id));
+  };
+  const me = () => ({ accountUuid: account.accountUuid, orgId: account.orgId });
+  const YEAR = Date.now() + 365 * 864e5;
+  const MCP = { 'srv|h': { accessToken: 'mcp-keep' } };
+
+  /** A clean second vault for a switch target. Never has a .claude.json, so no switch here touches ~/.claude.json. */
+  const secondVault = () => {
+    if (!vaultDir2) {
+      vaultDir2 = fs.mkdtempSync(path.join(os.tmpdir(), 'agentsflow-keychain-test2-'));
+      VAULT2 = serviceNameFor(vaultDir2);
+    }
+    drop(VAULT2);
+    return vaultDir2;
+  };
+
+  test('token: main already on the token is in-sync and nothing is written', async () => {
+    tokenMode([[account.id, 'TOKEN-A']]);
+    // Off-contract expiry and scopes: any rewrite of main would normalise them.
+    write(MAIN, { claudeAiOauth: { accessToken: 'TOKEN-A', expiresAt: 123, scopes: ['marker'] }, mcpOAuth: MCP });
+    write(VAULT, { claudeAiOauth: creds('vault-access', 'refresh-VAULT', 0) });
+    const mainBefore = read(MAIN);
+    const vaultBefore = read(VAULT);
+
+    const result = await reconcileActive(account, [account], me);
+
+    assert.deepEqual(result, { outcome: 'in-sync', onToken: true });
+    assert.deepEqual(read(MAIN), mainBefore);
+    assert.deepEqual(read(VAULT), vaultBefore, 'the +1y token must never be adopted into the vault');
+  });
+
+  test('token: main holding the newer login keeps its refresh family in the vault, then gets the token', async () => {
+    tokenMode([[account.id, 'TOKEN-A']]);
+    write(MAIN, { claudeAiOauth: creds('cli-new', 'refresh-CLI', 100), mcpOAuth: MCP });
+    write(VAULT, { claudeAiOauth: creds('access-old', 'refresh-OLD', 0) });
+
+    const result = await reconcileActive(account, [account], me);
+
+    assert.equal(result.outcome, 'installed-token');
+    assert.equal(read(VAULT).claudeAiOauth.refreshToken, 'refresh-CLI', 'the live refresh family must survive the install');
+    const main = read(MAIN);
+    assert.equal(main.claudeAiOauth.accessToken, 'TOKEN-A');
+    assert.equal(main.claudeAiOauth.refreshToken, undefined);
+    assert.ok(Math.abs(main.claudeAiOauth.expiresAt - YEAR) < 864e5);
+    assert.equal(main.mcpOAuth['srv|h'].accessToken, 'mcp-keep');
+
+    // And it settles: the next tick is read-only.
+    assert.deepEqual(await reconcileActive(account, [account], me), { outcome: 'in-sync', onToken: true });
+  });
+
+  test('token: an empty main gets the token; emptied again right after, it reads as rejected', async () => {
+    tokenMode([[account.id, 'TOKEN-A']]);
+    write(MAIN, { mcpOAuth: MCP });
+    write(VAULT, { claudeAiOauth: creds('survivor', 'refresh-SURVIVOR', 0) });
+
+    assert.equal((await reconcileActive(account, [account], me)).outcome, 'installed-token');
+    assert.equal(read(MAIN).claudeAiOauth.accessToken, 'TOKEN-A');
+
+    // What the CLI does with a token the server refuses: it clears the slot.
+    write(MAIN, { mcpOAuth: MCP });
+    const rejected = await reconcileActive(account, [account], me);
+    assert.equal(rejected.outcome, 'token-rejected');
+    assert.equal(read(MAIN).claudeAiOauth, undefined, 'the dead token must not be put back');
+
+    // main.ts then stops offering it, and the next tick is today's repair.
+    tokens.delete(account.id);
+    assert.equal((await reconcileActive(account, [account], me)).outcome, 'repaired-main');
+    assert.equal(read(MAIN).claudeAiOauth.refreshToken, 'refresh-SURVIVOR');
+  });
+
+  test('token: main on another pooled account\'s token is foreign, with that owner', async () => {
+    const other: Account = { ...account, id: 'other-tok', accountUuid: 'other-person', email: 'other@gmail.com' };
+    tokenMode([[account.id, 'TOKEN-A'], [other.id, 'TOKEN-B']]);
+    write(MAIN, { claudeAiOauth: { accessToken: 'TOKEN-B', expiresAt: YEAR } });
+    write(VAULT, { claudeAiOauth: creds('vault-access', 'refresh-VAULT', 0) });
+
+    const result = await reconcileActive(account, [account, other], me);
+
+    assert.deepEqual(result, { outcome: 'foreign', ownerAccountId: 'other-tok' });
+    assert.equal(read(MAIN).claudeAiOauth.accessToken, 'TOKEN-B');
+    assert.equal(read(VAULT).claudeAiOauth.accessToken, 'vault-access');
+  });
+
+  test('token: switching to a tokenised account whose stored sign-in is gone still works', async () => {
+    const target: Account = {
+      ...account, id: 'switch-target', accountUuid: 'switch-person', email: 'target@gmail.com',
+      configDir: secondVault(), tokenExpiresAt: '2027-10-24T00:00:00.000Z', tokenScopes: ['user:inference', 'user:profile'],
+    };
+    tokenMode([[target.id, 'TOKEN-T']]);
+    write(MAIN, { claudeAiOauth: creds('prev', 'refresh-PREV', 0), mcpOAuth: MCP });
+    let switched = '';
+
+    await switchTo(target.id, { accounts: [target], activeId: null, onSwitched: (a) => { switched = a.id; } });
+
+    assert.equal(switched, 'switch-target');
+    const main = read(MAIN);
+    assert.equal(main.claudeAiOauth.accessToken, 'TOKEN-T');
+    assert.equal(main.claudeAiOauth.refreshToken, undefined);
+    assert.equal(main.claudeAiOauth.expiresAt, Date.parse('2027-10-24T00:00:00.000Z'));
+    assert.deepEqual(main.claudeAiOauth.scopes, ['user:inference', 'user:profile']);
+    assert.equal(main.mcpOAuth['srv|h'].accessToken, 'mcp-keep');
+    assert.equal(read(VAULT2), null, 'the empty vault stays empty');
+  });
+
+  // The outgoing account is found the way doSwitch finds it — by the recorded
+  // login in ~/.claude.json, read here (never written) for its uuid and org.
+  const realLogin = (() => {
+    try {
+      const a = JSON.parse(fs.readFileSync(path.join(os.homedir(), '.claude.json'), 'utf8'))?.oauthAccount;
+      return typeof a?.accountUuid === 'string' && typeof a?.organizationUuid === 'string'
+        ? { accountUuid: a.accountUuid as string, orgId: a.organizationUuid as string } : null;
+    } catch { return null; }
+  })();
+
+  test('token: switching away from a token-mode main never syncs the token into the outgoing vault',
+    { skip: realLogin ? false : 'needs a recorded login in ~/.claude.json to identify the outgoing account' }, async () => {
+      const outgoing: Account = { ...account, id: 'outgoing', ...realLogin! };
+      const target: Account = { ...account, id: 'plain-target', accountUuid: 'plain-person', email: 'plain@gmail.com', configDir: secondVault() };
+      tokenMode([[outgoing.id, 'TOKEN-OUT']]);
+      // The token's +1y expiry is "newer" than any vault copy — today's
+      // sync-back would copy it over the outgoing login.
+      write(MAIN, { claudeAiOauth: { accessToken: 'TOKEN-OUT', expiresAt: YEAR }, mcpOAuth: MCP });
+      write(VAULT, { claudeAiOauth: creds('out-access', 'refresh-OUT', 0) });
+      write(VAULT2, { claudeAiOauth: creds('target-access', 'refresh-TARGET', 0) });
+
+      await switchTo(target.id, { accounts: [outgoing, target], activeId: outgoing.id, onSwitched: () => {} });
+
+      assert.equal(read(VAULT).claudeAiOauth.accessToken, 'out-access');
+      assert.equal(read(VAULT).claudeAiOauth.refreshToken, 'refresh-OUT');
+      assert.equal(read(MAIN).claudeAiOauth.accessToken, 'target-access');
+      assert.equal(read(MAIN).mcpOAuth['srv|h'].accessToken, 'mcp-keep');
+    });
+
+  test('token: freshen refreshes the ACTIVE vault while main is a token — no CLI races it',
+    { skip: realLogin ? false : 'needs a recorded login in ~/.claude.json to be the active account' }, async () => {
+    // The recorded login's identity: without the token rule, holdsMainSlot
+    // refuses this account by identity alone and the vault freezes.
+    const active: Account = { ...standby('token-active'), ...realLogin! };
+    tokenMode([[active.id, 'TOKEN-ACT']]);
+    write(MAIN, { claudeAiOauth: { accessToken: 'TOKEN-ACT', expiresAt: YEAR } });
+    // No refresh token, so the attempt fails before any socket opens.
+    write(VAULT, { claudeAiOauth: { accessToken: 'vault-access', expiresAt: Date.now() - 3600_000 } });
+
+    const { minted, tried } = await attempted(() => freshenAccountToken(active, { force: true }));
+
+    assert.equal(tried, true, 'a refresh-less main slot must not freeze the active vault');
+    assert.equal(minted, false);
+    assert.equal(read(MAIN).claudeAiOauth.accessToken, 'TOKEN-ACT');
+  });
+
+  test('token: keep-warm takes the active vault down the standby branch while main is a token', async () => {
+    const active = standby('token-warm');
+    tokenMode([[active.id, 'TOKEN-ACT']]);
+    write(MAIN, { claudeAiOauth: { accessToken: 'TOKEN-ACT', expiresAt: YEAR } });
+    write(VAULT, { claudeAiOauth: { accessToken: 'vault-access', expiresAt: FAR } });
+
+    const { tried } = await watchRefreshes('keep-warm failed', () => keepWarm([active], active.id));
+
+    assert.equal(tried, true, 'the daily refresh the CLI no longer gives this vault');
+    assert.equal(read(MAIN).claudeAiOauth.accessToken, 'TOKEN-ACT', 'the token itself is never touched');
   });
 });

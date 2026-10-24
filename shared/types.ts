@@ -604,7 +604,25 @@ export interface Account {
   // short of a fresh login brings it back. Runtime-only: filled into snapshots
   // by the main process, never persisted.
   needsLogin?: string;
+  // Long-lived (one-year, inference-only) token minted by the app for this
+  // account — what every chat spawned while it is active runs on. The token
+  // itself lives in the keychain (electron/long-lived-token.ts); only its
+  // bookkeeping is persisted here.
+  tokenExpiresAt?: string;
+  tokenMintedAt?: string;
+  tokenScopes?: string[];
+  // Runtime-only (filled into snapshots by main, never persisted): whether the
+  // keychain holds this account's token right now.
+  hasToken?: boolean;
+  // Set when Claude Code cleared the signed-in slot right after this token was
+  // installed — the token is dead; chats fell back to the stored sign-in.
+  tokenRejected?: string;
 }
+
+export type MintTokenReason = 'cancelled' | 'timeout' | 'mismatch' | 'denied' | 'network' | 'busy' | 'unknown';
+export type MintTokenResult =
+  | { ok: true; account: Account }
+  | { ok: false; reason: MintTokenReason; error: string };
 
 export interface CodexAccountStatus {
   signedIn: boolean;
@@ -626,6 +644,9 @@ export interface AccountsSnapshot {
   // silently on a timer; this is reserved for "there is nothing left to restore",
   // which is the one case that really does need the user.
   authIssue?: string | null;
+  // True when the signed-in keychain slot holds the active account's
+  // long-lived token right now.
+  tokenMode?: boolean;
   // Saved Codex sign-ins, and which of them is the CLI's current login (null
   // when the current login is not saved in the pool, or Codex is signed out).
   codexAccounts: CodexAccount[];
@@ -756,6 +777,11 @@ export interface AgentsFlowApi {
   // Usage meters for one pooled account, read with that account's own token —
   // works whether or not it is the active one.
   getAccountUsage: (id: string, force?: boolean) => Promise<UsageResult>;
+  // Mint (or re-mint) this account's one-year token: opens the browser, waits
+  // for the consent, verifies the identity, stores the token in the keychain.
+  // Resolves when the flow ends (up to 5 min) — poll nothing.
+  mintAccountToken: (id: string) => Promise<MintTokenResult>;
+  cancelMintAccountToken: (id: string) => Promise<void>;
   onAccountsUpdated: (cb: (snapshot: AccountsSnapshot) => void) => () => void;
 
   // ---- The Codex pool ----

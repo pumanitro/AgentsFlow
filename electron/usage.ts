@@ -151,8 +151,11 @@ function planLabel(creds: OAuthCreds): string | undefined {
   return m ? `${pretty} (${m[1]})` : pretty;
 }
 
-function normalize(json: any, creds: OAuthCreds, fetchedAt: string): UsageSnapshot {
-  const limits: any[] = Array.isArray(json?.limits) ? json.limits : [];
+// Exported (pure) so the meter shaping can be unit-tested without a network.
+// `plan` is the already-pretty plan label (see planLabel), when known.
+export function normalizeUsageJson(json: unknown, fetchedAt: string, plan?: string): UsageSnapshot {
+  const j = json as any;
+  const limits: any[] = Array.isArray(j?.limits) ? j.limits : [];
   const meters: UsageMeter[] = limits
     .map((l, i) => {
       const kind = String(l?.kind ?? '');
@@ -171,7 +174,7 @@ function normalize(json: any, creds: OAuthCreds, fetchedAt: string): UsageSnapsh
     // Session first, then the weekly rows in the order the API returned them.
     .sort((a, b) => (a.group === b.group ? 0 : a.group === 'session' ? -1 : 1));
 
-  return { meters, fetchedAt, plan: planLabel(creds) };
+  return { meters, fetchedAt, plan };
 }
 
 async function doFetch(service: string = KEYCHAIN_SERVICE): Promise<UsageResult> {
@@ -185,9 +188,15 @@ async function doFetch(service: string = KEYCHAIN_SERVICE): Promise<UsageResult>
     // eslint-disable-next-line no-console
     console.warn('[agentsflow][usage] access token appears expired; attempting fetch anyway');
   }
+  return fetchUsage(creds.accessToken, planLabel(creds));
+}
+
+// The request + response handling shared by the keychain-slot readers above and
+// the long-lived-token reader below: one bearer token in, one UsageResult out.
+async function fetchUsage(token: string, plan?: string): Promise<UsageResult> {
   let resp: { status: number; body: string };
   try {
-    resp = await httpGetJson(USAGE_URL, creds.accessToken);
+    resp = await httpGetJson(USAGE_URL, token);
   } catch (err) {
     return { ok: false, reason: 'network', error: `Network error: ${(err as Error)?.message ?? err}` };
   }
@@ -204,7 +213,7 @@ async function doFetch(service: string = KEYCHAIN_SERVICE): Promise<UsageResult>
     return { ok: false, reason: 'unknown', error: 'Usage endpoint returned unparseable data.' };
   }
   const fetchedAt = new Date().toISOString();
-  return { ok: true, snapshot: normalize(json, creds, fetchedAt) };
+  return { ok: true, snapshot: normalizeUsageJson(json, fetchedAt, plan) };
 }
 
 // Public entry: returns a normalised usage snapshot, cached briefly. Pass
@@ -256,8 +265,32 @@ export async function getUsageForService(service: string, force = false): Promis
   return p;
 }
 
+// Same again, read with an account's long-lived token (the one its chats run on
+// in token mode) instead of a keychain OAuth slot. Shares byService under a
+// `token:<cacheKey>` key — cacheKey is the pool account id, never the token — so
+// the same per-account rate discipline applies and resetUsageCache clears it.
+export async function getUsageForToken(cacheKey: string, token: string, force = false, plan?: string): Promise<UsageResult> {
+  const key = `token:${cacheKey}`;
+  const hit = byService.get(key);
+  if (!force && hit && Date.now() - hit.atMs < MIN_FETCH_INTERVAL_MS) return hit.result;
+  const running = inflightByService.get(key);
+  if (running) return running;
+  const p = fetchUsage(token, plan)
+    .then((result) => {
+      if (result.ok || result.reason === 'no-auth' || result.reason === 'expired') {
+        byService.set(key, { result, atMs: Date.now() });
+      } else if (hit && hit.result.ok) {
+        return hit.result;
+      }
+      return result;
+    })
+    .finally(() => { inflightByService.delete(key); });
+  inflightByService.set(key, p);
+  return p;
+}
+
 /**
- * Drop every cached snapshot. Called right after an account switch so the panel
+ * Drop every cached snapshot (keychain slots and long-lived tokens alike). Called right after an account switch so the panel
  * shows the account you moved to rather than a stale snapshot of the one you left.
  */
 export function resetUsageCache(): void {

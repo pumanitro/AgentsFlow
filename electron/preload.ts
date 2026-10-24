@@ -49,6 +49,8 @@ const api: AgentsFlowApi = {
   switchAccount: (id) => ipcRenderer.invoke('accounts:switch', id),
   repairAccounts: () => ipcRenderer.invoke('accounts:repair'),
   getAccountUsage: (id, force?: boolean) => ipcRenderer.invoke('accounts:usage', id, force),
+  mintAccountToken: (id) => ipcRenderer.invoke('accounts:mintToken', id),
+  cancelMintAccountToken: (id) => ipcRenderer.invoke('accounts:cancelMintToken', id),
   onAccountsUpdated: (cb) => {
     const listener = (_e: IpcRendererEvent, snapshot: AccountsSnapshot) => cb(snapshot);
     ipcRenderer.on('accounts:updated', listener);

@@ -26,6 +26,7 @@ export function normaliseAccounts(s: Partial<AccountsSnapshot> | null | undefine
     accounts: s?.accounts ?? [],
     activeId: s?.activeId ?? null,
     authIssue: s?.authIssue ?? null,
+    tokenMode: s?.tokenMode ?? false,
     codexAccounts: s?.codexAccounts ?? [],
     activeCodexId: s?.activeCodexId ?? null,
   };
