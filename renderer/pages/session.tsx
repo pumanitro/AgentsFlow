@@ -9,6 +9,7 @@ import { saveUIState, useDirectoryNumber, useUIState } from '../lib/ui-state';
 import { useBackNavKeys, BackNavHint } from '../lib/back-nav';
 
 import ProviderIcon, { providerName } from '../components/ProviderIcon';
+import ChatKindPill from '../components/ChatKindPill';
 import ShellArea, { appendShell, ShellNode } from '../components/ShellArea';
 import PaneErrorBoundary from '../components/PaneErrorBoundary';
 import NotificationBell from '../components/notifications/NotificationBell';
@@ -331,6 +332,7 @@ export default function SessionPage() {
                   title={providerName(conv.provider ?? 'claude')}
                 />
               )}
+              <ChatKindPill conv={conv} />
             </>
           )}
           <span className="text-sm font-medium text-text shrink-0">{conv?.displayName ?? '…'}</span>

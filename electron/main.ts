@@ -77,7 +77,7 @@ import {
 import { ensureWorkspaceTrusted } from './workspace-trust';
 import { applyRemoteJobState, getLastAgentRows, refreshNow, setPollerForeground, startPoller, stopPoller, syncWatchers, unwatchConversation, watchConversation, watcherStats } from './poller';
 import { bridgeSocketPath, buildBootstrapSystemPrompt, getMcpServerInfo, writeMcpConfigForConversation, writeRemoteMcpConfig } from './mcp-bridge';
-import { buildDelegatePrompt, buildRegistry, renderRegistryMarkdown } from './registry';
+import { buildDelegatePrompt, buildRegistry, mayNotify, NOTIFY_REFUSED, renderRegistryMarkdown, resolveChatKind } from './registry';
 import { startPeersBridge, type AddRemotePeerRequest, type DelegateRequest, type HelloRequest, type ListPeersRequest, type NotifyRequest, type OpenFileRequest, type PeersBridge, type RoutinesRequest, type WhoamiRequest } from './delegation-bridge';
 import { RemoteHosts, setRemoteHosts } from './remote/remote-hosts';
 import { remoteCommand, runRemote } from './remote/remote-exec';
@@ -122,7 +122,7 @@ import * as remoteFs from './remote/remote-fs';
 import { deleteAttachmentFiles, pastedImagesRoot, prunePastedImages, sweepOrphanAttachments, todayDateSlug } from './attachments';
 import { noteDirForPath, sweepNoteDir, sweepNoteImages } from './note-images';
 import { disableLeftArrowAgents } from './attach-guard';
-import { Account, AccountsSnapshot, AddAccountResult, AddRemoteRequest, AgentProvider, BridgeHealth, CodexModel, Conversation, FileEntry, GuardPins, PerfReportResult, PinnedDivider, PinnedItemRef, PinnedTodo, ProbeAccountResult, ProbeCodexResult, RemoteHostStatus, RemoteProbeResult, RotationPolicy, RunContract, SlashCommand, SpawnRequest, SwitchAccountResult, SwitchCodexResult, TrackedDirectory, UsageResult } from '../shared/types';
+import { Account, AccountsSnapshot, AddAccountResult, AddRemoteRequest, AgentProvider, BridgeHealth, ChatKind, CodexModel, Conversation, FileEntry, GuardPins, PerfReportResult, PinnedDivider, PinnedItemRef, PinnedTodo, ProbeAccountResult, ProbeCodexResult, RemoteHostStatus, RemoteProbeResult, RotationPolicy, RunContract, SlashCommand, SpawnRequest, SwitchAccountResult, SwitchCodexResult, TrackedDirectory, UsageResult } from '../shared/types';
 
 const isDev = process.env.NODE_ENV === 'development';
 const loadURL = isDev ? null : serve({ directory: path.join(__dirname, '..', '..', '..', 'renderer', 'out') });
@@ -137,6 +137,12 @@ let remoteHosts: RemoteHosts | null = null;
 // handlers below fail politely until then.
 let routinesStore: RoutinesStore | null = null;
 let routineScheduler: RoutineScheduler | null = null;
+// What a chat is for, so every config and prompt writer agrees whether it may
+// notify. A row older than the chatKind field counts as a routine's chat when a
+// routine run points at it.
+function chatKindOf(conv: Pick<Conversation, 'id' | 'chatKind'>): ChatKind {
+  return resolveChatKind(conv, !!routinesStore?.listRuns().some((r) => r.conversationId === conv.id));
+}
 // Notifications (the bell + drawer). Created in whenReady before the routines,
 // so a run that fails during the scheduler's first tick can already raise its
 // warning; the IPC handlers below fail politely until then.
@@ -161,7 +167,8 @@ const codexDeps = {
   // Every row, so a reconnect can find the pinned Codex threads to rejoin, and
   // the directory the app-server's own socket lives under.
   options: (conv: Conversation) => {
-    const configPath = !conv.delegatedByConversationId ? writeMcpConfigForConversation(conv.id, conv.directoryPath) : undefined;
+    const kind = chatKindOf(conv);
+    const configPath = !conv.delegatedByConversationId ? writeMcpConfigForConversation(conv.id, conv.directoryPath, kind) : undefined;
     const server = configPath ? JSON.parse(fs.readFileSync(configPath, 'utf8')).mcpServers.peersflow : undefined;
     return {
       // approvalPolicy / sandbox come from CodexAgents' unattended defaults
@@ -169,7 +176,7 @@ const codexDeps = {
       approvalsReviewer: 'user',
       ...(server ? {
         config: { 'mcp_servers.peersflow': { ...server, required: true, tool_timeout_sec: 1860 } },
-        developerInstructions: buildBootstrapSystemPrompt(store.getDirectories()),
+        developerInstructions: buildBootstrapSystemPrompt(store.getDirectories(), undefined, kind),
       } : {}),
     };
   },
@@ -1433,8 +1440,8 @@ async function relaunchConversation(conv: Conversation, prompt: string): Promise
       sessionId: live.sessionId,
       cwd,
       prompt,
-      mcpConfigPath: writeMcpConfigForConversation(live.id, cwd),
-      appendSystemPrompt: buildBootstrapSystemPrompt(store.getDirectories()),
+      mcpConfigPath: writeMcpConfigForConversation(live.id, cwd, chatKindOf(live)),
+      appendSystemPrompt: buildBootstrapSystemPrompt(store.getDirectories(), undefined, chatKindOf(live)),
       model: live.model,
     });
     if (!r.daemonShort) return { ok: false, error: r.raw.trim().slice(0, 300) || `claude exited ${r.code}` };
@@ -1528,7 +1535,7 @@ async function dispatchClaudeInto(
   conversationId: string,
   cwd: string,
   prompt: string,
-  opts: { peerAware: boolean; model?: string; delegated?: boolean; dir: TrackedDirectory },
+  opts: { peerAware: boolean; model?: string; delegated?: boolean; dir: TrackedDirectory; chatKind: ChatKind },
 ): Promise<{ sessionId: string; daemonShort: string }> {
   // Remote peer: everything below runs on that machine — the MCP config and the
   // trust record are written THERE, and the CLI is driven through RemoteHosts.
@@ -1544,8 +1551,8 @@ async function dispatchClaudeInto(
     }
     if (opts.peerAware) {
       try {
-        mcpConfigPath = await writeRemoteMcpConfig(host, conversationId, cwd);
-        appendSystemPrompt = buildBootstrapSystemPrompt(store.getDirectories(), remoteSelfInfo(host, opts.dir, cwd, opts.dir.displayName));
+        mcpConfigPath = await writeRemoteMcpConfig(host, conversationId, cwd, opts.chatKind);
+        appendSystemPrompt = buildBootstrapSystemPrompt(store.getDirectories(), remoteSelfInfo(host, opts.dir, cwd, opts.dir.displayName), opts.chatKind);
       } catch (err) {
         mcpConfigPath = undefined;
         appendSystemPrompt = undefined;
@@ -1560,8 +1567,8 @@ async function dispatchClaudeInto(
   } else {
     if (opts.peerAware) {
       try {
-        mcpConfigPath = writeMcpConfigForConversation(conversationId, cwd);
-        appendSystemPrompt = buildBootstrapSystemPrompt(store.getDirectories());
+        mcpConfigPath = writeMcpConfigForConversation(conversationId, cwd, opts.chatKind);
+        appendSystemPrompt = buildBootstrapSystemPrompt(store.getDirectories(), undefined, opts.chatKind);
       } catch (err) {
         console.error('[agentsflow] MCP bootstrap failed — spawning without peer awareness', err);
       }
@@ -1701,6 +1708,8 @@ async function spawnConversation(opts: {
   afterConversationId?: string;
   // Where the session runs. Defaults to the tracked directory's path.
   cwd?: string;
+  // 'routine' only for a routine's chat — the one kind that may notify.
+  chatKind?: ChatKind;
 }): Promise<{ conversationId: string; sessionId: string; daemonShort: string }> {
   const { dir, prompt } = opts;
   const conversationId = uuid();
@@ -1731,6 +1740,7 @@ async function spawnConversation(opts: {
     delegatedByConversationId: opts.delegatedByConversationId,
     // Set once, here: which machine this conversation runs on for its whole life.
     ...(remoteHostKeyForDir(dir) ? { host: remoteHostKeyForDir(dir) } : {}),
+    chatKind: opts.chatKind ?? 'chat',
     ...opts.row,
   };
   store.addConversation(optimistic, opts.afterConversationId ? { afterConversationId: opts.afterConversationId } : undefined);
@@ -1760,6 +1770,7 @@ async function spawnConversation(opts: {
     model: opts.model,
     delegated: Boolean(opts.delegatedByConversationId),
     dir,
+    chatKind: optimistic.chatKind ?? 'chat',
   });
   return { conversationId, sessionId, daemonShort };
 }
@@ -1816,7 +1827,9 @@ async function forkConversation(conversationId: string): Promise<{ conversationI
     const fork: Conversation = { ...src, id: uuid(), sessionId: '', provider: 'codex', daemonShort: '',
       title: forkTitle(src.title), description: 'Forked copy', state: 'idle', status: 'idle',
       pinned: true, attachments: [], lastResult: '', createdAt: new Date().toISOString(),
-      forkFromSessionId: src.sessionId, delegatedByConversationId: undefined, unpinnedAt: undefined };
+      forkFromSessionId: src.sessionId, delegatedByConversationId: undefined, unpinnedAt: undefined,
+      // Explicit, not just spread: a legacy routine row has no chatKind of its own.
+      chatKind: chatKindOf(src) };
     store.addConversation(fork, { afterConversationId: src.id });
     broadcastConversations(); broadcastPinnedOrder();
     await codex.snapshot(fork.id);
@@ -1876,6 +1889,8 @@ async function forkConversation(conversationId: string): Promise<{ conversationI
     createdAt: new Date().toISOString(),
     lastPrompt: src.lastPrompt,
     forkFromSessionId: src.sessionId,
+    // A fork of a routine's chat is still that routine's work, so it may notify.
+    chatKind: chatKindOf(src),
   };
   // The fork lands directly below its source in the pinned list, so versions
   // of the same task stay visually grouped in their section.
@@ -1944,6 +1959,7 @@ ipcMain.handle('convs:forkTo', async (_e, conversationId: string, provider: Agen
     row: plan.row,
     afterConversationId: src.id,
     cwd: plan.cwd,
+    chatKind: chatKindOf(src),
   });
   console.log('[agentsflow][fork] forked to the other provider', { from: src.id, to: spawn.conversationId, provider, cwd: plan.cwd });
   return { conversationId: spawn.conversationId };
@@ -1977,6 +1993,7 @@ function startRoutines(): void {
         peerAware: true,
         model: routine.model || undefined,
         provider: routine.provider,
+        chatKind: 'routine',
       });
       return { conversationId: r.conversationId };
     },
@@ -2167,15 +2184,23 @@ function showActionBanner(n: UserNotification): void {
 }
 
 // The `notify` MCP tool: the raw arguments are validated by
-// buildNotificationFromArgs; the source is whatever chat (and routine run) asked.
+// buildNotificationFromArgs; the source is the routine run's chat that asked.
 async function handleNotify(req: NotifyRequest): Promise<Record<string, unknown>> {
   if (!notificationsStore) return { status: 'failure', error: 'notifications are still starting — try again in a moment' };
   const conv = req.rootConversationId ? store.getConversation(req.rootConversationId) : undefined;
+  // The MCP server of a casual chat never offers notify, but a daemon started
+  // before that rule (or an unknown conversation) still can call it: refuse here
+  // too, so only a routine's chat ever reaches the bell.
+  const kind: ChatKind = conv ? chatKindOf(conv) : 'chat';
+  if (!mayNotify(kind)) {
+    console.log('[agentsflow][notifications] refused — not a routine chat', { conversationId: req.rootConversationId });
+    return { status: 'failure', error: NOTIFY_REFUSED };
+  }
   const dir = conv ? store.getDirectories().find((d) => d.id === conv.directoryId) : undefined;
   // listRuns is oldest first, so the last match is the newest run of this chat.
   const run = conv ? routinesStore?.listRuns().filter((r) => r.conversationId === conv.id).pop() : undefined;
   const routine = run ? routinesStore?.getRoutine(run.routineId) ?? null : null;
-  const source: NotificationSource = { kind: run ? 'routine' : 'chat' };
+  const source: NotificationSource = { kind: 'routine' };
   if (req.rootConversationId) source.conversationId = req.rootConversationId;
   if (conv?.title) source.conversationTitle = conv.title;
   if (dir) { source.directoryId = dir.id; source.peerName = dir.displayName; }
@@ -2697,8 +2722,8 @@ async function restartNeverStarted(conv: Conversation): Promise<boolean> {
 function resumePeerAwareness(conv: Conversation): { mcpConfigPath?: string; appendSystemPrompt?: string } {
   try {
     return {
-      mcpConfigPath: writeMcpConfigForConversation(conv.id, conv.directoryPath),
-      appendSystemPrompt: buildBootstrapSystemPrompt(store.getDirectories()),
+      mcpConfigPath: writeMcpConfigForConversation(conv.id, conv.directoryPath, chatKindOf(conv)),
+      appendSystemPrompt: buildBootstrapSystemPrompt(store.getDirectories(), undefined, chatKindOf(conv)),
     };
   } catch (err) {
     console.error('[agentsflow] MCP bootstrap failed — resuming without peer awareness', err);
@@ -2716,8 +2741,8 @@ async function remoteResumePeerAwareness(conv: Conversation & { host: string }):
     const dirs = store.getDirectories();
     const dir = dirs.find((d) => d.id === conv.directoryId);
     return {
-      mcpConfigPath: await writeRemoteMcpConfig(conv.host, conv.id, conv.directoryPath),
-      appendSystemPrompt: buildBootstrapSystemPrompt(dirs, remoteSelfInfo(conv.host, dir, conv.directoryPath, conv.displayName)),
+      mcpConfigPath: await writeRemoteMcpConfig(conv.host, conv.id, conv.directoryPath, chatKindOf(conv)),
+      appendSystemPrompt: buildBootstrapSystemPrompt(dirs, remoteSelfInfo(conv.host, dir, conv.directoryPath, conv.displayName), chatKindOf(conv)),
     };
   } catch (err) {
     console.error('[agentsflow][remote] MCP bootstrap failed — resuming without peer awareness', { host: conv.host, error: (err as Error)?.message ?? err });

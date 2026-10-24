@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Conversation, PinnedTodo, TrackedDirectory } from '../../shared/types';
 import { statusDotClass } from '../lib/status';
+import ChatKindPill from './ChatKindPill';
 
 interface Props {
   conversations: Conversation[];
@@ -323,6 +324,7 @@ export default function HistoryTimeline({ conversations, todos, dirs, onAttach, 
                       <div className="min-w-0">
                         <div className="truncate text-sm font-medium text-text">
                           {c.title || <span className="text-muted italic">untitled</span>}
+                          <ChatKindPill conv={c} className="ml-1.5 align-middle" />
                         </div>
                         <div className="truncate text-xs text-muted mt-0.5">
                           {c.description || c.lastPrompt || <span className="italic">—</span>}

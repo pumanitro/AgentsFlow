@@ -4,6 +4,7 @@ import { contractTint, KEEPER_KEPT_ALIVE_LABEL, KEEPER_STALLED_LABEL, KEEPER_TIC
 import { statusDotClass } from '../lib/status';
 import { useUIState } from '../lib/ui-state';
 import ProviderIcon, { providerName } from './ProviderIcon';
+import ChatKindPill from './ChatKindPill';
 import { shortHost } from '../lib/remote';
 
 interface Props {
@@ -123,6 +124,7 @@ export default function PinnedRow({ conv, onAttach, onSaveTitle, onMarkDone, onA
         {/* The provider mark belongs to the name, not to the dot: extra air on
             its left, the normal gap on its right. */}
         {showProviderIcon && <ProviderIcon provider={provider} size={12} className="text-muted ml-1.5" title={providerName(provider)} />}
+        <ChatKindPill conv={conv} />
         {/* Name on top; for a remote peer conversation, the machine it runs on
             sits on a second line underneath so the name keeps its full width. */}
         <div className="min-w-0 flex flex-col leading-tight">

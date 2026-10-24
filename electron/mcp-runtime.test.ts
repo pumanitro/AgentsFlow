@@ -135,7 +135,8 @@ describe('the real compiled server', () => {
     const env: Record<string, string> = {};
     for (const [k, v] of Object.entries(process.env)) if (v !== undefined && !k.startsWith('PEERSFLOW_')) env[k] = v;
     const child = spawn(process.execPath, [rt.serverScript], {
-      env: { ...env, PEERSFLOW_STORE_PATH: store },
+      // A routine chat's server: the only kind that lists every tool, notify included.
+      env: { ...env, PEERSFLOW_STORE_PATH: store, PEERSFLOW_CHAT_KIND: 'routine' },
       stdio: ['pipe', 'pipe', 'pipe'],
     });
     child.stderr.resume();

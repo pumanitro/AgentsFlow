@@ -9,7 +9,17 @@ import { after, describe, test } from 'node:test';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { buildPeerInfo, buildRegistry, renderBootstrapPrompt, renderRegistryMarkdown, type SelfInfo } from './registry';
+import {
+  buildPeerInfo,
+  buildRegistry,
+  chatKindFromEnv,
+  renderBootstrapPrompt,
+  renderRegistryMarkdown,
+  resolveChatKind,
+  TOOL_DEFS,
+  toolDefsFor,
+  type SelfInfo,
+} from './registry';
 import type { RemotePeerCache, RemotePeerSpec, TrackedDirectory } from '../shared/types';
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'pf-registry-'));
@@ -123,5 +133,41 @@ describe('renderRegistryMarkdown', () => {
     const out = renderRegistryMarkdown(buildRegistry([localDir, remoteCached]));
     assert.ok(out.includes('- host: Theos-Mac-Studio (remote peer, ssh `patryk@studio.example`)'), out);
     assert.equal(out.split('- host:').length - 1, 1);
+  });
+});
+
+// Only a routine's chat may ring the bell. A casual chat must neither see the
+// notify tool nor be told to use it — it is told to answer in the chat instead.
+describe('chat kind: routine-only notify', () => {
+  test('a casual chat gets every tool but notify, in order; a routine chat gets them all', () => {
+    assert.deepEqual(
+      toolDefsFor('chat').map((t) => t.name),
+      TOOL_DEFS.map((t) => t.name).filter((n) => n !== 'notify'),
+    );
+    assert.deepEqual(toolDefsFor('routine'), TOOL_DEFS);
+  });
+
+  test('the bootstrap prompt tells a casual chat it has no notifications', () => {
+    const reg = buildRegistry([]);
+    const casual = renderBootstrapPrompt(reg);
+    assert.ok(casual.includes('## This is a casual chat — no notifications'), casual);
+    assert.ok(!casual.includes('Telling the user something'));
+    const routine = renderBootstrapPrompt(reg, undefined, 'routine');
+    assert.ok(routine.includes('Telling the user something'), routine);
+    assert.ok(routine.includes('started by a **routine**'));
+    assert.ok(!routine.includes('## This is a casual chat — no notifications'));
+  });
+
+  test('resolveChatKind: the row wins; a legacy row is a routine chat when a run points at it', () => {
+    assert.equal(resolveChatKind(undefined, false), 'chat');
+    assert.equal(resolveChatKind(undefined, true), 'routine');
+    assert.equal(resolveChatKind({ chatKind: 'chat' }, true), 'chat');
+    assert.equal(resolveChatKind({ chatKind: 'routine' }, false), 'routine');
+  });
+
+  test('chatKindFromEnv fails closed', () => {
+    assert.equal(chatKindFromEnv({}), 'chat');
+    assert.equal(chatKindFromEnv({ PEERSFLOW_CHAT_KIND: 'routine' }), 'routine');
+    assert.equal(chatKindFromEnv({ PEERSFLOW_CHAT_KIND: 'bogus' }), 'chat');
   });
 });

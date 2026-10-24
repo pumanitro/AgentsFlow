@@ -16,7 +16,7 @@
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import type { TrackedDirectory } from '../shared/types';
+import type { ChatKind, TrackedDirectory } from '../shared/types';
 
 // The MCP server's namespace. Drives the `--mcp-config` key and therefore the
 // tool prefix every peer-aware session sees: `mcp__peersflow__<tool>`. Single
@@ -132,7 +132,7 @@ export const TOOL_DEFS = [
     name: 'notify',
     title: 'Notify the user',
     description:
-      'Show the user a notification in Peers Flow (a bell at the top of every screen; a panel they open). A notification is only a pointer to THIS chat: it shows its title, this chat\'s name, your body, the files you attach (each with Open / Reveal), "Open chat" and "Dismiss" — it never shows questions and never collects answers. Use level "action" when the chat needs the user: questions only they can answer, a file they must check, something they must do by hand (send an email, approve, pay). FIRST write your questions and to-dos as plain text in your own chat reply, THEN call notify with a short pointer body; the user opens the chat, reads them there and answers by typing in this chat. Use level "warn" when something went wrong that the user should know about. The user can dismiss any notification at any time. Never notify when nothing is needed from the user. After an "action" notify, END YOUR TURN: the answers arrive as the user\'s next message in this chat. Never do the user\'s to-dos yourself.',
+      'Available only in chats started by a routine. Show the user a notification in Peers Flow (a bell at the top of every screen; a panel they open). A notification is only a pointer to THIS chat: it shows its title, this chat\'s name, your body, the files you attach (each with Open / Reveal), "Open chat" and "Dismiss" — it never shows questions and never collects answers. Use level "action" when the chat needs the user: questions only they can answer, a file they must check, something they must do by hand (send an email, approve, pay). FIRST write your questions and to-dos as plain text in your own chat reply, THEN call notify with a short pointer body; the user opens the chat, reads them there and answers by typing in this chat. Use level "warn" when something went wrong that the user should know about. The user can dismiss any notification at any time. Never notify when nothing is needed from the user. After an "action" notify, END YOUR TURN: the answers arrive as the user\'s next message in this chat. Never do the user\'s to-dos yourself.',
     usage: 'notify({ title, level, body?, files? })',
     inputSchema: {
       type: 'object',
@@ -279,6 +279,38 @@ export const TOOL_DEFS = [
     },
   },
 ] as const;
+
+export type ToolDef = (typeof TOOL_DEFS)[number];
+
+// The mcp-config env key that tells the MCP server what kind of chat it serves.
+// Missing or unknown means 'chat', so a config written before this flag existed
+// (or a typo) fails closed: no notify.
+export const CHAT_KIND_ENV = 'PEERSFLOW_CHAT_KIND';
+
+// One string for both refusals (the MCP server's and main's), so a chat that
+// somehow calls notify learns where its question belongs instead.
+export const NOTIFY_REFUSED =
+  'notify is only available to chats started by a routine. This is a casual chat: write your questions and to-dos as plain text in your reply — the user reads them here.';
+
+// A row's own chatKind wins; a row older than the field is a routine chat when
+// a routine run points at it.
+export function resolveChatKind(conv: { chatKind?: ChatKind } | undefined, hasRoutineRun: boolean): ChatKind {
+  return conv?.chatKind ?? (hasRoutineRun ? 'routine' : 'chat');
+}
+
+export function chatKindFromEnv(env: NodeJS.ProcessEnv): ChatKind {
+  return env[CHAT_KIND_ENV] === 'routine' ? 'routine' : 'chat';
+}
+
+// Only a routine runs unattended, so only a routine's chat may ring the bell; a
+// casual chat has the user reading it already.
+export function mayNotify(kind: ChatKind): boolean {
+  return kind === 'routine';
+}
+
+export function toolDefsFor(kind: ChatKind): readonly ToolDef[] {
+  return mayNotify(kind) ? TOOL_DEFS : TOOL_DEFS.filter((t) => t.name !== 'notify');
+}
 
 /** The tools that are one `routines` bridge request each, and the `op` they send. */
 export const ROUTINE_TOOL_OPS: Record<string, string> = {
@@ -442,7 +474,7 @@ function skillLine(p: PeerInfo): string {
 // `self` is set only for a session running on a remote peer's machine: without
 // it that session assumes it shares the laptop's filesystem and hands back
 // paths nobody on the laptop can open.
-export function renderBootstrapPrompt(reg: Registry, self?: SelfInfo): string {
+export function renderBootstrapPrompt(reg: Registry, self?: SelfInfo, kind: ChatKind = 'chat'): string {
   const lines: string[] = [];
   lines.push('# Peers Flow — your peers & delegation');
   lines.push('');
@@ -456,13 +488,22 @@ export function renderBootstrapPrompt(reg: Registry, self?: SelfInfo): string {
   lines.push('- Without an explicit request to open the file, just provide the link/path; do not add a routine permission question. Do not bypass this rule with shell commands, another tool, or UI automation.');
   lines.push('- This rule also applies to delegated peers. Pass along permission to open a file only when the user has explicitly given it for that file.');
   lines.push('');
-  lines.push('## Telling the user something (notifications)');
-  lines.push('');
-  lines.push(
-    `- When the work cannot finish without the user — questions only they can answer, a file they must check, something they must do by hand (send an email, approve, pay) — list the questions and the to-dos as plain text in your chat message, then call \`${qualifiedToolName('notify')}\` with level "action", a short pointer body and any files, then END YOUR TURN. The notification only points the user to this chat; they answer by typing here, so the answers arrive as the user's next chat message — continue from there. Never do the user's to-dos yourself.`,
-  );
-  lines.push('- When something went wrong that the user should know about, call it with level "warn".');
-  lines.push('- Do not notify when nothing is needed from the user — the app already shows that a chat finished.');
+  if (mayNotify(kind)) {
+    lines.push('## Telling the user something (notifications)');
+    lines.push('');
+    lines.push('- This chat was started by a **routine**, so it may reach the user through the bell (`notify`). Casual chats cannot.');
+    lines.push(
+      `- When the work cannot finish without the user — questions only they can answer, a file they must check, something they must do by hand (send an email, approve, pay) — list the questions and the to-dos as plain text in your chat message, then call \`${qualifiedToolName('notify')}\` with level "action", a short pointer body and any files, then END YOUR TURN. The notification only points the user to this chat; they answer by typing here, so the answers arrive as the user's next chat message — continue from there. Never do the user's to-dos yourself.`,
+    );
+    lines.push('- When something went wrong that the user should know about, call it with level "warn".');
+    lines.push('- Do not notify when nothing is needed from the user — the app already shows that a chat finished.');
+  } else {
+    lines.push('## This is a casual chat — no notifications');
+    lines.push('');
+    lines.push(
+      "- This chat was started by the user, not by a routine (Routines tab), so it has no `notify` tool and must not try to reach the user's bell any other way. When you need the user — a question, a file to check, a to-do — write it as plain text in your reply and end your turn; the user is reading this chat.",
+    );
+  }
   lines.push('');
   lines.push(
     'This agent session runs inside **Peers Flow**, which tracks several project directories. In Peers Flow each tracked directory is a **peer**: a sibling agent rooted in its own directory, with its own skills and MCP connections (Slack, Gmail, …). A peer is NOT one of your subagents — it is a lateral collaborator you can delegate to and rely on.',

@@ -15,9 +15,9 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { app } from 'electron';
 import { readCurrentRuntime, stageMcpRuntime, type McpRuntime } from './mcp-runtime';
-import { buildRegistry, renderBootstrapPrompt, SERVER_ID, TOOL_DEFS, type SelfInfo } from './registry';
+import { buildRegistry, CHAT_KIND_ENV, renderBootstrapPrompt, SERVER_ID, TOOL_DEFS, type SelfInfo } from './registry';
 import { getRemoteHosts } from './remote/remote-hosts';
-import type { McpServerInfo, TrackedDirectory } from '../shared/types';
+import type { ChatKind, McpServerInfo, TrackedDirectory } from '../shared/types';
 
 const SERVER_NAME = SERVER_ID;
 
@@ -106,22 +106,24 @@ function buildConfigObject(env: Record<string, string>): Record<string, unknown>
 /**
  * Writes the mcp-config for a specific (root) conversation and returns its path.
  * The baked-in `PEERSFLOW_ROOT_CONVERSATION_ID` is what lets a delegation be
- * attributed back to the session that requested it.
+ * attributed back to the session that requested it. `kind` decides whether the
+ * server offers `notify`; the default 'chat' fails closed.
  */
-export function writeMcpConfigForConversation(conversationId: string, rootDir: string): string {
+export function writeMcpConfigForConversation(conversationId: string, rootDir: string, kind: ChatKind = 'chat'): string {
   const p = mcpConfigPathFor(conversationId);
   fs.mkdirSync(path.dirname(p), { recursive: true });
   const cfg = buildConfigObject({
     PEERSFLOW_ROOT_CONVERSATION_ID: conversationId,
     PEERSFLOW_ROOT_DIR: rootDir,
+    [CHAT_KIND_ENV]: kind,
   });
   fs.writeFileSync(p, JSON.stringify(cfg, null, 2), 'utf8');
   return p;
 }
 
 /** The registry block appended to every spawned session's system prompt. */
-export function buildBootstrapSystemPrompt(dirs: TrackedDirectory[], self?: SelfInfo): string {
-  return renderBootstrapPrompt(buildRegistry(dirs), self);
+export function buildBootstrapSystemPrompt(dirs: TrackedDirectory[], self?: SelfInfo, kind: ChatKind = 'chat'): string {
+  return renderBootstrapPrompt(buildRegistry(dirs), self, kind);
 }
 
 /**
@@ -142,7 +144,7 @@ export function buildBootstrapSystemPrompt(dirs: TrackedDirectory[], self?: Self
  * machine's, so a missing piece means "not connected yet" and we refuse
  * rather than write a config that points at laptop paths.
  */
-export async function writeRemoteMcpConfig(hostKey: string, conversationId: string, rootDir: string): Promise<string> {
+export async function writeRemoteMcpConfig(hostKey: string, conversationId: string, rootDir: string, kind: ChatKind = 'chat'): Promise<string> {
   const r = getRemoteHosts();
   const spec = r?.specFor(hostKey);
   const bundle = r?.bundlePath(hostKey);
@@ -161,6 +163,7 @@ export async function writeRemoteMcpConfig(hostKey: string, conversationId: stri
           PEERSFLOW_ROOT_CONVERSATION_ID: conversationId,
           PEERSFLOW_ROOT_DIR: rootDir,
           PEERSFLOW_REMOTE: '1',
+          [CHAT_KIND_ENV]: kind,
           CLAUDE_BIN: spec.claudeBin,
         },
       },

@@ -49,7 +49,7 @@ class Client {
 
 function startServer(env: Record<string, string>): Client {
   const child = spawn(process.execPath, [SERVER], {
-    env: { ...process.env, PEERSFLOW_STORE_PATH: '', PEERSFLOW_ROOT_CONVERSATION_ID: 'conv-1', PEERSFLOW_ROOT_DIR: '/remote/pf-peer', ...env },
+    env: { ...process.env, PEERSFLOW_STORE_PATH: '', PEERSFLOW_ROOT_CONVERSATION_ID: 'conv-1', PEERSFLOW_ROOT_DIR: '/remote/pf-peer', PEERSFLOW_CHAT_KIND: '', ...env },
     stdio: ['pipe', 'pipe', 'pipe'],
   });
   child.stderr.resume(); // logs live on stderr; drain so the child never blocks
@@ -68,6 +68,8 @@ describe('MCP server on a remote host (bridge, no store)', () => {
   const WHOAMI = { status: 'success', conversationId: 'conv-1', sessionId: 's-1', daemonShort: 'abc', directory: 'studio', directoryPath: '/Users/patryk/pf-peer', host: 'patryk@studio', hostname: 'Theos-Mac-Studio', remote: true, title: 't' };
   let server: net.Server;
   let client: Client;
+  // Same bridge, but a routine's chat: the only kind that may notify.
+  let routine: Client;
 
   before(async () => {
     server = net.createServer((c) => {
@@ -85,10 +87,12 @@ describe('MCP server on a remote host (bridge, no store)', () => {
     });
     await new Promise<void>((r) => server.listen(sock, r));
     client = startServer({ PEERSFLOW_BRIDGE_SOCK: sock, PEERSFLOW_REMOTE: '1' });
+    routine = startServer({ PEERSFLOW_BRIDGE_SOCK: sock, PEERSFLOW_REMOTE: '1', PEERSFLOW_CHAT_KIND: 'routine' });
   });
 
   after(async () => {
     client.child.kill('SIGKILL');
+    routine.child.kill('SIGKILL');
     await new Promise<void>((r) => server.close(() => r()));
     fs.rmSync(dir, { recursive: true, force: true });
   });
@@ -100,18 +104,32 @@ describe('MCP server on a remote host (bridge, no store)', () => {
 
   test('says hello over the bridge once at start, with its pid and the root conversation', async () => {
     for (let i = 0; i < 200 && !received.some((q) => q.type === 'hello'); i++) await new Promise((r) => setTimeout(r, 10));
-    const hellos = received.filter((q) => q.type === 'hello');
+    const hellos = received.filter((q) => q.type === 'hello' && q.pid === client.child.pid);
     assert.equal(hellos.length, 1);
     assert.equal(hellos[0].rootConversationId, 'conv-1');
     assert.equal(hellos[0].pid, client.child.pid);
     assert.ok(!Number.isNaN(Date.parse(String(hellos[0].startedAt))));
   });
 
-  test('tools/list includes whoami, add_remote_peer, notify and the routine tools', async () => {
+  test('tools/list of a casual chat has whoami, add_remote_peer and the routine tools, but no notify', async () => {
     const r = await client.call('tools/list');
+    const tools = r.result!.tools as { name: string }[];
+    assert.deepEqual(tools.map((t) => t.name).sort(), ['add_remote_peer', 'create_routine', 'delegate', 'delete_routine', 'list_peers', 'list_routines', 'open_file', 'run_routine', 'update_routine', 'whoami']);
+  });
+
+  test('tools/list of a routine chat includes notify', async () => {
+    const r = await routine.call('tools/list');
     const tools = r.result!.tools as { name: string; inputSchema: { required?: string[] } }[];
     assert.deepEqual(tools.map((t) => t.name).sort(), ['add_remote_peer', 'create_routine', 'delegate', 'delete_routine', 'list_peers', 'list_routines', 'notify', 'open_file', 'run_routine', 'update_routine', 'whoami']);
     assert.deepEqual(tools.find((t) => t.name === 'notify')!.inputSchema.required, ['title', 'level']);
+  });
+
+  test('casual chat: tools/call notify is refused and the bridge never sees it', async () => {
+    const r = textOf(await client.call('tools/call', { name: 'notify', arguments: { title: 't', level: 'action' } }));
+    assert.equal(r.isError, true);
+    assert.match(r.text, /only available to chats started by a routine/);
+    assert.equal(JSON.parse(r.text).status, 'failure');
+    assert.ok(!received.some((q) => q.type === 'notify'), 'a casual chat reached the bridge with notify');
   });
 
   test('notify goes over the bridge with the root conversation id and untouched args', async () => {
@@ -121,7 +139,7 @@ describe('MCP server on a remote host (bridge, no store)', () => {
       questions: [{ id: 'dayoffs', text: 'Any days off?', kind: 'yesno', hint: 'None found.' }],
       todos: [{ text: 'Send the email yourself' }],
     };
-    const r = textOf(await client.call('tools/call', { name: 'notify', arguments: args }));
+    const r = textOf(await routine.call('tools/call', { name: 'notify', arguments: args }));
     assert.equal(r.isError, false);
     assert.deepEqual(JSON.parse(r.text), { status: 'success', id: 'n-1' });
     const req = received.find((q) => q.type === 'notify');
@@ -191,13 +209,18 @@ describe('MCP server on a remote host (bridge, no store)', () => {
 
   test('stdout carried nothing but JSON-RPC', () => {
     assert.deepEqual(client.nonProtocol, []);
+    assert.deepEqual(routine.nonProtocol, []);
   });
 });
 
 describe('MCP server with no bridge', () => {
   let client: Client;
-  before(() => { client = startServer({ PEERSFLOW_BRIDGE_SOCK: '', PEERSFLOW_REMOTE: '1' }); });
-  after(() => { client.child.kill('SIGKILL'); });
+  let routine: Client;
+  before(() => {
+    client = startServer({ PEERSFLOW_BRIDGE_SOCK: '', PEERSFLOW_REMOTE: '1' });
+    routine = startServer({ PEERSFLOW_BRIDGE_SOCK: '', PEERSFLOW_REMOTE: '1', PEERSFLOW_CHAT_KIND: 'routine' });
+  });
+  after(() => { client.child.kill('SIGKILL'); routine.child.kill('SIGKILL'); });
 
   test('a routine tool says it needs the app', async () => {
     const r = textOf(await client.call('tools/call', { name: 'create_routine', arguments: { name: 'x', prompt: 'p', time: '09:00' } }));
@@ -205,8 +228,8 @@ describe('MCP server with no bridge', () => {
     assert.match(r.text, /Routines require the Peers Flow app/);
   });
 
-  test('notify says it needs the app', async () => {
-    const r = textOf(await client.call('tools/call', { name: 'notify', arguments: { title: 't', level: 'warn' } }));
+  test('notify (routine chat) says it needs the app', async () => {
+    const r = textOf(await routine.call('tools/call', { name: 'notify', arguments: { title: 't', level: 'warn' } }));
     assert.equal(r.isError, true);
     assert.deepEqual(JSON.parse(r.text), { status: 'failure', error: 'Notifications require the Peers Flow app (this session has no app bridge).' });
   });

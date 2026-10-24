@@ -88,6 +88,11 @@ export interface RemoteProbeResult { ok: boolean; error?: string; hostname?: str
 // What the add-remote form submits: connection settings plus the remote path.
 export type AddRemoteRequest = RemotePeerSpec & { path: string; displayName?: string };
 
+// What a chat is for. Only a routine's chat may reach the user's bell (notify);
+// a casual chat answers in the chat itself. Missing on rows older than this
+// field: resolveChatKind() treats a row a routine run points at as 'routine'.
+export type ChatKind = 'routine' | 'chat';
+
 // test
 export interface Conversation {
   provider?: AgentProvider; // Missing on legacy records means Claude.
@@ -155,6 +160,7 @@ export interface Conversation {
   // handleHello). Undefined = its Peers Flow tools never came up, or the chat
   // predates the hello protocol; the routine scheduler warns on a routine run's.
   mcpReadyAt?: string;
+  chatKind?: ChatKind;
 }
 
 export interface PinnedDivider {

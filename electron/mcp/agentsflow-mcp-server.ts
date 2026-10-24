@@ -18,7 +18,8 @@
  *   • list_routines / create_routine / update_routine / delete_routine / run_routine
  *                — the app's Routines tab (scheduled prompts), bridge only.
  *   • notify     — raise a notification in the app's bell (questions, to-dos,
- *                  files for the user), bridge only.
+ *                  files for the user), bridge only, routine chats only
+ *                  (PEERSFLOW_CHAT_KIND=routine); a casual chat never lists it.
  *
  * The same compiled file also runs on a REMOTE peer's host (shipped there with
  * registry.js + locale.js and started by that host's `node`). There it has no
@@ -35,14 +36,17 @@ import * as os from 'os';
 import * as path from 'path';
 import { withUtf8Locale } from '../locale';
 import {
+  NOTIFY_REFUSED,
   ROUTINE_TOOL_OPS,
   SERVER_ID,
-  TOOL_DEFS,
   buildDelegatePrompt,
+  chatKindFromEnv,
   buildRegistry,
   localBinPath,
   readDirectoriesFromStore,
+  mayNotify,
   renderRegistryMarkdown,
+  toolDefsFor,
 } from '../registry';
 import type { TrackedDirectory } from '../../shared/types';
 
@@ -55,6 +59,9 @@ const ROOT_CONVERSATION_ID = process.env.PEERSFLOW_ROOT_CONVERSATION_ID || '';
 // when the caller doesn't name a peer explicitly.
 const ROOT_DIR = process.env.PEERSFLOW_ROOT_DIR || '';
 const CLAUDE_BIN = process.env.CLAUDE_BIN || 'claude';
+// Only a routine's chat may notify. Baked into the mcp-config at spawn; missing
+// means a casual chat, so an older config fails closed.
+const CHAT_KIND = chatKindFromEnv(process.env);
 // Depth in the delegation chain. The session that owns this server is depth 0;
 // any session IT delegates to runs at depth 1 and is NOT given this MCP server
 // (see the spawn below), so the chain is hard-capped at one hop — no cycles.
@@ -645,6 +652,12 @@ async function handleToolsCall(id: JsonRpcId, params: Record<string, unknown>): 
       sendResult(id, await toolOpenFile(args as OpenFileArgs));
       return;
     }
+    // A casual chat never lists notify, but a model may still guess the name:
+    // refuse here, without bothering the app, and say where the question goes.
+    if (name === 'notify' && !mayNotify(CHAT_KIND)) {
+      sendResult(id, textContent(JSON.stringify({ status: 'failure', error: NOTIFY_REFUSED }, null, 2), true));
+      return;
+    }
     if (name === 'notify') {
       sendResult(id, await toolNotify(args));
       return;
@@ -676,7 +689,7 @@ async function handle(req: JsonRpcRequest): Promise<void> {
       return;
     case 'tools/list':
       sendResult(id ?? null, {
-        tools: TOOL_DEFS.map((t) => ({
+        tools: toolDefsFor(CHAT_KIND).map((t) => ({
           name: t.name,
           title: t.title,
           description: t.description,
@@ -731,7 +744,7 @@ process.stdin.on('end', shutdown);
 process.on('SIGTERM', shutdown);
 process.on('SIGINT', shutdown);
 
-log(`started · store=${STORE_PATH || '(none)'} · bridge=${BRIDGE_SOCK ? 'yes' : 'no'} · remote=${process.env.PEERSFLOW_REMOTE === '1'} · depth=${DEPTH}`);
+log(`started · store=${STORE_PATH || '(none)'} · bridge=${BRIDGE_SOCK ? 'yes' : 'no'} · remote=${process.env.PEERSFLOW_REMOTE === '1'} · depth=${DEPTH} · kind=${CHAT_KIND}`);
 // Tell the app this chat's Peers Flow tools are up (main stamps Conversation.mcpReadyAt);
 // a routine chat that never says hello gets a bell warning. Fire-and-forget: stdout
 // stays protocol-only, and a failure is at most bridgeRequest's one stderr line.
