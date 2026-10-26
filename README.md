@@ -22,6 +22,14 @@ See [CODEX.md](CODEX.md) for setup, architecture, verification, and current limi
 Claude's terminal workflow remains available. The account pool and
 per-agent performance breakdown describe Claude.
 
+## What's new in v12
+
+| | |
+|---|---|
+| ![Routines week board — once, daily, custom-days and weekly lanes, with the run history of the selected routine](./assets/screenshots/routines-week.png) | **Routines** — prompts that start a chat on their own. Repeat them (daily, every 2 days, chosen weekdays, weekly, twice a month, monthly) or run them **once** on a set date — a one-off missed while the computer was off still runs when the app is back. Week board on the left, history and Run now / Pause / Edit on the right. |
+| ![Routines month calendar with the notifications panel open — each notice points to the chat that needs you](./assets/screenshots/routines-month-notifications.png) | **Month calendar + notifications** — a health bar per day, and a bell whose notices say which chat needs you. Only **routine chats** can raise a notice; a normal chat just answers in the chat. |
+| ![Accounts panel — three Claude accounts, each with a one-year token valid until 24 Oct 2027 and its usage meter](./assets/screenshots/accounts-long-lived.png) | **One-year sign-in tokens** — each Claude account gets a long-lived token that runs on your **subscription**, not API billing. No more "sign in again", no more logins revoked by many chats refreshing at once. Each row shows "until <date>"; auto-switch at N% still works. |
+
 ## Why
 
 Built to scratch four specific itches working with Claude Code day-to-day:
@@ -33,7 +41,7 @@ Built to scratch four specific itches working with Claude Code day-to-day:
 
 ## Highlights
 
-- **Peers that delegate to each other (MCP)** — every tracked directory is a *peer*: an agent rooted there with its own skills and MCP connections (Slack, Gmail, …). A built-in **`peersflow` MCP server** (loaded into every spawned session) lets an agent discover its peers (`list_peers`) and **`delegate`** a self-contained goal to one in another directory — that peer runs as a live, watchable session nested under the one that asked, and returns a result the caller can rely on. The same server lets an agent manage the **Routines** tab — `create_routine`, `list_routines`, `update_routine` (also pause/resume), `delete_routine`, `run_routine` — so "run this every morning" in a chat becomes a scheduled routine. And **`notify`** lets an agent put a notice in the app's bell that points the user to its chat — the agent writes its questions and to-dos as plain text in the chat, and the user answers there by typing. Peers are *lateral* collaborators, distinct from Claude's own subagents. (See the **MCP server** entry in the hamburger menu for the tools and live registry.)
+- **Peers that delegate to each other (MCP)** — every tracked directory is a *peer*: an agent rooted there with its own skills and MCP connections (Slack, Gmail, …). A built-in **`peersflow` MCP server** (loaded into every spawned session) lets an agent discover its peers (`list_peers`) and **`delegate`** a self-contained goal to one in another directory — that peer runs as a live, watchable session nested under the one that asked, and returns a result the caller can rely on. The same server lets an agent manage the **Routines** tab — `create_routine`, `list_routines`, `update_routine` (also pause/resume), `delete_routine`, `run_routine` — so "run this every morning" in a chat becomes a scheduled routine. And **`notify`** (routine chats only) lets an agent put a notice in the app's bell that points the user to its chat — the agent writes its questions and to-dos as plain text in the chat, and the user answers there by typing. Peers are *lateral* collaborators, distinct from Claude's own subagents. (See the **MCP server** entry in the hamburger menu for the tools and live registry.)
 - **Pinned conversations as a to-do list** — every spawn is pinned by default; click ✓ Done to archive into the directory's history. ↻ Reopen brings it back.
 - **Per-directory history** — ⋯ menu on each tracked-directory card opens the full list (pinned + done) for that repo.
 - **Live status + auto-titles** — title comes from Claude's auto-generated short name (e.g. "joke delivery response"), description streams in from `state.json/detail` via `fs.watch` so changes appear within tens of milliseconds.
@@ -43,7 +51,7 @@ Built to scratch four specific itches working with Claude Code day-to-day:
   - **Files** — full project tree, with the same git colors layered on, ignored files & dirs faded
   - Expand/collapse state is persisted per conversation.
 - **Image paste** — paste an image into the spawn input; it's saved to `<dir>/.agentsflow/images/` and the absolute path is appended to the prompt so Claude can `Read` it. Auto-cleaned when the conversation is removed (and orphan-swept on startup).
-- **Account pool + usage meters** — the sidebar shows live plan usage (session / weekly / per-model) and the Gmail accounts you rotate between, each with its own headroom. Switching is one click and never reopens a browser; **Switch automatically at N%** rolls an overnight run onto a fresh account instead of letting it hit the 5-hour wall. The 👁 toggle blurs every address in the panel for screen sharing.
+- **Account pool + usage meters** — the sidebar shows live plan usage (session / weekly / per-model) and the Gmail accounts you rotate between, each with its own headroom. Switching is one click and never reopens a browser; **Switch automatically at N%** rolls an overnight run onto a fresh account instead of letting it hit the 5-hour wall. The 👁 toggle blurs every address in the panel for screen sharing. Each Claude account signs in with a **one-year token** that uses your subscription quota (not API billing), kept in the keychain — no periodic re-login, and parallel chats can no longer get the sign-in revoked.
 - **Performance monitor** — the pill in the header opens a live view of what your agents are costing the machine: CPU by activity, by agent and **by the exact command behind a spike**, with thread counts, event-loop lag and machine load on the same timeline. **Ask about it** in the same panel and a new Claude Code session starts with those exact numbers attached. See below.
 - **Help modal** — `ⓘ` button in the top right lists all shortcuts and shows the app version.
 
@@ -75,9 +83,11 @@ Every process is billed to its nearest `claude` ancestor, so a delegated peer se
 
 ## Routines
 
+![Routines week board](./assets/screenshots/routines-week.png)
+
 The home header has a **Chat | Routines** pill. Chat is the usual home; Routines is a schedule board for prompts that should run on their own.
 
-- **Sidebar** — routines grouped by cadence: Daily, Every 2 days, Weekly, Twice a month, Monthly (empty groups are hidden). **+ New routine** opens the form; clicking a row opens its preview.
+- **Sidebar** — routines grouped by cadence: Once, Daily, Every 2 days, Custom days, Weekly, Twice a month, Monthly (empty groups are hidden). A **once** routine runs a single time on its date — even days late if the computer was off then. **+ New routine** opens the form; clicking a row opens its preview.
 - **Agent filter** — the `All agents ▾` button in the toolbar narrows the sidebar, the week and the month to one peer or a few; the choice is remembered.
 - **Week board** — Mon–Sun columns with one lane per cadence. Every occurrence is a card with the routine name and its time, filled with its status colour.
 - **Month calendar** — a daily health bar with `x/y` per day, filled circles for every-2-days routines, and chips for weekly / twice-monthly / monthly ones. Hover or click any mark for a tooltip; click selects the routine and highlights that run in the preview. `‹ ›` and **Today** move the week or month.
@@ -95,7 +105,9 @@ On first launch the app seeds **Reddit daily**: peer `atlas-of-doors`, prompt `/
 
 ## Notifications
 
-Every header has a **bell**. Clicking it opens a panel on the right; the page behind stays usable, and Esc or the bell closes it. Agents raise notices with the `notify` tool of the `peersflow` MCP server. There are two levels — no "info": a chat that finished with nothing needed is already a green dot.
+![Month calendar with the notifications panel open](./assets/screenshots/routines-month-notifications.png)
+
+Every header has a **bell**. Clicking it opens a panel on the right; the page behind stays usable, and Esc or the bell closes it. Agents raise notices with the `notify` tool of the `peersflow` MCP server — **only routine chats get that tool**; a chat you started yourself answers in the chat, since you are already reading it. There are two levels — no "info": a chat that finished with nothing needed is already a green dot.
 
 - **Needs you** (`action`, orange badge with a count) — the work cannot finish without you. The notice is only a pointer: its title, the chat it came from, "Look inside the chat — it needs you", the agent's short body, the attached files (Open / Reveal) and **Open chat ›**. **Dismiss** is always available.
 - **Warning** (`warn`, small yellow dot) — something went wrong. It stays until you close it with one click.

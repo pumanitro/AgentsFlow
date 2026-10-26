@@ -1,6 +1,6 @@
 {
   "name": "agentsflow",
-  "version": "11.0.0",
+  "version": "12.0.0",
   "private": true,
   "description": "Peers Flow — Claude Code and Codex agents with cross-directory peer delegation",
   "main": "dist/electron/electron/main.js",
