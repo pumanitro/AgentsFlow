@@ -4,6 +4,7 @@ import type { PerfActionRow, PerfAgentRow, PerfHistory, PerfHistoryPoint, PerfSn
 import PerfAsk from './PerfAsk';
 import { Row, SectionLabel, SEV_COLOR } from './PerfBits';
 import GuardSection, { GUARD_LEVEL_LONG, GUARD_LEVEL_SHORT, useGuardSnapshot } from './GuardSection';
+import ServicesSection, { useServicesSnapshot } from './ServicesSection';
 import { GUARD_LEVEL_COLOR } from '../lib/contract';
 import { LineChart, OTHER_COLOR, PALETTE, type Series } from './PerfCharts';
 import {
@@ -163,6 +164,7 @@ export default function PerfLauncher({ dirs = [], targetDir = null, onSend }: Pe
   const verdict = snap ? perfVerdict(snap) : null;
   const color = verdict ? SEV_COLOR[verdict.severity] : undefined;
   const guard = useGuardSnapshot(open ? GUARD_OPEN_REFRESH_MS : GUARD_CLOSED_REFRESH_MS);
+  const services = useServicesSnapshot(open ? GUARD_OPEN_REFRESH_MS : GUARD_CLOSED_REFRESH_MS);
   const memLevel = guard.snap ? (guard.snap.level in GUARD_LEVEL_COLOR ? guard.snap.level : 'unknown') : null;
   const perfTitle = verdict ? `Performance: ${verdict.badgeLong} — ${verdict.reason}` : unavailable ? 'Performance monitor (restart the app to enable)' : 'Performance monitor';
   return (
@@ -193,12 +195,12 @@ export default function PerfLauncher({ dirs = [], targetDir = null, onSend }: Pe
           </span>
         )}
       </button>
-      {open && <PerfModal onClose={() => setOpen(false)} dirs={dirs} targetDir={targetDir} onSend={onSend} guard={guard} />}
+      {open && <PerfModal onClose={() => setOpen(false)} dirs={dirs} targetDir={targetDir} onSend={onSend} guard={guard} services={services} />}
     </>
   );
 }
 
-function PerfModal({ onClose, dirs, targetDir, onSend, guard }: { onClose: () => void; guard: ReturnType<typeof useGuardSnapshot> } & PerfLauncherProps) {
+function PerfModal({ onClose, dirs, targetDir, onSend, guard, services }: { onClose: () => void; guard: ReturnType<typeof useGuardSnapshot>; services: ReturnType<typeof useServicesSnapshot> } & PerfLauncherProps) {
   const [view, setView] = usePersisted<PerfView>('agentsflow:perf:view', 'timeline');
   const [rangeKey, setRangeKey] = usePersisted<string>('agentsflow:perf:range', '15');
   const range = RANGES.find((r) => r.key === rangeKey);
@@ -337,6 +339,16 @@ function PerfModal({ onClose, dirs, targetDir, onSend, guard }: { onClose: () =>
               onPins={(patch) => void guard.setPins(patch)}
               layout="wide"
               unavailable={guard.unavailable || guard.failed}
+            />
+          </div>
+          {/* Sleeping services: what Peers Flow puts to sleep when idle and
+              wakes on demand. Its own data source too, like the guard. */}
+          <div className="mt-1 border-t border-border">
+            <ServicesSection
+              snap={services.snap}
+              act={services.act}
+              layout="wide"
+              unavailable={services.unavailable || services.failed}
             />
           </div>
         </div>

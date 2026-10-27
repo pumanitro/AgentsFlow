@@ -2,6 +2,7 @@ import { contextBridge, ipcRenderer, IpcRendererEvent } from 'electron';
 import type { TrackedDirectory, AccountsSnapshot, AgentsFlowApi, Conversation, GuardSnapshot, KeeperSnapshot, OpenFileNavPayload, PinnedDivider, PinnedItemRef, PinnedTodo, RemoteHostStatus, RotationStatus, SpawnRequest, WorktreeInfo } from '../shared/types';
 import { ROUTINES_IPC, type RoutinesSnapshot } from '../shared/routines';
 import { NOTIFICATIONS_IPC, type NotificationsSnapshot } from '../shared/notifications';
+import { SERVICES_IPC, type ServicesSnapshot } from '../shared/services';
 import { HOOKGUARDS_IPC, type HookGuardsSnapshot } from '../shared/hookguards';
 
 const api: AgentsFlowApi = {
@@ -131,6 +132,20 @@ const api: AgentsFlowApi = {
     const listener = (_e: IpcRendererEvent, snapshot: GuardSnapshot) => cb(snapshot);
     ipcRenderer.on('guard:updated', listener);
     return () => ipcRenderer.removeListener('guard:updated', listener);
+  },
+  // Sleeping services (electron/services).
+  getServicesSnapshot: () => ipcRenderer.invoke(SERVICES_IPC.snapshot),
+  wakeService: (id) => ipcRenderer.invoke(SERVICES_IPC.wake, id),
+  sleepService: (id) => ipcRenderer.invoke(SERVICES_IPC.sleep, id),
+  setServicePin: (id, pinned) => ipcRenderer.invoke(SERVICES_IPC.setPin, id, pinned),
+  setServiceIdle: (id, idleMinutes) => ipcRenderer.invoke(SERVICES_IPC.setIdle, id, idleMinutes),
+  setServiceManaged: (id, managed) => ipcRenderer.invoke(SERVICES_IPC.setManaged, id, managed),
+  setServicesMode: (mode) => ipcRenderer.invoke(SERVICES_IPC.setMode, mode),
+  rediscoverServices: () => ipcRenderer.invoke(SERVICES_IPC.rediscover),
+  onServicesUpdated: (cb) => {
+    const listener = (_e: IpcRendererEvent, snapshot: ServicesSnapshot) => cb(snapshot);
+    ipcRenderer.on(SERVICES_IPC.updated, listener);
+    return () => ipcRenderer.removeListener(SERVICES_IPC.updated, listener);
   },
   getHookGuardsSnapshot: () => ipcRenderer.invoke(HOOKGUARDS_IPC.snapshot),
   recheckHookGuards: () => ipcRenderer.invoke(HOOKGUARDS_IPC.recheck),

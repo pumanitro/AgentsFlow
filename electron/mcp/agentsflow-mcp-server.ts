@@ -15,6 +15,8 @@
  *   • open_file  — bring a file up in the app's file view (bridge only).
  *   • whoami     — this session's identity: machine, peer, conversation/session ids.
  *   • add_remote_peer — track a directory on another machine (ssh), like the app's form.
+ *   • add_local_peer / remove_peer — track / untrack a peer, like "Add directory"
+ *                  and a card's "Remove" (bridge only; never deletes files).
  *   • list_routines / create_routine / update_routine / delete_routine / run_routine
  *                — the app's Routines tab (scheduled prompts), bridge only.
  *   • notify     — raise a notification in the app's bell (questions, to-dos,
@@ -159,6 +161,58 @@ async function toolAddRemotePeer(raw: AddRemotePeerArgs): Promise<Record<string,
       testOnly: raw.test_only === true,
     },
     180_000,
+  );
+  if (!envelope) return textContent('Peers Flow did not respond (bridge unavailable or timed out).', true);
+  return textContent(JSON.stringify(envelope, null, 2), envelope.status === 'failure');
+}
+
+interface AddLocalPeerArgs { path?: unknown; display_name?: unknown; test_only?: unknown }
+
+/**
+ * Track a directory on the app's machine. The app does every check against its
+ * own disk (exists, is a directory, not tracked yet) and owns the store and the
+ * sidebar, so only the shape is checked here; without a bridge it is a clean failure.
+ */
+async function toolAddLocalPeer(raw: AddLocalPeerArgs): Promise<Record<string, unknown>> {
+  const dirPath = typeof raw.path === 'string' ? raw.path.trim() : '';
+  if (!dirPath) return textContent(JSON.stringify({ status: 'failure', error: '`path` is required (the absolute path of a local directory).' }, null, 2), true);
+  if (!path.isAbsolute(dirPath)) return textContent(JSON.stringify({ status: 'failure', error: `Path must be absolute: ${dirPath}` }, null, 2), true);
+  if (raw.display_name !== undefined && typeof raw.display_name !== 'string') {
+    return textContent(JSON.stringify({ status: 'failure', error: '`display_name` must be a string.' }, null, 2), true);
+  }
+  if (!BRIDGE_SOCK) {
+    return textContent(JSON.stringify({ status: 'failure', error: 'Adding a peer requires the Peers Flow app (this session has no app bridge).' }, null, 2), true);
+  }
+  const envelope = await bridgeRequest(
+    {
+      type: 'add_local_peer',
+      id: `${Date.now()}-${process.pid}`,
+      rootConversationId: ROOT_CONVERSATION_ID,
+      path: dirPath,
+      ...(raw.display_name !== undefined ? { displayName: raw.display_name } : {}),
+      testOnly: raw.test_only === true,
+    },
+    20_000,
+  );
+  if (!envelope) return textContent('Peers Flow did not respond (bridge unavailable or timed out).', true);
+  return textContent(JSON.stringify(envelope, null, 2), envelope.status === 'failure');
+}
+
+interface RemovePeerArgs { name?: unknown; path?: unknown; id?: unknown }
+
+/** Untrack a peer through the app. Files on disk are never touched. */
+async function toolRemovePeer(raw: RemovePeerArgs): Promise<Record<string, unknown>> {
+  const str = (v: unknown) => (typeof v === 'string' && v.trim() ? v.trim() : undefined);
+  const name = str(raw.name), dirPath = str(raw.path), peerId = str(raw.id);
+  if (!name && !dirPath && !peerId) {
+    return textContent(JSON.stringify({ status: 'failure', error: 'Pass the peer to remove: `name`, `path` or `id`, as shown by list_peers.' }, null, 2), true);
+  }
+  if (!BRIDGE_SOCK) {
+    return textContent(JSON.stringify({ status: 'failure', error: 'Removing a peer requires the Peers Flow app (this session has no app bridge).' }, null, 2), true);
+  }
+  const envelope = await bridgeRequest(
+    { type: 'remove_peer', id: `${Date.now()}-${process.pid}`, rootConversationId: ROOT_CONVERSATION_ID, name, path: dirPath, peerId },
+    20_000,
   );
   if (!envelope) return textContent('Peers Flow did not respond (bridge unavailable or timed out).', true);
   return textContent(JSON.stringify(envelope, null, 2), envelope.status === 'failure');
@@ -642,6 +696,14 @@ async function handleToolsCall(id: JsonRpcId, params: Record<string, unknown>): 
     }
     if (name === 'add_remote_peer') {
       sendResult(id, await toolAddRemotePeer(args as AddRemotePeerArgs));
+      return;
+    }
+    if (name === 'add_local_peer') {
+      sendResult(id, await toolAddLocalPeer(args as AddLocalPeerArgs));
+      return;
+    }
+    if (name === 'remove_peer') {
+      sendResult(id, await toolRemovePeer(args as RemovePeerArgs));
       return;
     }
     if (name === 'delegate') {

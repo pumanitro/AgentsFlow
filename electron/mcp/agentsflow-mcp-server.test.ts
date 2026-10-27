@@ -81,7 +81,7 @@ describe('MCP server on a remote host (bridge, no store)', () => {
         if (nl < 0) return;
         const req = JSON.parse(buf.slice(0, nl)) as { type: string; id: string };
         received.push(req);
-        const envelope = req.type === 'list_peers' ? { status: 'success', markdown: '# Peers Flow — peer registry\n\nfrom the bridge' } : req.type === 'whoami' ? WHOAMI : req.type === 'add_remote_peer' ? { status: 'success', peer: { displayName: 'studio' } } : req.type === 'routines' ? { status: (req as { op?: string }).op === 'delete' ? 'failure' : 'success', op: (req as { op?: string }).op } : req.type === 'notify' ? { status: 'success', id: 'n-1' } : { status: 'failure', error: 'unexpected' };
+        const envelope = req.type === 'list_peers' ? { status: 'success', markdown: '# Peers Flow — peer registry\n\nfrom the bridge' } : req.type === 'whoami' ? WHOAMI : req.type === 'add_remote_peer' ? { status: 'success', peer: { displayName: 'studio' } } : req.type === 'add_local_peer' ? { status: 'success', peer: { id: 'd-1', displayName: 'arrow', path: (req as { path?: string }).path } } : req.type === 'remove_peer' ? { status: 'success', removed: { id: 'd-1', displayName: 'arrow' } } : req.type === 'routines' ? { status: (req as { op?: string }).op === 'delete' ? 'failure' : 'success', op: (req as { op?: string }).op } : req.type === 'notify' ? { status: 'success', id: 'n-1' } : { status: 'failure', error: 'unexpected' };
         c.end(`${JSON.stringify({ type: 'result', id: req.id, envelope })}\n`);
       });
     });
@@ -111,16 +111,16 @@ describe('MCP server on a remote host (bridge, no store)', () => {
     assert.ok(!Number.isNaN(Date.parse(String(hellos[0].startedAt))));
   });
 
-  test('tools/list of a casual chat has whoami, add_remote_peer and the routine tools, but no notify', async () => {
+  test('tools/list of a casual chat has whoami, the add/remove peer tools and the routine tools, but no notify', async () => {
     const r = await client.call('tools/list');
     const tools = r.result!.tools as { name: string }[];
-    assert.deepEqual(tools.map((t) => t.name).sort(), ['add_remote_peer', 'create_routine', 'delegate', 'delete_routine', 'list_peers', 'list_routines', 'open_file', 'run_routine', 'update_routine', 'whoami']);
+    assert.deepEqual(tools.map((t) => t.name).sort(), ['add_local_peer', 'add_remote_peer', 'create_routine', 'delegate', 'delete_routine', 'list_peers', 'list_routines', 'open_file', 'remove_peer', 'run_routine', 'update_routine', 'whoami']);
   });
 
   test('tools/list of a routine chat includes notify', async () => {
     const r = await routine.call('tools/list');
     const tools = r.result!.tools as { name: string; inputSchema: { required?: string[] } }[];
-    assert.deepEqual(tools.map((t) => t.name).sort(), ['add_remote_peer', 'create_routine', 'delegate', 'delete_routine', 'list_peers', 'list_routines', 'notify', 'open_file', 'run_routine', 'update_routine', 'whoami']);
+    assert.deepEqual(tools.map((t) => t.name).sort(), ['add_local_peer', 'add_remote_peer', 'create_routine', 'delegate', 'delete_routine', 'list_peers', 'list_routines', 'notify', 'open_file', 'remove_peer', 'run_routine', 'update_routine', 'whoami']);
     assert.deepEqual(tools.find((t) => t.name === 'notify')!.inputSchema.required, ['title', 'level']);
   });
 
@@ -173,6 +173,43 @@ describe('MCP server on a remote host (bridge, no store)', () => {
     assert.equal(r.isError, true);
     assert.match(r.text, /required/);
     assert.equal(received.length, before);
+  });
+
+  test('add_local_peer maps snake_case args onto the bridge request', async () => {
+    const r = textOf(await client.call('tools/call', { name: 'add_local_peer', arguments: { path: '/Users/patryk/arrow', display_name: 'arrow', test_only: true } }));
+    assert.equal(r.isError, false);
+    assert.deepEqual(JSON.parse(r.text), { status: 'success', peer: { id: 'd-1', displayName: 'arrow', path: '/Users/patryk/arrow' } });
+    const req = received.find((q) => q.type === 'add_local_peer');
+    assert.ok(req, 'bridge never saw add_local_peer');
+    assert.equal(req.path, '/Users/patryk/arrow');
+    assert.equal(req.displayName, 'arrow');
+    assert.equal(req.testOnly, true);
+    assert.equal(req.rootConversationId, 'conv-1');
+  });
+
+  test('add_local_peer rejects a missing or relative path without asking the app', async () => {
+    const before = received.length;
+    const missing = textOf(await client.call('tools/call', { name: 'add_local_peer', arguments: {} }));
+    assert.equal(missing.isError, true);
+    assert.match(missing.text, /required/);
+    const relative = textOf(await client.call('tools/call', { name: 'add_local_peer', arguments: { path: 'projects/arrow' } }));
+    assert.equal(relative.isError, true);
+    assert.match(relative.text, /must be absolute/);
+    assert.equal(received.length, before);
+  });
+
+  test('remove_peer sends name / path / id and needs one of them', async () => {
+    const before = received.length;
+    assert.equal(textOf(await client.call('tools/call', { name: 'remove_peer', arguments: {} })).isError, true);
+    assert.equal(received.length, before);
+    const r = textOf(await client.call('tools/call', { name: 'remove_peer', arguments: { name: 'arrow', id: 'd-1' } }));
+    assert.equal(r.isError, false);
+    assert.deepEqual(JSON.parse(r.text), { status: 'success', removed: { id: 'd-1', displayName: 'arrow' } });
+    const req = received.find((q) => q.type === 'remove_peer');
+    assert.ok(req, 'bridge never saw remove_peer');
+    assert.equal(req.name, 'arrow');
+    assert.equal(req.peerId, 'd-1');
+    assert.equal(req.rootConversationId, 'conv-1');
   });
 
   test('each routine tool is one `routines` bridge request with its arguments untouched', async () => {
@@ -232,6 +269,15 @@ describe('MCP server with no bridge', () => {
     const r = textOf(await routine.call('tools/call', { name: 'notify', arguments: { title: 't', level: 'warn' } }));
     assert.equal(r.isError, true);
     assert.deepEqual(JSON.parse(r.text), { status: 'failure', error: 'Notifications require the Peers Flow app (this session has no app bridge).' });
+  });
+
+  test('add_local_peer and remove_peer say they need the app', async () => {
+    const add = textOf(await client.call('tools/call', { name: 'add_local_peer', arguments: { path: '/tmp' } }));
+    assert.equal(add.isError, true);
+    assert.match(add.text, /Adding a peer requires the Peers Flow app/);
+    const rm = textOf(await client.call('tools/call', { name: 'remove_peer', arguments: { name: 'arrow' } }));
+    assert.equal(rm.isError, true);
+    assert.match(rm.text, /Removing a peer requires the Peers Flow app/);
   });
 
   test('whoami falls back to what the process can see', async () => {

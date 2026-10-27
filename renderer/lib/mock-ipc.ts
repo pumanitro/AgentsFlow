@@ -7,6 +7,7 @@ import { buildMockRoutines } from './mock-routines';
 import { buildMockHookGuardsSnapshot } from './mock-hookguards';
 import type { NotificationsSnapshot, UserNotification } from '../../shared/notifications';
 import { isOpen } from '../../shared/notifications';
+import type { ServiceActionResult, ServiceRow, ServicesMode, ServicesSnapshot } from '../../shared/services';
 
 const STORE_KEY = 'agentsflow:mock:v3';
 
@@ -182,6 +183,81 @@ function mockGuardSnapshot(): GuardSnapshot {
       { at: ago(57), by: 'peersflow-guard', kind: 'container', name: 'redis', dry: true, reason: 'WOULD-STOP: idle 1h16m, no project', },
     ],
   };
+}
+
+// ---- Sleeping services sample ------------------------------------------------
+// The data service awake, one Docker project asleep with three addresses being
+// watched, one waking up, one about to be slept early because memory is tight,
+// and Docker Desktop kept on by a container that is not managed here. Pins,
+// idle limits, "leave it alone", the mode and wake/sleep clicks are mutable.
+interface MockService { id: string; name: string; kind: ServiceRow['kind']; state: ServiceRow['state']; pinned: boolean; managed: boolean; idleMinutes: number; usedMin: number | null; sinceMin: number; ports: number[]; memMB: number | null; cpuPct: number | null; conns: number }
+let mockServicesMode: ServicesMode = 'live';
+const mockServices: MockService[] = [
+  { id: 'atlas-dashboard-api', name: 'Atlas dashboard — data service', kind: 'process', state: 'awake', pinned: false, managed: true, idleMinutes: 240, usedMin: 12, sinceMin: 95, ports: [5545], memMB: 9_420, cpuPct: 1.2, conns: 0 },
+  { id: 'compose:vitaminology', name: 'vitaminology (Docker project)', kind: 'compose', state: 'asleep', pinned: false, managed: true, idleMinutes: 240, usedMin: 410, sinceMin: 170, ports: [55421, 55423, 55432], memMB: null, cpuPct: null, conns: 0 },
+  { id: 'containers:shelly-monitor', name: 'shelly-monitor (Docker project)', kind: 'containers', state: 'waking', pinned: false, managed: true, idleMinutes: 240, usedMin: 0, sinceMin: 0, ports: [54321, 54322], memMB: null, cpuPct: null, conns: 1 },
+  { id: 'compose:influence', name: 'influence (Docker project)', kind: 'compose', state: 'awake', pinned: false, managed: true, idleMinutes: 240, usedMin: 47, sinceMin: 300, ports: [3100], memMB: 1_830, cpuPct: 0.3, conns: 0 },
+  { id: 'docker-desktop', name: 'Docker Desktop', kind: 'docker-desktop', state: 'awake', pinned: false, managed: true, idleMinutes: 15, usedMin: null, sinceMin: 300, ports: [], memMB: 4_100, cpuPct: 2.4, conns: 0 },
+];
+const mockServicesLog: ServicesSnapshot['recent'] = [];
+
+function mockServicesSnapshot(): ServicesSnapshot {
+  const now = Date.now();
+  const ago = (min: number) => new Date(now - min * 60_000).toISOString();
+  const pressureEarly = (s: MockService) => s.state === 'awake' && s.managed && !s.pinned && s.kind !== 'docker-desktop' && s.usedMin !== null && s.usedMin >= 30 && s.usedMin < s.idleMinutes;
+  const rows: ServiceRow[] = mockServices.map((s) => {
+    const base = {
+      id: s.id, name: s.name, kind: s.kind, state: s.state, pinned: s.pinned, managed: s.managed, idleMinutes: s.idleMinutes,
+      idleForMinutes: s.usedMin, ports: s.ports.map((port) => ({ port, host: '127.0.0.1' as const })),
+      guardedPorts: s.state === 'asleep' ? s.ports : [], lastUsedAt: s.usedMin === null ? null : ago(s.usedMin), since: ago(s.sinceMin),
+      cpuPct: s.state === 'awake' ? s.cpuPct : null, memMB: s.state === 'awake' ? s.memMB : null, establishedConns: s.conns,
+      canWake: s.state === 'asleep', canSleep: s.state === 'awake',
+    };
+    if (s.state === 'waking') return { ...base, verdict: 'waking', note: 'something asked for it — waking up' };
+    if (!s.managed) return { ...base, verdict: 'unmanaged', note: 'listed only — Peers Flow never stops or starts it' };
+    if (s.state === 'asleep') return { ...base, verdict: 'asleep', note: `asleep since ${new Date(now - s.sinceMin * 60_000).toTimeString().slice(0, 5)}` };
+    if (s.pinned) return { ...base, verdict: 'pinned', note: 'pinned by you — never put to sleep for being idle' };
+    if (s.kind === 'docker-desktop') return { ...base, verdict: 'blocked', note: 'stays on: postgres-arrow is running and is not managed here' };
+    if (pressureEarly(s)) return { ...base, verdict: 'idle', note: `memory is tight — not used for ${s.usedMin} min, going to sleep early (normally after ${s.idleMinutes / 60} h)` };
+    return { ...base, verdict: 'in-use', note: `used ${s.usedMin ?? 0} min ago` };
+  });
+  const queue = mockServices.filter(pressureEarly).sort((a, b) => (b.usedMin ?? 0) - (a.usedMin ?? 0)).map((s) => s.id);
+  return {
+    at: new Date(now).toISOString(),
+    mode: mockServicesMode,
+    docker: 'up',
+    memory: { level: 'warn', pressure: true, queue },
+    services: [...rows.filter((r) => r.kind !== 'docker-desktop'), ...rows.filter((r) => r.kind === 'docker-desktop')],
+    recent: ([
+      ...mockServicesLog,
+      { at: ago(0), id: 'containers:shelly-monitor', name: 'shelly-monitor (Docker project)', event: 'woke', by: 'request', detail: 'first request to :54321' },
+      { at: ago(22), id: 'compose:arrow', name: 'arrow (Docker project)', event: 'slept', by: 'pressure', detail: 'memory warn — least recently used (idle 64 min)' },
+      { at: ago(170), id: 'compose:vitaminology', name: 'vitaminology (Docker project)', event: 'proxy-armed', by: 'idle', detail: ':55421, :55423, :55432' },
+      { at: ago(170), id: 'compose:vitaminology', name: 'vitaminology (Docker project)', event: 'slept', by: 'idle', detail: 'not used for 4 h' },
+      { at: ago(300), id: 'docker-desktop', name: 'Docker Desktop', event: 'docker-started', by: 'click', detail: '' },
+    ] as ServicesSnapshot['recent']).slice(0, 30),
+    files: {
+      registry: '/Users/demo/Library/Application Support/Peers Flow/services.json',
+      state: '/Users/demo/Library/Application Support/Peers Flow/services-state.json',
+      log: '/Users/demo/Library/Application Support/Peers Flow/services-log.jsonl',
+    },
+  };
+}
+
+function mockServiceAct(id: string, to: 'awake' | 'asleep'): ServiceActionResult {
+  const s = mockServices.find((x) => x.id === id);
+  if (!s) return { ok: false, error: `unknown service ${id}`, snapshot: mockServicesSnapshot() };
+  s.state = to;
+  s.sinceMin = 0;
+  if (to === 'awake') s.usedMin = 0;
+  mockServicesLog.unshift({ at: new Date().toISOString(), id, name: s.name, event: to === 'awake' ? 'woke' : 'slept', by: 'click', detail: '' });
+  return { ok: true, snapshot: mockServicesSnapshot() };
+}
+
+function mockServiceSet(id: string, patch: Partial<Pick<MockService, 'pinned' | 'idleMinutes' | 'managed'>>): ServicesSnapshot {
+  const s = mockServices.find((x) => x.id === id);
+  if (s) Object.assign(s, patch);
+  return mockServicesSnapshot();
 }
 
 export function createMockApi(): AgentsFlowApi {
@@ -948,6 +1024,15 @@ export function createMockApi(): AgentsFlowApi {
       return mockPins;
     },
     onGuardUpdated: () => () => undefined,
+    getServicesSnapshot: async () => mockServicesSnapshot(),
+    wakeService: async (id) => mockServiceAct(id, 'awake'),
+    sleepService: async (id) => mockServiceAct(id, 'asleep'),
+    setServicePin: async (id, pinned) => mockServiceSet(id, { pinned }),
+    setServiceIdle: async (id, idleMinutes) => mockServiceSet(id, { idleMinutes }),
+    setServiceManaged: async (id, managed) => mockServiceSet(id, { managed }),
+    setServicesMode: async (mode) => { mockServicesMode = mode; return mockServicesSnapshot(); },
+    rediscoverServices: async () => mockServicesSnapshot(),
+    onServicesUpdated: () => () => undefined,
     getHookGuardsSnapshot: async () => buildMockHookGuardsSnapshot(),
     recheckHookGuards: async () => buildMockHookGuardsSnapshot(),
     onHookGuardsUpdated: () => () => undefined,

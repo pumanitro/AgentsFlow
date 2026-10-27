@@ -45,6 +45,8 @@ describe('delegation bridge with every handler', () => {
     onListPeers: async (r) => { seen.push(`list_peers:${r.rootConversationId}`); return { status: 'success', markdown: '# peers' }; },
     onWhoami: async (r) => { seen.push(`whoami:${r.rootConversationId}`); return { status: 'success', host: 'patryk@h', remote: true }; },
     onAddRemotePeer: async (r) => { seen.push(`add_remote_peer:${r.user}@${r.host}:${r.path}`); return { status: 'success', peer: { displayName: 'pf-peer' } }; },
+    onAddLocalPeer: async (r) => { seen.push(`add_local_peer:${r.path}:${r.testOnly}`); return { status: 'success', via: 'add_local_peer' }; },
+    onRemovePeer: async (r) => { seen.push(`remove_peer:${r.name}`); return { status: 'success', via: 'remove_peer' }; },
     onRoutines: async (r) => { seen.push(`routines:${r.op}:${JSON.stringify(r.args)}`); return { status: 'success', via: 'routines' }; },
     onNotify: async (r) => { seen.push(`notify:${r.rootConversationId}:${JSON.stringify(r.args)}`); return { status: 'success', via: 'notify' }; },
     onHello: async (r) => { seen.push(`hello:${r.rootConversationId}:${r.pid}:${r.startedAt}`); return { status: 'success' }; },
@@ -87,6 +89,15 @@ describe('delegation bridge with every handler', () => {
     assert.deepEqual(r, { type: 'result', id: 'a1', envelope: { status: 'success', peer: { displayName: 'pf-peer' } } });
   });
 
+  test('add_local_peer and remove_peer route to their handlers', async () => {
+    const a = await ask(JSON.stringify({ type: 'add_local_peer', id: 'al1', rootConversationId: 'conv-9', path: '/p/arrow', testOnly: true }));
+    assert.deepEqual(a, { type: 'result', id: 'al1', envelope: { status: 'success', via: 'add_local_peer' } });
+    assert.equal(seen[seen.length - 1], 'add_local_peer:/p/arrow:true');
+    const r = await ask(JSON.stringify({ type: 'remove_peer', id: 'rp1', rootConversationId: 'conv-9', name: 'arrow' }));
+    assert.deepEqual(r, { type: 'result', id: 'rp1', envelope: { status: 'success', via: 'remove_peer' } });
+    assert.equal(seen[seen.length - 1], 'remove_peer:arrow');
+  });
+
   test('routines', async () => {
     const r = await ask(JSON.stringify({ type: 'routines', id: 'r1', rootConversationId: 'conv-9', op: 'create', args: { name: 'Reddit daily' } }));
     assert.deepEqual(r, { type: 'result', id: 'r1', envelope: { status: 'success', via: 'routines' } });
@@ -126,7 +137,7 @@ describe('delegation bridge with every handler', () => {
   });
 
   test('every request reached exactly its handler', () => {
-    assert.deepEqual(seen, ['delegate:arrow', 'delegate:legacy', 'open_file:README.md', 'list_peers:conv-9', 'whoami:conv-9', 'add_remote_peer:patryk@h:/p', 'routines:create:{"name":"Reddit daily"}', 'notify:conv-9:{"title":"  Timesheet  ","level":"action","questions":[{"text":"Days off?","kind":"yesno","extra":1}]}', 'hello:conv-9:4242:2026-10-23T05:57:00.000Z']);
+    assert.deepEqual(seen, ['delegate:arrow', 'delegate:legacy', 'open_file:README.md', 'list_peers:conv-9', 'whoami:conv-9', 'add_remote_peer:patryk@h:/p', 'add_local_peer:/p/arrow:true', 'remove_peer:arrow', 'routines:create:{"name":"Reddit daily"}', 'notify:conv-9:{"title":"  Timesheet  ","level":"action","questions":[{"text":"Days off?","kind":"yesno","extra":1}]}', 'hello:conv-9:4242:2026-10-23T05:57:00.000Z']);
   });
 });
 

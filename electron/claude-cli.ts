@@ -5,6 +5,7 @@ import * as path from 'path';
 import { withUtf8Locale } from './locale';
 import { withKillShims } from './hookguards/shim-path';
 import { getRemoteHosts } from './remote/remote-hosts';
+import { providerEnvKeys, readPeerProviderEnv } from './peer-provider-env';
 import type { AgentRow } from '../shared/remote';
 
 const CLAUDE_BIN = process.env.CLAUDE_BIN || 'claude';
@@ -64,9 +65,9 @@ function stripAnsi(s: string): string {
 }
 
 interface RunResult { code: number; stdout: string; stderr: string; timedOut: boolean }
-function runCmd(args: string[], opts: { cwd?: string; timeoutMs?: number } = {}): Promise<RunResult> {
+function runCmd(args: string[], opts: { cwd?: string; timeoutMs?: number; extraEnv?: Record<string, string> } = {}): Promise<RunResult> {
   return new Promise((resolve) => {
-    const env: Record<string, string> = { ...process.env } as Record<string, string>;
+    const env: Record<string, string> = { ...process.env, ...opts.extraEnv } as Record<string, string>;
     env.PATH = `${process.env.PATH}:${path.join(os.homedir(), '.local/bin')}`;
     withKillShims(env);
     // Belt-and-suspenders: ask child to not colorize. We still stripAnsi() the result
@@ -412,6 +413,9 @@ export async function dispatchBackground(opts: {
   model?: string;
   // hostKey of a remote peer to spawn on; undefined = this machine.
   host?: string;
+  // The peer's root when `cwd` is a worktree of it: its `.claude/settings*.json`
+  // env applies under the worktree's own (see peer-provider-env.ts).
+  peerDir?: string;
 }): Promise<{ daemonShort: string | null; raw: string; code: number | null }> {
   if (opts.host) return dispatchRemote({ ...opts, host: opts.host });
   // The prompt must stay the final positional argument.
@@ -420,6 +424,7 @@ export async function dispatchBackground(opts: {
   if (opts.mcpConfigPath) args.push('--mcp-config', opts.mcpConfigPath);
   if (opts.appendSystemPrompt) args.push('--append-system-prompt', opts.appendSystemPrompt);
   args.push(opts.prompt);
+  const providerEnv = readPeerProviderEnv([opts.peerDir ?? opts.cwd, opts.cwd]);
   // The prompt itself never goes to the log. A handover seeds a session with a
   // condensed transcript — up to 12 k characters — and one line per spawn of
   // that is how an unrotated main.log has frozen this app before (see the
@@ -429,8 +434,9 @@ export async function dispatchBackground(opts: {
     cwd: opts.cwd,
     args: args.slice(0, -1),
     promptChars: opts.prompt.length,
+    providerEnvKeys: providerEnvKeys(providerEnv),
   });
-  const { code, stdout, stderr } = await runCmd(args, { cwd: opts.cwd, timeoutMs: 15000 });
+  const { code, stdout, stderr } = await runCmd(args, { cwd: opts.cwd, timeoutMs: 15000, extraEnv: providerEnv });
   const cleanStdout = stripAnsi(stdout);
   const cleanStderr = stripAnsi(stderr);
   console.log('[agentsflow][dispatch] result', {
@@ -465,6 +471,7 @@ export async function resumeBackground(opts: {
   mcpConfigPath?: string;
   appendSystemPrompt?: string;
   model?: string;
+  peerDir?: string;
 }): Promise<{ daemonShort: string | null; raw: string; code: number | null }> {
   // The prompt must stay the final positional argument.
   const args = ['--bg', '--resume', opts.sessionId, '--permission-mode', 'bypassPermissions'];
@@ -472,6 +479,7 @@ export async function resumeBackground(opts: {
   if (opts.mcpConfigPath) args.push('--mcp-config', opts.mcpConfigPath);
   if (opts.appendSystemPrompt) args.push('--append-system-prompt', opts.appendSystemPrompt);
   args.push(opts.prompt);
+  const providerEnv = readPeerProviderEnv([opts.peerDir ?? opts.cwd, opts.cwd]);
   // Same log-storm rule as dispatchBackground: prompt length, never the prompt,
   // and the multi-KB system prompt is elided.
   console.log('[agentsflow][dispatch] resuming claude in background', {
@@ -479,8 +487,9 @@ export async function resumeBackground(opts: {
     cwd: opts.cwd,
     args: args.slice(0, -1).map((a, i) => (args[i - 1] === '--append-system-prompt' ? `<${a.length} chars>` : a)),
     promptChars: opts.prompt.length,
+    providerEnvKeys: providerEnvKeys(providerEnv),
   });
-  const { code, stdout, stderr } = await runCmd(args, { cwd: opts.cwd, timeoutMs: 15000 });
+  const { code, stdout, stderr } = await runCmd(args, { cwd: opts.cwd, timeoutMs: 15000, extraEnv: providerEnv });
   const combined = stripAnsi(stdout) + '\n' + stripAnsi(stderr);
   const m = combined.match(/backgrounded\s*·\s*([0-9a-f]{6,12})/i);
   console.log('[agentsflow][dispatch] resume result', { code, daemonShort: m ? m[1] : null, sample: combined.trim().slice(0, 300) });

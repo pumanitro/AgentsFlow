@@ -148,7 +148,7 @@ export function remoteDisplayName(base: string, host: string, others: TrackedDir
  */
 export function recomputeDisplayNamesKeepingRemote(dirs: TrackedDirectory[]): TrackedDirectory[] {
   const local = dirs.filter((d) => !d.remote);
-  return dirs.map((d) => (d.remote ? d : { ...d, displayName: computeDisplayName(d.path, local) }));
+  return dirs.map((d) => (d.remote ? d : { ...d, displayName: d.customName || computeDisplayName(d.path, local) }));
 }
 
 // ---------------------------------------------------------------------------

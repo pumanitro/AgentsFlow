@@ -1,6 +1,7 @@
 import type { Routine, RoutineInput, RoutinePatch, RoutineRun, RoutinesSnapshot } from './routines';   // type-only, cycle is fine
-import type { HookGuardsSnapshot } from './hookguards';   // type-only, cycle is fine
 import type { NotificationsSnapshot, UserNotification } from './notifications';   // type-only, cycle is fine
+import type { ServiceActionResult, ServicesMode, ServicesSnapshot } from './services';   // type-only, cycle is fine
+import type { HookGuardsSnapshot } from './hookguards';   // type-only, cycle is fine
 
 export type AgentProvider = 'claude' | 'codex';
 
@@ -45,6 +46,9 @@ export interface TrackedDirectory {
   path: string;
   displayName: string;
   addedAt: string;
+  // A local peer's name pinned by `add_local_peer({ display_name })`; without
+  // it the name is derived from the path and recomputed as peers come and go.
+  customName?: string;
   // Set when this peer lives on another machine reached over SSH. `path` is
   // then a path on THAT machine and must never be stat-ed locally.
   remote?: RemotePeerSpec;
@@ -858,6 +862,19 @@ export interface AgentsFlowApi {
   getGuardSnapshot?: () => Promise<GuardSnapshot>; // 'guard:snapshot'
   setGuardPins?: (patch: { mode?: GuardPins['mode']; idleMinutes?: number; keep?: { name: string; keep: boolean } }) => Promise<GuardPins>; // 'guard:setPins'
   onGuardUpdated?: (cb: (s: GuardSnapshot) => void) => () => void; // push 'guard:updated'
+
+  // Sleeping services (electron/services): idle services are put to sleep and
+  // woken on the first request or a click. OPTIONAL like the guard's — a running
+  // app's preload can predate them, so the renderer uses `api().x?.()`.
+  getServicesSnapshot?: () => Promise<ServicesSnapshot>;                               // 'services:snapshot'
+  wakeService?: (id: string) => Promise<ServiceActionResult>;                           // 'services:wake'
+  sleepService?: (id: string) => Promise<ServiceActionResult>;                          // 'services:sleep'
+  setServicePin?: (id: string, pinned: boolean) => Promise<ServicesSnapshot>;           // 'services:setPin'
+  setServiceIdle?: (id: string, idleMinutes: number) => Promise<ServicesSnapshot>;      // 'services:setIdle'
+  setServiceManaged?: (id: string, managed: boolean) => Promise<ServicesSnapshot>;      // 'services:setManaged'
+  setServicesMode?: (mode: ServicesMode) => Promise<ServicesSnapshot>;                  // 'services:setMode'
+  rediscoverServices?: () => Promise<ServicesSnapshot>;                                 // 'services:rediscover'
+  onServicesUpdated?: (cb: (s: ServicesSnapshot) => void) => () => void;                // push 'services:updated'
   // Claude Code guard hooks Peers Flow ships and installs (electron/hookguards).
   // OPTIONAL like the guard's: a running app's preload can predate them.
   getHookGuardsSnapshot?: () => Promise<HookGuardsSnapshot>;                        // 'hookguards:snapshot'

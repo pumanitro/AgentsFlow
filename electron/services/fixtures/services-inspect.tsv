@@ -1,0 +1,9 @@
+/influence-postgres	influence	/Users/iij/IdeaProjects/influence	/Users/iij/IdeaProjects/influence/docker-compose.yml,/Users/iij/IdeaProjects/influence/docker-compose.override.yml	<no value>	{"5432/tcp":[{"HostIp":"0.0.0.0","HostPort":"5433"},{"HostIp":"::","HostPort":"5433"}]}
+/influence-redis	influence	/Users/iij/IdeaProjects/influence	/Users/iij/IdeaProjects/influence/docker-compose.yml,/Users/iij/IdeaProjects/influence/docker-compose.override.yml	<no value>	{"6379/tcp":[{"HostIp":"127.0.0.1","HostPort":"6379"}],"6380/tcp":[{"HostIp":"","HostPort":"16380"}]}
+/supabase_db_shelly-monitor	shelly-monitor	<no value>	<no value>	shelly-monitor	{"5432/tcp":[{"HostIp":"","HostPort":"55422"}]}
+/supabase_kong_shelly-monitor	shelly-monitor	<no value>	<no value>	shelly-monitor	{"8000/tcp":[{"HostIp":"","HostPort":"55421"}]}
+/supabase_edge_runtime_shelly-monitor	shelly-monitor	<no value>	<no value>	shelly-monitor	{}
+/redis	<no value>	<no value>	<no value>	<no value>	{"6379/tcp":[{"HostIp":"127.0.0.1","HostPort":"16379"}]}
+/pe-db	<no value>	<no value>	<no value>	<no value>	{"5432/tcp":[{"HostIp":"0.0.0.0","HostPort":"5434"}]}
+/case-challenge-postgres	case-challenge	/Users/iij/IdeaProjects/case-challenge	/Users/iij/IdeaProjects/case-challenge/docker-compose.dev.yml	<no value>	{"5432/tcp":[{"HostIp":"127.0.0.1","HostPort":"5440"}]}
+/case-challenge-redis	case-challenge	/Users/iij/IdeaProjects/case-challenge	/Users/iij/IdeaProjects/case-challenge/docker-compose.dev.yml	<no value>	null

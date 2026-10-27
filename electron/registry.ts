@@ -186,6 +186,39 @@ export const TOOL_DEFS = [
     },
   },
   {
+    name: 'add_local_peer',
+    title: 'Add a local peer',
+    description:
+      'Track a directory on THIS machine as a Peers Flow peer, exactly like the app\'s "Add directory" button. Peers Flow checks that the path is absolute, exists and is a readable directory, then saves the peer (named after the directory, disambiguated like every other card) and shows it in the sidebar at once; its skills and MCP connections are read from the directory as for any peer. A directory that is already tracked is returned as is, never duplicated. Only call this when the user asks to add/track a local directory as a peer. Pass `test_only: true` to just check the path without saving anything.',
+    usage: 'add_local_peer({ path, display_name?, test_only? })',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        path: { type: 'string', description: 'Absolute path of the directory on this machine, e.g. "/Users/demo/projects/arrow".' },
+        display_name: { type: 'string', description: 'Optional name for the peer card, at most 60 characters. Defaults to the directory name. Must not clash with another peer\'s name.' },
+        test_only: { type: 'boolean', description: 'Only check the path; save nothing.' },
+      },
+      required: ['path'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'remove_peer',
+    title: 'Remove a peer',
+    description:
+      'Stop tracking a peer (local or remote), exactly like the card\'s "Remove" action: it leaves the sidebar and list_peers, and its conversations come back if the directory is added again. Nothing on disk is ever deleted. Only call this when the user explicitly asks to remove/untrack that peer. Name the peer with one of `name`, `path` or `id`, as shown by list_peers.',
+    usage: 'remove_peer({ name? | path? | id? })',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        name: { type: 'string', description: 'The peer\'s name, as shown by list_peers.' },
+        path: { type: 'string', description: 'The peer\'s absolute path.' },
+        id: { type: 'string', description: 'The peer\'s id.' },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
     name: 'list_routines',
     title: 'List routines',
     description:
@@ -545,6 +578,9 @@ export function renderBootstrapPrompt(reg: Registry, self?: SelfInfo, kind: Chat
   lines.push("- Prefer delegating over reaching into another peer's files directly.");
   lines.push(
     `- When the user asks to connect or add a directory on another machine, call \`${qualifiedToolName('add_remote_peer')}\` (user, host, absolute path, ssh options). It tests the connection first and returns the new peer's name to delegate to.`,
+  );
+  lines.push(
+    `- When the user asks to add or track a directory on this machine as a peer, call \`${qualifiedToolName('add_local_peer')}\` (absolute path). It returns the new peer's name to delegate to. \`${qualifiedToolName('remove_peer')}\` untracks a peer (never deletes files); call it only when the user explicitly asks.`,
   );
   lines.push(
     `- When the user asks for something to run on a schedule ("every morning", "each Monday") or once at a set day and time ("tomorrow at 9", "on Friday"; cadence \`once\` + \`date\`), call \`${qualifiedToolName('create_routine')}\`: it adds a routine to the app's Routines tab, which starts a fresh chat in a peer at each scheduled time. \`${qualifiedToolName('list_routines')}\`, \`${qualifiedToolName('update_routine')}\` (also pauses / resumes), \`${qualifiedToolName('delete_routine')}\` and \`${qualifiedToolName('run_routine')}\` manage them. Never create, change, delete or run a routine the user did not ask for.`,

@@ -73,7 +73,10 @@ import { collectKnownNames } from './wispr/vocabulary';
 import * as keeper from './keeper/keeper';
 import { consumeSkillContractNote, listSkillContractNotes } from './keeper/skill-contracts';
 import * as guard from './guard/guard';
+import * as services from './services/services';
+import { servicesFiles } from './services/paths';
 import { agentEnvironment } from './cli-environment';
+import { SERVICES_IPC, type ServicesMode } from '../shared/services';
 import * as hookguards from './hookguards/install';
 import { HOOKGUARDS_IPC } from '../shared/hookguards';
 import { readKillLogSince } from './guard/kill-log';
@@ -81,6 +84,7 @@ import { worstMeter } from '../shared/usage';
 import { forkTitle } from '../shared/fork-title';
 import { findTranscript, latestContinuation, mungeCwd, transcriptExists as transcriptExistsUnder } from './transcript-path';
 import { computeDisplayName } from './naming';
+import { addLocalDirectory, addLocalPeerEnvelope, checkLocalDirectory, removePeerEnvelope, removeTrackedDirectory, type LocalPeersDeps } from './local-peers';
 import {
   dispatchBackground,
   resolveSessionByDaemonShort,
@@ -98,7 +102,7 @@ import { ensureWorkspaceTrusted } from './workspace-trust';
 import { applyRemoteJobState, getLastAgentRows, refreshNow, setPollerForeground, startPoller, stopPoller, syncWatchers, unwatchConversation, watchConversation, watcherStats } from './poller';
 import { bridgeSocketPath, buildBootstrapSystemPrompt, getMcpServerInfo, writeMcpConfigForConversation, writeRemoteMcpConfig } from './mcp-bridge';
 import { buildDelegatePrompt, buildRegistry, mayNotify, NOTIFY_REFUSED, renderRegistryMarkdown, resolveChatKind } from './registry';
-import { startPeersBridge, type AddRemotePeerRequest, type DelegateRequest, type HelloRequest, type ListPeersRequest, type NotifyRequest, type OpenFileRequest, type PeersBridge, type RoutinesRequest, type WhoamiRequest } from './delegation-bridge';
+import { startPeersBridge, type AddLocalPeerRequest, type AddRemotePeerRequest, type RemovePeerRequest, type DelegateRequest, type HelloRequest, type ListPeersRequest, type NotifyRequest, type OpenFileRequest, type PeersBridge, type RoutinesRequest, type WhoamiRequest } from './delegation-bridge';
 import { RemoteHosts, setRemoteHosts } from './remote/remote-hosts';
 import { remoteCommand, runRemote } from './remote/remote-exec';
 import { hostKeyOf } from '../shared/remote';
@@ -582,6 +586,7 @@ app.whenReady().then(() => {
   // first: the Keeper reads its level.
   guard.startGuard(guardDeps);
   keeper.startKeeper(keeperDeps);
+  services.startServices(servicesDeps);
   // Install + self-test the Claude Code guards (mass-kill, cookies, second Chrome, memory
   // admission) and the kill shims every chat gets on PATH. PEERSFLOW_HOOKGUARDS=0 for test instances.
   if (process.env.PEERSFLOW_HOOKGUARDS !== '0') hookguards.startHookGuards(hookGuardsDeps);
@@ -618,6 +623,8 @@ app.whenReady().then(() => {
       onListPeers: handleListPeers,
       onWhoami: handleWhoami,
       onAddRemotePeer: handleAddRemotePeer,
+      onAddLocalPeer: handleAddLocalPeer,
+      onRemovePeer: handleRemovePeer,
       onRoutines: handleRoutines,
       onNotify: handleNotify,
       onHello: handleHello,
@@ -743,6 +750,7 @@ app.on('before-quit', () => {
   wisprLearner.stopWisprLearner();
   keeper.stopKeeper();
   guard.stopGuard();
+  void services.stopServices();
   hookguards.stopHookGuards();
   codex.close();
   try { peersBridge?.stop(); } catch { /* ignore */ }
@@ -787,49 +795,70 @@ function broadcastTodos(): void {
 
 ipcMain.handle('dirs:list', () => store.getDirectories());
 
+// One code path for the "Add directory" button and the add_local_peer MCP tool.
+const localPeersDeps: LocalPeersDeps = {
+  getDirectories: () => store.getDirectories(),
+  setDirectories: (dirs) => store.setDirectories(dirs),
+  relinkConversationsByPath: (absPath, id, name) => store.relinkConversationsByPath(absPath, id, name),
+  newId: () => uuid(),
+  now: () => new Date(),
+};
+
 ipcMain.handle('dirs:add', async (): Promise<TrackedDirectory | null> => {
   const win = mainWindow ?? BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows()[0];
   const result = await dialog.showOpenDialog(win!, {
     properties: ['openDirectory', 'createDirectory'],
   });
   if (result.canceled || result.filePaths.length === 0) return null;
-  const absPath = result.filePaths[0];
-  try { fs.accessSync(absPath, fs.constants.R_OK); } catch { return null; }
-
-  const existing = store.getDirectories();
-  // Local dirs only: a remote peer may carry the same path on another machine.
-  const same = existing.find((d) => !d.remote && d.path === absPath);
-  if (same) return same;
-  const newDir: TrackedDirectory = {
-    id: uuid(),
-    path: absPath,
-    displayName: computeDisplayName(absPath, existing),
-    addedAt: new Date().toISOString(),
-  };
-  // Remote peers keep their own names (see recomputeDisplayNamesKeepingRemote).
-  const next = recomputeDisplayNamesKeepingRemote([...existing, newDir]);
-  store.setDirectories(next);
-  const persisted = next.find((d) => d.id === newDir.id) ?? newDir;
-
-  // Re-link any pre-existing conversations recorded for this path back onto
+  const v = checkLocalDirectory(result.filePaths[0]);
+  if (!v.ok) return null;
+  // Re-links any pre-existing conversations recorded for this path back onto
   // the freshly-minted directoryId — this is what makes "remove + re-add"
-  // restore the history list instead of orphaning it. We deliberately do NOT
-  // scan ~/.claude/projects for additional transcripts here: history should
-  // only contain conversations the user actually spawned via AgentsFlow.
-  const relinked = store.relinkConversationsByPath(persisted.path, persisted.id, persisted.displayName);
+  // restore the history list instead of orphaning it.
+  const { dir, relinked } = addLocalDirectory(v.path, localPeersDeps);
   if (relinked > 0) {
-    console.log('[agentsflow] re-linked', relinked, 'conversations to', persisted.path);
+    console.log('[agentsflow] re-linked', relinked, 'conversations to', dir.path);
     broadcastConversations();
   }
-  return persisted;
+  return dir;
 });
 
 ipcMain.handle('dirs:remove', (_e, id: string) => {
-  const dirs = store.getDirectories().filter((d) => d.id !== id);
-  store.setDirectories(recomputeDisplayNamesKeepingRemote(dirs));
+  removeTrackedDirectory(id, localPeersDeps);
   // A host that owned only this dir is disconnected.
   remoteHosts?.syncFromDirectories();
 });
+
+/**
+ * `add_local_peer` (MCP): the "Add directory" button without the folder picker.
+ * The renderer only learns of it through the push, and list_peers in another
+ * chat reads store.json, so the store is written through before answering.
+ */
+async function handleAddLocalPeer(req: AddLocalPeerRequest): Promise<Record<string, unknown>> {
+  const { envelope, changed, relinked } = addLocalPeerEnvelope(
+    { path: req.path, displayName: req.displayName, testOnly: req.testOnly },
+    localPeersDeps,
+  );
+  if (changed) {
+    console.log('[agentsflow] added local peer over MCP', { id: changed.id, path: changed.path, relinked });
+    store.flushSync();
+    broadcastDirectories();
+    if (relinked > 0) broadcastConversations();
+  }
+  return envelope;
+}
+
+/** `remove_peer` (MCP): a card's "Remove" — untrack only, history kept for a re-add. */
+async function handleRemovePeer(req: RemovePeerRequest): Promise<Record<string, unknown>> {
+  const { envelope, removed } = removePeerEnvelope({ id: req.peerId, path: req.path, name: req.name }, localPeersDeps);
+  if (removed) {
+    console.log('[agentsflow] removed peer over MCP', { id: removed.id, path: removed.path });
+    store.flushSync();
+    remoteHosts?.syncFromDirectories();
+    broadcastDirectories();
+  }
+  return envelope;
+}
 
 // ---- Remote peers ----------------------------------------------------------
 
@@ -1571,6 +1600,7 @@ async function relaunchConversation(conv: Conversation, prompt: string): Promise
       mcpConfigPath: writeMcpConfigForConversation(live.id, cwd, chatKindOf(live)),
       appendSystemPrompt: buildBootstrapSystemPrompt(store.getDirectories(), undefined, chatKindOf(live)),
       model: live.model,
+      peerDir: live.directoryPath,
     });
     if (!r.daemonShort) return { ok: false, error: r.raw.trim().slice(0, 300) || `claude exited ${r.code}` };
     pushConversationPatch(store.updateConversation(live.id, { daemonShort: r.daemonShort, state: 'starting', status: '' }));
@@ -1614,6 +1644,16 @@ const guardDeps: guard.GuardDeps = {
   },
 };
 
+const servicesDeps: services.ServicesDeps = {
+  files: servicesFiles(app.getPath('userData')),
+  notify: notifyUser,
+  env: () => agentEnvironment(),
+  onSnapshot: (s) => {
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send(SERVICES_IPC.updated, s);
+  },
+  guard: () => ({ level: guard.getMemLevel(), stopping: guard.getGuardSnapshot().containers.filter((c) => c.verdict === 'stopping').map((c) => c.name) }),
+};
+
 const hookGuardsDeps: hookguards.HookGuardsDeps = {
   shippedDir: resolveGuardsDir(),
   installDir: path.join(os.homedir(), '.claude', 'hooks', 'peersflow'),
@@ -1651,7 +1691,14 @@ ipcMain.handle('convs:setContract', (_e, id: string, contract: RunContract): voi
 ipcMain.handle('keeper:snapshot', () => keeper.getKeeperSnapshot());
 ipcMain.handle('guard:snapshot', () => guard.getGuardSnapshot());
 ipcMain.handle('guard:setPins', (_e, patch: { mode?: GuardPins['mode']; idleMinutes?: number; keep?: { name: string; keep: boolean } }): GuardPins => guard.setPins(patch ?? {}));
-
+ipcMain.handle(SERVICES_IPC.snapshot, () => services.getServicesSnapshot());
+ipcMain.handle(SERVICES_IPC.wake, (_e, id: string) => services.wakeService(id, 'click'));
+ipcMain.handle(SERVICES_IPC.sleep, (_e, id: string) => services.sleepService(id, 'click'));
+ipcMain.handle(SERVICES_IPC.setPin, (_e, id: string, pinned: boolean) => services.setServicePin(id, pinned));
+ipcMain.handle(SERVICES_IPC.setIdle, (_e, id: string, idleMinutes: number) => services.setServiceIdle(id, idleMinutes));
+ipcMain.handle(SERVICES_IPC.setManaged, (_e, id: string, managed: boolean) => services.setServiceManaged(id, managed));
+ipcMain.handle(SERVICES_IPC.setMode, (_e, mode: ServicesMode) => services.setServicesMode(mode));
+ipcMain.handle(SERVICES_IPC.rediscover, () => services.rediscoverServices());
 ipcMain.handle(HOOKGUARDS_IPC.snapshot, () => hookguards.getHookGuardsSnapshot());
 ipcMain.handle(HOOKGUARDS_IPC.recheck, () => hookguards.recheckHookGuards());
 
@@ -1728,7 +1775,7 @@ async function dispatchClaudeInto(
 
   const startedBefore = Date.now();
   const claimedSessionIds = new Set(store.getConversations().map((c) => c.sessionId).filter(Boolean));
-  const dispatch = await dispatchBackground({ cwd, prompt, mcpConfigPath, appendSystemPrompt, model: opts.model, host });
+  const dispatch = await dispatchBackground({ cwd, prompt, mcpConfigPath, appendSystemPrompt, model: opts.model, host, peerDir: opts.dir.path });
   const daemonShortFromOut = dispatch.daemonShort ?? '';
   let resolved = daemonShortFromOut
     ? await resolveSessionByDaemonShort(daemonShortFromOut, 10000, host)
