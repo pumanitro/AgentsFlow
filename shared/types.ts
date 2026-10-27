@@ -1,4 +1,5 @@
 import type { Routine, RoutineInput, RoutinePatch, RoutineRun, RoutinesSnapshot } from './routines';   // type-only, cycle is fine
+import type { HookGuardsSnapshot } from './hookguards';   // type-only, cycle is fine
 import type { NotificationsSnapshot, UserNotification } from './notifications';   // type-only, cycle is fine
 
 export type AgentProvider = 'claude' | 'codex';
@@ -857,6 +858,11 @@ export interface AgentsFlowApi {
   getGuardSnapshot?: () => Promise<GuardSnapshot>; // 'guard:snapshot'
   setGuardPins?: (patch: { mode?: GuardPins['mode']; idleMinutes?: number; keep?: { name: string; keep: boolean } }) => Promise<GuardPins>; // 'guard:setPins'
   onGuardUpdated?: (cb: (s: GuardSnapshot) => void) => () => void; // push 'guard:updated'
+  // Claude Code guard hooks Peers Flow ships and installs (electron/hookguards).
+  // OPTIONAL like the guard's: a running app's preload can predate them.
+  getHookGuardsSnapshot?: () => Promise<HookGuardsSnapshot>;                        // 'hookguards:snapshot'
+  recheckHookGuards?: () => Promise<HookGuardsSnapshot>;                            // 'hookguards:recheck'
+  onHookGuardsUpdated?: (cb: (s: HookGuardsSnapshot) => void) => () => void;        // push 'hookguards:updated'
 
   // Fired when something (e.g. the `open_file` MCP tool) asks the app to bring a
   // file up in its file view. The renderer responds by navigating to that

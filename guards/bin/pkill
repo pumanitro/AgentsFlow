@@ -1,0 +1,55 @@
+#!/bin/bash
+# PATH shim: `pkill` on every Peers Flow chat's PATH (~/.claude/hooks/peersflow/bin is prepended at spawn).
+#
+# WHY THIS EXISTS
+#   The block-mass-kill hook only sees the Bash tool's command string. A misordered pkill inside a
+#   script, a Makefile, an npm script or `xargs pkill` never reaches the hook — but it does reach this
+#   shim. 2026-10-27: `pkill -f "…" -U 501 -n` (options after the pattern) SIGTERMed ~130 of the
+#   user's processes and forced a reboot.
+#
+# WHAT IS REFUSED (decided by ../lib/killcheck.py, the same core the hook uses)
+#   * pkill with an option after its first pattern, or a pattern matching > 15 live processes
+#   * kill with -1 as a target (every process you own)
+# Everything else is exec'd unchanged into /usr/bin/pkill with the identical argv and its own exit code.
+#
+# CONTRACT
+#   exit 2 + one stderr line on refusal; fails OPEN (passes through) when python3 is missing or the
+#   check itself breaks. The `kill` shell builtin never reaches this file (documented gap).
+#
+# ESCAPE HATCH
+#   BH_ALLOW_MASS_KILL=1 in the environment. Only with the user's explicit OK.
+#
+# Installed by Peers Flow — edit guards/bin/pkill in the repo, the app overwrites this copy.
+_pf_self="${BASH_SOURCE[0]}"; case "$_pf_self" in */*) ;; *) _pf_self="./$_pf_self" ;; esac
+DIR="$(cd "${_pf_self%/*}" && pwd)"   # no dirname(1): PATH may be minimal
+REAL=/usr/bin/pkill
+if [ ! -x "$REAL" ]; then
+  REAL=""
+  IFS=: read -r -a _pf_path <<< "${PATH:-}"
+  for d in "${_pf_path[@]}"; do
+    [ -z "$d" ] && continue
+    [ "$(cd "$d" 2>/dev/null && pwd)" = "$DIR" ] && continue
+    if [ -x "$d/pkill" ] && [ ! -d "$d/pkill" ]; then REAL="$d/pkill"; break; fi
+  done
+  if [ -z "$REAL" ]; then
+    echo "pkill: real binary not found" >&2
+    exit 127
+  fi
+fi
+
+[ "${BH_ALLOW_MASS_KILL:-}" = "1" ] && exec "$REAL" "$@"
+command -v python3 >/dev/null 2>&1 || exec "$REAL" "$@"
+# python3 exits 2 on a missing script, which would read as a refusal: check the core is there first
+if [ ! -f "$DIR/../lib/killcheck.py" ]; then
+  echo "pkill: kill shim check failed (core missing), passing through" >&2
+  exec "$REAL" "$@"
+fi
+
+python3 -B "$DIR/../lib/killcheck.py" --shim pkill -- "$@"
+rc=$?
+case $rc in
+  0) exec "$REAL" "$@" ;;
+  2) exit 2 ;;
+  *) echo "pkill: kill shim check failed (rc $rc), passing through" >&2
+     exec "$REAL" "$@" ;;
+esac

@@ -80,6 +80,7 @@
       "!dist/*.blockmap",
       "renderer/out/**/*",
       "assets/**/*",
+      "guards/**/*",
       "package.json"
     ],
     "mac": {

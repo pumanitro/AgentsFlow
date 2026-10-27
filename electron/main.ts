@@ -41,6 +41,20 @@ function resolveIconPath(): string | null {
 }
 const ICON_PATH = resolveIconPath();
 
+// The Claude Code guard hooks shipped in <repo>/guards (electron/hookguards installs them).
+// Same three homes as the icon: source tree in dev, inside app.asar when packaged.
+function resolveGuardsDir(): string {
+  const candidates = [
+    path.join(__dirname, '..', '..', '..', 'guards'),
+    path.join(app.getAppPath(), 'guards'),
+    path.join(process.resourcesPath || '', 'guards'),
+  ];
+  for (const p of candidates) {
+    try { if (fs.existsSync(path.join(p, 'lib', 'killcheck.py'))) return p; } catch { /* ignore */ }
+  }
+  return path.join(app.getAppPath(), 'guards');
+}
+
 import { store } from './store';
 import { getUsage, getUsageForService, getUsageForToken, resetUsageCache } from './usage';
 import * as accounts from './accounts';
@@ -59,6 +73,9 @@ import { collectKnownNames } from './wispr/vocabulary';
 import * as keeper from './keeper/keeper';
 import { consumeSkillContractNote, listSkillContractNotes } from './keeper/skill-contracts';
 import * as guard from './guard/guard';
+import { agentEnvironment } from './cli-environment';
+import * as hookguards from './hookguards/install';
+import { HOOKGUARDS_IPC } from '../shared/hookguards';
 import { readKillLogSince } from './guard/kill-log';
 import { worstMeter } from '../shared/usage';
 import { forkTitle } from '../shared/fork-title';
@@ -565,6 +582,9 @@ app.whenReady().then(() => {
   // first: the Keeper reads its level.
   guard.startGuard(guardDeps);
   keeper.startKeeper(keeperDeps);
+  // Install + self-test the Claude Code guards (mass-kill, cookies, second Chrome, memory
+  // admission) and the kill shims every chat gets on PATH. PEERSFLOW_HOOKGUARDS=0 for test instances.
+  if (process.env.PEERSFLOW_HOOKGUARDS !== '0') hookguards.startHookGuards(hookGuardsDeps);
   // The /until-done and /forever skills declare a chat's contract from inside
   // the chat; pick their notes up quickly so the chat is covered before it idles.
   void applySkillContracts();
@@ -723,6 +743,7 @@ app.on('before-quit', () => {
   wisprLearner.stopWisprLearner();
   keeper.stopKeeper();
   guard.stopGuard();
+  hookguards.stopHookGuards();
   codex.close();
   try { peersBridge?.stop(); } catch { /* ignore */ }
   // Best effort and not awaited: quitting must not wait on a dead ssh master.
@@ -1593,6 +1614,20 @@ const guardDeps: guard.GuardDeps = {
   },
 };
 
+const hookGuardsDeps: hookguards.HookGuardsDeps = {
+  shippedDir: resolveGuardsDir(),
+  installDir: path.join(os.homedir(), '.claude', 'hooks', 'peersflow'),
+  supersededDir: path.join(os.homedir(), '.claude', 'hooks', 'peersflow-superseded'),
+  handmadeHooksDir: path.join(os.homedir(), '.claude', 'hooks'),
+  settingsPath: path.join(os.homedir(), '.claude', 'settings.json'),
+  backupDir: path.join(os.homedir(), '.claude', 'backups'),
+  env: () => agentEnvironment(),
+  log: (msg, detail) => console.log(`[agentsflow][hookguards] ${msg}`, detail ?? ''),
+  onSnapshot: (s) => {
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send(HOOKGUARDS_IPC.updated, s);
+  },
+};
+
 const RUN_CONTRACTS: readonly RunContract[] = ['once', 'until-done', 'forever'];
 function isRunContract(v: unknown): v is RunContract {
   return typeof v === 'string' && (RUN_CONTRACTS as readonly string[]).includes(v);
@@ -1616,6 +1651,9 @@ ipcMain.handle('convs:setContract', (_e, id: string, contract: RunContract): voi
 ipcMain.handle('keeper:snapshot', () => keeper.getKeeperSnapshot());
 ipcMain.handle('guard:snapshot', () => guard.getGuardSnapshot());
 ipcMain.handle('guard:setPins', (_e, patch: { mode?: GuardPins['mode']; idleMinutes?: number; keep?: { name: string; keep: boolean } }): GuardPins => guard.setPins(patch ?? {}));
+
+ipcMain.handle(HOOKGUARDS_IPC.snapshot, () => hookguards.getHookGuardsSnapshot());
+ipcMain.handle(HOOKGUARDS_IPC.recheck, () => hookguards.recheckHookGuards());
 
 ipcMain.handle('rotation:get', () => ({
   policy: store.getRotationPolicy(),

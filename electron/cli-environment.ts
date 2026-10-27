@@ -1,6 +1,7 @@
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { withKillShims } from './hookguards/shim-path';
 
 // Finder does not run a login shell. Discover common CLI installations without
 // sourcing shell startup files (which may have interactive commands/side effects).
@@ -25,5 +26,6 @@ export function agentEnvironment(): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...process.env, PATH: cliPath(), TERM_PROGRAM: 'PeersFlow' };
   // These identify the parent terminal/session; children have their own identity.
   for (const key of ['ELECTRON_RUN_AS_NODE', 'CLAUDECODE', 'CODEX_THREAD_ID', 'ITERM_SESSION_ID']) delete env[key];
-  return env;
+  // Kill shims refuse misordered pkill / kill -1 before they reach the system; see guards/README.md.
+  return withKillShims(env);
 }

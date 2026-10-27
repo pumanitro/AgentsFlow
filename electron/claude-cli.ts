@@ -3,6 +3,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { withUtf8Locale } from './locale';
+import { withKillShims } from './hookguards/shim-path';
 import { getRemoteHosts } from './remote/remote-hosts';
 import type { AgentRow } from '../shared/remote';
 
@@ -67,6 +68,7 @@ function runCmd(args: string[], opts: { cwd?: string; timeoutMs?: number } = {})
   return new Promise((resolve) => {
     const env: Record<string, string> = { ...process.env } as Record<string, string>;
     env.PATH = `${process.env.PATH}:${path.join(os.homedir(), '.local/bin')}`;
+    withKillShims(env);
     // Belt-and-suspenders: ask child to not colorize. We still stripAnsi() the result
     // because not every CLI honors these.
     env.NO_COLOR = '1';
@@ -275,6 +277,7 @@ function runCmdToFile(args: string[], outPath: string, opts: { cwd?: string; tim
   return new Promise((resolve) => {
     const env: Record<string, string> = { ...process.env } as Record<string, string>;
     env.PATH = `${process.env.PATH}:${path.join(os.homedir(), '.local/bin')}`;
+    withKillShims(env);
     env.NO_COLOR = '1';
     delete env.FORCE_COLOR;
     delete env.CLICOLOR_FORCE;

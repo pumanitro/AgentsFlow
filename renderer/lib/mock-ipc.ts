@@ -4,6 +4,7 @@ import type { Routine, RoutineRun, RoutinesSnapshot } from '../../shared/routine
 import { markRunDone } from '../../shared/routines';
 import { validateRoutineInput } from '../../shared/routine-schedule';
 import { buildMockRoutines } from './mock-routines';
+import { buildMockHookGuardsSnapshot } from './mock-hookguards';
 import type { NotificationsSnapshot, UserNotification } from '../../shared/notifications';
 import { isOpen } from '../../shared/notifications';
 
@@ -947,6 +948,9 @@ export function createMockApi(): AgentsFlowApi {
       return mockPins;
     },
     onGuardUpdated: () => () => undefined,
+    getHookGuardsSnapshot: async () => buildMockHookGuardsSnapshot(),
+    recheckHookGuards: async () => buildMockHookGuardsSnapshot(),
+    onHookGuardsUpdated: () => () => undefined,
     // No real bridge in the browser mock — nothing ever asks to open a file.
     onOpenFile: () => () => undefined,
 

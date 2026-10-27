@@ -1,6 +1,7 @@
 import * as os from 'os';
 import * as path from 'path';
 import { withUtf8Locale } from './locale';
+import { withKillShims } from './hookguards/shim-path';
 
 /** The embedded xterm supports 256 colors and RGB, regardless of its launcher. */
 export function terminalEnvironment(source: NodeJS.ProcessEnv = process.env): Record<string, string> {
@@ -19,5 +20,6 @@ export function terminalEnvironment(source: NodeJS.ProcessEnv = process.env): Re
   env.CLICOLOR = '1';
   // Identify ourselves without triggering another terminal app's setup hooks.
   env.TERM_PROGRAM = 'PeersFlow';
-  return withUtf8Locale(env);
+  // Kill shims refuse misordered pkill / kill -1 before they reach the system; see guards/README.md.
+  return withKillShims(withUtf8Locale(env));
 }
