@@ -5,7 +5,6 @@ import { BranchList, FileEntry, GitEntryStatus, GitStatusResult, WorktreeInfo } 
 import SearchModal from './SearchModal';
 import NotesPanel from './NotesPanel';
 import UsagePanel from './UsagePanel';
-import HookGuardsPanel from './HookGuardsPanel';
 import AccountsPanel from './AccountsPanel';
 import DockedPanes, { TOP_REGION_MIN } from './DockedPanes';
 import {
@@ -1082,8 +1081,6 @@ export default function FileTreeSidebar({ dirPath, conversationId, worktreePath,
         topRegionRef={treeRef}
         accounts={<AccountsPanel />}
         usage={<UsagePanel />}
-        // The slot is named `keeper` for history; the Guards card owns it now.
-        keeper={<HookGuardsPanel />}
         notes={<NotesPanel dirPath={dirPath} onFileOpen={onFileOpen} openedFilePath={openedFilePath} />}
       />
       {menu && (

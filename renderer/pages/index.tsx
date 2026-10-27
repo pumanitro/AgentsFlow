@@ -38,7 +38,6 @@ const canOpen = (c: Conversation | undefined | null): boolean =>
 // FileEditor (CodeMirror / BlockNote) also only loads when a note is previewed.
 const NotesPanel = dynamic(() => import('../components/NotesPanel'), { ssr: false });
 const UsagePanel = dynamic(() => import('../components/UsagePanel'), { ssr: false });
-const HookGuardsPanel = dynamic(() => import('../components/HookGuardsPanel'), { ssr: false });
 const AccountsPanel = dynamic(() => import('../components/AccountsPanel'), { ssr: false });
 const PerfLauncher = dynamic(() => import('../components/PerfPanel'), { ssr: false });
 const FileEditor = dynamic(() => import('../components/FileEditor'), { ssr: false });
@@ -1057,8 +1056,6 @@ export default function Home() {
             topRegionInsetRefs={peerInsetRefs}
             accounts={<AccountsPanel />}
             usage={<UsagePanel />}
-            // The slot is named `keeper` for history; the Guards card owns it now.
-            keeper={<HookGuardsPanel />}
             notes={(
               <NotesPanel
                 variant="global"
