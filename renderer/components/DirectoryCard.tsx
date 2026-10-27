@@ -19,6 +19,9 @@ interface Props {
 
 export default function DirectoryCard({ dir, selected, historyCount, onSelect, onAddTask, onViewHistory, onPreview, onRemove, remoteStatus, onReconnect }: Props) {
   const [menuOpen, setMenuOpen] = useState(false);
+  // Fixed-position anchor: the peer list scrolls inside a clipped box, so an
+  // absolutely positioned menu got its last items (Remove directory) cut off.
+  const [menuPos, setMenuPos] = useState<{ right: number; top?: number; bottom?: number } | null>(null);
   const menuRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
@@ -27,11 +30,16 @@ export default function DirectoryCard({ dir, selected, historyCount, onSelect, o
       if (menuRef.current && !menuRef.current.contains(e.target as Node)) setMenuOpen(false);
     };
     const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setMenuOpen(false); };
+    const onScroll = () => setMenuOpen(false);
     document.addEventListener('mousedown', onDocClick);
     document.addEventListener('keydown', onKey);
+    window.addEventListener('scroll', onScroll, true);
+    window.addEventListener('resize', onScroll);
     return () => {
       document.removeEventListener('mousedown', onDocClick);
       document.removeEventListener('keydown', onKey);
+      window.removeEventListener('scroll', onScroll, true);
+      window.removeEventListener('resize', onScroll);
     };
   }, [menuOpen]);
 
@@ -102,17 +110,25 @@ export default function DirectoryCard({ dir, selected, historyCount, onSelect, o
           </button>
           <div className="relative" ref={menuRef}>
             <button
-              onClick={(e) => { e.stopPropagation(); setMenuOpen((v) => !v); }}
+              onClick={(e) => {
+                e.stopPropagation();
+                const r = e.currentTarget.getBoundingClientRect();
+                const right = window.innerWidth - r.right;
+                // Open upward when there is no room for the menu below the button.
+                setMenuPos(window.innerHeight - r.bottom < 140 ? { right, bottom: window.innerHeight - r.top + 4 } : { right, top: r.bottom + 4 });
+                setMenuOpen((v) => !v);
+              }}
               className="text-muted hover:text-text px-1.5 py-0.5 rounded hover:bg-bg/60"
               title="Options"
               aria-haspopup="menu"
               aria-expanded={menuOpen}
             >⋯</button>
-            {menuOpen && (
+            {menuOpen && menuPos && (
               <div
                 role="menu"
                 onClick={(e) => e.stopPropagation()}
-                className="absolute right-0 top-full mt-1 w-56 rounded-md border border-border bg-panel2 shadow-lg z-20 py-1"
+                style={menuPos}
+                className="fixed w-56 rounded-md border border-border bg-panel2 shadow-lg z-50 py-1"
               >
                 <button
                   role="menuitem"
