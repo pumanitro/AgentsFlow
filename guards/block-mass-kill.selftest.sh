@@ -42,6 +42,24 @@ check deny  "pkill -f $tag"
 check deny  "pkill -9 -f -- $tag"
 kill "${pids[@]}" 2>/dev/null; pids=(); gone
 check allow "pkill -f $tag"
+# --- a pattern that reaches into ANOTHER project's folder (2026-10-30: an ai-factory agent's
+#     `pkill -f "next dev"` killed the Peers Flow dev renderer). Two scratch "projects"; a sleeper lives in A.
+projA=$(mktemp -d /tmp/pfguard-projA.XXXXXX); projB=$(mktemp -d /tmp/pfguard-projB.XXXXXX)
+tag2="pfguard-foreign-$$-$RANDOM"
+pids=($(bash -c "cd '$projA' && exec -a $tag2 sleep 30" >/dev/null 2>&1 & echo $!))
+sleep 0.3
+check_in() { # $1 = deny|allow, $2 = caller cwd, $3 = command
+  local out got
+  out=$(jq -cn --arg c "$3" --arg d "$2" '{tool_name:"Bash",cwd:$d,tool_input:{command:$c}}' | "$PY" -B "$HOOK" 2>&1)
+  if printf '%s' "$out" | grep -q '"permissionDecision": *"deny"'; then got=deny; else got=allow; fi
+  if [ "$got" = "$1" ]; then pass=$((pass+1)); printf 'ok    %-5s (in %s) %s\n' "$1" "${2##*/}" "$3"
+  else fail=$((fail+1)); printf 'FAIL  want %-5s got %-5s (in %s) %s\n' "$1" "$got" "${2##*/}" "$3"; fi
+}
+check_in deny  "$projB" "pkill -f $tag2"
+check_in deny  "$projB" "bash -c 'pkill -f $tag2'"
+check_in allow "$projA" "pkill -f $tag2"
+kill "${pids[@]}" 2>/dev/null; pids=(); rm -rf "$projA" "$projB"
+
 # --- the same mistakes wrapped in another command
 check deny  "bash -c 'pkill node -9'"
 check deny  'sh -c "pkill -f foo -n"'
@@ -53,7 +71,7 @@ check deny  'sudo pkill node -9'
 check deny  '/usr/bin/pkill node -9'
 
 # --- legitimate commands stay allowed
-check allow 'pkill -U 501 -n -f "dashboard/api/server.mjs"'
+check allow 'pkill -U 501 -n -f "pfguard-not-running-xyz/server.mjs"'
 check allow 'pkill -f "vite.lane2.config.mjs"'
 check allow 'pkill -9 -f "definitely-not-a-running-process-xyz"'
 check allow 'pgrep -lf "dashboard/api/server.mjs"'
@@ -64,7 +82,7 @@ check allow 'lsof -ti tcp:5953 | xargs kill'
 check allow 'echo "pkill node -9 is a bad idea"'
 check allow 'git commit -m "kill -1 bug"'
 check allow 'BH_ALLOW_MASS_KILL=1 pkill node -9'
-check allow "bash -c 'pkill -U 501 -f my-server.mjs'"
+check allow "bash -c 'pkill -U 501 -f pfguard-not-running-xyz.mjs'"
 check allow 'timeout 5 pkill -9 -f my-server.mjs'
 check allow 'echo 123 | xargs -n 1 kill'
 

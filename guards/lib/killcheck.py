@@ -20,8 +20,16 @@ WHAT IS REFUSED
   * pgrep with an option after its first pattern, when its output is piped into kill (shell strings only)
   * kill with -1 as a target                        (`kill -9 -1`, `kill -- -1`) = every process you own
   * pkill whose pattern matches more than MAX_MATCHES live processes right now
+  * pkill whose pattern matches a process running in ANOTHER project's folder (2026-10-30, below)
 WHAT IS NOT
   * correctly ordered pkill/pgrep, kill <pid>, kill -- -<pgid>, text that merely mentions these
+
+2026-10-30 17:34:58Z an agent in ~/Desktop/ai-factory stopped its own Next.js server with
+      pkill -f "next dev"
+  which also matched Peers Flow's dev renderer (`next dev -p 3030`, cwd ~/Desktop/AgentsFlow/renderer);
+  `concurrently -k` then tore down Electron and the whole app went away. A pattern is only safe when
+  every process it hits lives in the caller's own project — so a match whose working directory is a
+  real folder (not / or $HOME) outside the caller's tree is refused.
 
 CLI
   python3 killcheck.py --shim <pkill|kill> -- ARG...  -> 0 allow (silent) | 2 refuse (one line on stderr) | 3 internal error
@@ -145,25 +153,60 @@ def corrected_order(opts: list, operands: list) -> str:
     return " ".join(moved + list(opts) + patterns)
 
 
-def live_matches(opts: list, operands: list) -> int:
-    """How many processes would pkill hit right now (via pgrep, signal option dropped). 0 on any failure."""
+def live_pids(opts: list, operands: list) -> List[int]:
+    """Pids pkill would hit right now (via pgrep, signal option dropped). [] on any failure."""
     if not operands:
-        return 0
-    keep = [o for o in opts if not re.fullmatch(r"-([0-9]+|[A-Z][A-Z0-9]*)", o)]
+        return []
+    # drop the signal (-9, -TERM) but not a value-taking option like -U 501 (its value would become a pattern)
+    keep, i = [], 0
+    while i < len(opts):
+        o = opts[i]
+        if len(o) == 2 and o[1] in PKILL_ARG_OPTS and i + 1 < len(opts):
+            keep += [o, opts[i + 1]]
+            i += 2
+            continue
+        if not re.fullmatch(r"-([0-9]+|[A-Z][A-Z0-9]*)", o):
+            keep.append(o)
+        i += 1
     try:
         out = subprocess.run([PGREP, *keep, "--", *operands],
                              capture_output=True, text=True, timeout=3).stdout
     except Exception:
-        return 0
-    n = 0
+        return []
+    pids = []
     for line in out.splitlines():
         first = line.split(None, 1)[0] if line.strip() else ""
-        if not first:
-            continue
-        if first.isdigit() and int(first) in _EXCLUDE_PIDS:
-            continue
-        n += 1
-    return n
+        if first.isdigit() and int(first) not in _EXCLUDE_PIDS:
+            pids.append(int(first))
+    return pids
+
+
+def _within(a: str, b: str) -> bool:
+    return a == b or a.startswith(b.rstrip("/") + "/")
+
+
+def foreign_matches(pids: List[int], caller_cwd: Optional[str]) -> List[Tuple[int, str]]:
+    """Matched (pid, cwd) pairs running in a project folder unrelated to the caller's.
+    Processes sitting in / or $HOME (apps, daemons) are not project-owned and never count."""
+    if not pids or not caller_cwd:
+        return []
+    try:
+        out = subprocess.run(["/usr/sbin/lsof", "-a", "-d", "cwd", "-p", ",".join(map(str, pids)), "-Fpn"],
+                             capture_output=True, text=True, timeout=3).stdout
+    except Exception:
+        return []
+    home = os.path.realpath(os.path.expanduser("~"))
+    me = os.path.realpath(caller_cwd)
+    found, pid = [], None
+    for line in out.splitlines():
+        if line.startswith("p"):
+            pid = int(line[1:])
+        elif line.startswith("n") and pid is not None:
+            cwd = os.path.realpath(line[1:])
+            if cwd in ("/", home) or _within(me, cwd) or _within(cwd, me):
+                continue
+            found.append((pid, cwd))
+    return found
 
 
 def kill_targets_all(args: list) -> bool:
@@ -178,7 +221,7 @@ def kill_targets_all(args: list) -> bool:
     return "-1" in args[i:]
 
 
-def check_argv(prog: str, args: list, count_live: bool = True) -> Optional[str]:
+def check_argv(prog: str, args: list, count_live: bool = True, caller_cwd: Optional[str] = None) -> Optional[str]:
     """Per-program decision. prog = basename; None = allow, str = human reason."""
     prog = os.path.basename(prog)
     if prog == "pkill":
@@ -189,11 +232,18 @@ def check_argv(prog: str, args: list, count_live: bool = True) -> Optional[str]:
                     f"`-n` alone matches ~90 processes (every Chrome/Electron helper). "
                     f"Put every option before the pattern: `pkill {corrected_order(opts, operands)}`.")
         if count_live:
-            hits = live_matches(opts, operands)
+            pids = live_pids(opts, operands)
+            hits = len(pids)
             if hits > MAX_MATCHES:
                 return (f"`pkill {' '.join(args)}` would signal {hits} live processes right now "
                         f"(limit {MAX_MATCHES}). Run `pgrep -lf ...` with the same arguments, then narrow "
                         f"the pattern or kill the exact pids.")
+            foreign = foreign_matches(pids, caller_cwd)
+            if foreign:
+                where = ", ".join(f"pid {p} in {c}" for p, c in foreign[:3])
+                return (f"`pkill {' '.join(args)}` would also stop processes of ANOTHER project ({where}) — "
+                        f"you are in {caller_cwd}. Kill your own server by exact pid "
+                        f"(e.g. `lsof -ti tcp:<your port> | xargs kill`) or narrow the pattern to your folder.")
         return None
     if prog == "kill":
         if kill_targets_all(args):
@@ -202,7 +252,7 @@ def check_argv(prog: str, args: list, count_live: bool = True) -> Optional[str]:
     return None
 
 
-def _check(cmd):
+def _check(cmd, caller_cwd=None):
     segs = list(segments(cmd))
     for n, (argv, piped) in enumerate(segs):
         argv = strip_prefix(argv)
@@ -210,11 +260,12 @@ def _check(cmd):
             continue
         prog, args = os.path.basename(argv[0]), argv[1:]
         for inner in inner_scripts(prog, args):
-            why = _check(inner)
+            why = _check(inner, caller_cwd)
             if why:
                 return why
         if prog in ("pkill", "kill"):
-            why = check_argv(prog, args, count_live=not any(c in cmd for c in "$`*?"))
+            why = check_argv(prog, args, count_live=not any(c in cmd for c in "$`*?"),
+                             caller_cwd=caller_cwd)
             if why:
                 return why
         elif prog == "pgrep" and piped and n + 1 < len(segs):
@@ -227,14 +278,14 @@ def _check(cmd):
     return None
 
 
-def check_command(cmd: str) -> Optional[str]:
+def check_command(cmd: str, caller_cwd: Optional[str] = None) -> Optional[str]:
     """Decision for a whole shell string (the Bash tool's command). None = allow. Fails open."""
     if not cmd or ESCAPE_TOKEN in cmd:
         return None
     if not re.search(r"\b(pkill|pgrep|kill)\b", cmd):
         return None
     try:
-        return _check(cmd)
+        return _check(cmd, caller_cwd)
     except Exception:
         return None
 
@@ -253,7 +304,7 @@ def main(argv: list) -> int:
                 sys.stderr.write(f"killcheck: unknown shim program {prog!r}\n")
                 return 3
             _EXCLUDE_PIDS.add(os.getppid())
-            why = check_argv(prog, argv[3:], count_live=True)
+            why = check_argv(prog, argv[3:], count_live=True, caller_cwd=os.getcwd())
             if why:
                 sys.stderr.write(f"{prog}: BLOCKED by Peers Flow kill shim — {why} "
                                  f"Set {ESCAPE_TOKEN} only with the user's OK.\n")

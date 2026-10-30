@@ -16,6 +16,8 @@ WHAT IS BLOCKED (Bash tool_input.command)
   * pgrep with an option after its first pattern, when its output is piped into kill
   * kill with -1 as a target                        (`kill -9 -1`, `kill -- -1`) = every process you own
   * pkill whose pattern matches more than MAX_MATCHES live processes right now
+  * pkill whose pattern matches a process running in another project's folder (2026-10-30: an
+    ai-factory agent's `pkill -f "next dev"` took down the Peers Flow dev stack)
 WHAT IS NOT
   * correctly ordered pkill/pgrep, kill <pid>, kill -- -<pgid>, text that merely mentions these
 
@@ -58,7 +60,7 @@ def main():
         cmd = (payload.get("tool_input") or {}).get("command") or ""
         if not cmd or escape in cmd:
             return
-        why = check_command(cmd)
+        why = check_command(cmd, payload.get("cwd") or os.getcwd())
     except Exception:
         return
     if why:
