@@ -13,6 +13,7 @@ import { getRemoteHosts } from './remote/remote-hosts';
 import { buildHostRowIndexes, droppedWatchHosts, hostOf, LOCAL_HOST, lookupRow, parseReapKey, planRemoteWatch, reapKey, remoteHostsOf, type HostRows } from './poller-remote';
 import * as perf from './perf';
 import { nextReapDelayMs } from './reap-backoff';
+import { emitConversationsChanged } from './mobile/bus';
 
 let fallbackTimer: NodeJS.Timeout | null = null;
 // The most recent successful `claude agents --json` — the only place a --bg
@@ -196,6 +197,7 @@ function schedulePush(changed?: Conversation | Conversation[]): void {
   if (pushScheduled) return;
   pushScheduled = true;
   setImmediate(() => {
+    emitConversationsChanged();
     pushScheduled = false;
     const full = pendingFull;
     const patch = Array.from(pendingPatch.values());

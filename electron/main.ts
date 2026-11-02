@@ -102,7 +102,7 @@ import { ensureWorkspaceTrusted } from './workspace-trust';
 import { applyRemoteJobState, getLastAgentRows, refreshNow, setPollerForeground, startPoller, stopPoller, syncWatchers, unwatchConversation, watchConversation, watcherStats } from './poller';
 import { bridgeSocketPath, buildBootstrapSystemPrompt, getMcpServerInfo, writeMcpConfigForConversation, writeRemoteMcpConfig } from './mcp-bridge';
 import { buildDelegatePrompt, buildRegistry, mayNotify, NOTIFY_REFUSED, renderRegistryMarkdown, resolveChatKind } from './registry';
-import { startPeersBridge, type AddLocalPeerRequest, type AddRemotePeerRequest, type RemovePeerRequest, type DelegateRequest, type HelloRequest, type ListPeersRequest, type NotifyRequest, type OpenFileRequest, type PeersBridge, type RoutinesRequest, type WhoamiRequest } from './delegation-bridge';
+import { startPeersBridge, type AddLocalPeerRequest, type AddRemotePeerRequest, type RemovePeerRequest, type DelegateRequest, type HelloRequest, type ListPeersRequest, type NotifyRequest, type OpenFileRequest, type PeersBridge, type RoutinesRequest, type WhoamiRequest, type MobileRequest } from './delegation-bridge';
 import { RemoteHosts, setRemoteHosts } from './remote/remote-hosts';
 import { remoteCommand, runRemote } from './remote/remote-exec';
 import { hostKeyOf } from '../shared/remote';
@@ -146,6 +146,13 @@ import * as remoteFs from './remote/remote-fs';
 import { deleteAttachmentFiles, pastedImagesRoot, prunePastedImages, sweepOrphanAttachments, todayDateSlug } from './attachments';
 import { noteDirForPath, sweepNoteDir, sweepNoteImages } from './note-images';
 import { disableLeftArrowAgents } from './attach-guard';
+import { startMobileGateway } from './mobile/index';
+import { emitConversationsChanged, emitNotificationsChanged, mobileBus } from './mobile/bus';
+import { execFile as mobileExec } from './mobile/exec';
+import { registerMobileIpc } from './mobile/ipc';
+import { parseDotenv, readMobileEnv } from './mobile/dev-mode';
+import type { MobileGateway } from './mobile/types';
+import { MOBILE_IPC, type MobileStatus } from '../shared/mobile';
 import { Account, AccountsSnapshot, AddAccountResult, MintTokenResult, AddRemoteRequest, AgentProvider, BridgeHealth, ChatKind, CodexModel, Conversation, FileEntry, GuardPins, PerfReportResult, PinnedDivider, PinnedItemRef, PinnedTodo, ProbeAccountResult, ProbeCodexResult, RemoteHostStatus, RemoteProbeResult, RotationPolicy, RunContract, SlashCommand, SpawnRequest, SwitchAccountResult, SwitchCodexResult, TrackedDirectory, UsageResult } from '../shared/types';
 
 const isDev = process.env.NODE_ENV === 'development';
@@ -626,6 +633,7 @@ app.whenReady().then(() => {
       onAddLocalPeer: handleAddLocalPeer,
       onRemovePeer: handleRemovePeer,
       onRoutines: handleRoutines,
+      onMobile: handleMobile,
       onNotify: handleNotify,
       onHello: handleHello,
     });
@@ -733,10 +741,81 @@ app.whenReady().then(() => {
   setTimeout(followCodexUpdates, 20_000);
   setInterval(followCodexUpdates, 2 * 60 * 1000);
 
+  startMobile();
+
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });
 });
+
+// ----- Mobile gateway (phone companion app) -----
+// The phone talks to an HTTP + WebSocket gateway bound to 127.0.0.1 only; the
+// personal tailnet's `tailscale serve` is the one way in from outside (see
+// design/mobile-companion/PLAN.md). PEERSFLOW_MOBILE=0 turns it off;
+// PEERSFLOW_MOBILE_DEV=1 lets an emulator in over plain HTTP (10.0.2.2).
+let mobileGateway: MobileGateway | null = null;
+
+function pushMobileStatus(s: MobileStatus): void {
+  if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.webContents.isDestroyed()) {
+    mainWindow.webContents.send(MOBILE_IPC.updated, s);
+  }
+}
+registerMobileIpc(ipcMain, () => mobileGateway, pushMobileStatus);
+
+function startMobile(): void {
+  if (process.env.PEERSFLOW_MOBILE === '0') { console.log('[agentsflow][mobile] disabled by PEERSFLOW_MOBILE=0'); return; }
+  const env = readMobileEnv(process.env);
+  void startMobileGateway({
+    userDataDir: app.getPath('userData'),
+    projectsRoot: projectsRoot(),
+    jobsRoot: path.join(os.homedir(), '.claude', 'jobs'),
+    port: env.port,
+    devMode: env.devMode,
+    appVersion: app.getVersion(),
+    env: process.env,
+    store: {
+      getDirectories: () => store.getDirectories(),
+      getConversations: () => store.getConversations(),
+      getConversation: (id) => store.getConversation(id),
+      getPinnedOrder: () => store.getPinnedOrder(),
+      getDividers: () => store.getDividers(),
+      getTodos: () => store.getTodos(),
+    },
+    liveRows: () => getLastAgentRows(),
+    readJobState: (short, host) => readJobState(short, host),
+    jobStateMtimeMs: (short, host) => jobStateMtimeMs(short, host),
+    findTranscript: (cwd, sessionId) => findTranscript(projectsRoot(), cwd, sessionId),
+    sendToSession: (o) => pty.sendToSession({ ...o, attachId: o.attachId || o.sessionId.slice(0, 8) }),
+    stopAgent: (short, host) => cliStop(short, host),
+    setPinned: (id, pinned) => { store.updateConversation(id, { pinned }); broadcastConversations(); broadcastPinnedOrder(); },
+    spawn: (req) => spawnConversation({
+      dir: req.dir, prompt: req.prompt, title: req.title, model: req.model, chatKind: req.chatKind,
+      pinned: true, peerAware: true,
+      row: req.contract && req.contract !== 'once' ? { contract: req.contract, contractSource: 'chip' } : undefined,
+    }),
+    notifications: {
+      snapshot: () => notificationsStore ? notificationsStore.snapshot(Date.now()) : { notifications: [], now: new Date().toISOString() },
+      dismiss: (id) => { saveNotification(dismissNotification(requireNotification(id), new Date().toISOString())); },
+    },
+    codexSnapshot: (id) => codex.snapshot(id),
+    bus: mobileBus,
+    exec: mobileExec,
+    log: (msg, data) => console.log(`[agentsflow][mobile] ${msg}`, data ?? {}),
+  }).then((g) => {
+    mobileGateway = g;
+    g.onStatus(pushMobileStatus);
+    pushMobileStatus(g.status());
+    // The owner pin defaults to whoever runs the personal tailnet on this Mac.
+    const adoptOwner = () => {
+      const st = g.status();
+      if (!st.settings.ownerLogin && st.tailnet.ownerLogin) {
+        g.updateSettings({ ownerLogin: st.tailnet.ownerLogin });
+        console.log('[agentsflow][mobile] owner login set from the personal tailnet');
+      }
+    };
+    setTimeout(adoptOwner, 15_000).unref?.();
+  }).catch((err) => console.error('[agentsflow][mobile] gateway failed to start', (err as Error)?.message ?? err));
+}
 
 app.on('window-all-closed', () => {
   console.log('[agentsflow][lifecycle] window-all-closed');
@@ -747,6 +826,7 @@ app.on('window-all-closed', () => {
 });
 
 app.on('before-quit', () => {
+  try { void mobileGateway?.stop().catch(() => undefined); } catch { /* ignore */ }
   wisprLearner.stopWisprLearner();
   keeper.stopKeeper();
   guard.stopGuard();
@@ -773,21 +853,25 @@ function broadcastDirectories(): void {
   }
 }
 function broadcastConversations(): void {
+  emitConversationsChanged();
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.webContents.send('conversations:updated', store.getConversations());
   }
 }
 function broadcastDividers(): void {
+  emitConversationsChanged();   // the phone's pinned list mirrors this
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.webContents.send('dividers:updated', store.getDividers());
   }
 }
 function broadcastPinnedOrder(): void {
+  emitConversationsChanged();   // the phone's pinned list mirrors this
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.webContents.send('pinnedOrder:updated', store.getPinnedOrder());
   }
 }
 function broadcastTodos(): void {
+  emitConversationsChanged();   // the phone's pinned list mirrors this
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.webContents.send('todos:updated', store.getTodos());
   }
@@ -2290,6 +2374,43 @@ ipcMain.handle(ROUTINES_IPC.markRunDone, (_e, runId: string): RoutineRun => {
 });
 
 // The `*_routine` MCP tools: the same store, rules and scheduler as the tab above.
+// The `mobile_status` / `mobile_configure` tools. Never returns the speech key.
+async function handleMobile(req: MobileRequest): Promise<Record<string, unknown>> {
+  const g = mobileGateway;
+  if (!g) return { status: 'failure', error: 'the phone gateway is not running (PEERSFLOW_MOBILE=0, or still starting)' };
+  const view = () => {
+    const s = g.status();
+    return {
+      running: s.running, port: s.port, devMode: s.devMode, paused: s.paused, connectedSockets: s.connectedSockets,
+      publicUrl: s.settings.publicUrl ?? '', ownerLogin: s.settings.ownerLogin, speechKeySet: s.settings.sttKeySet,
+      tailnet: s.tailnet.available ? { dnsName: s.tailnet.dnsName, serveOn: s.tailnet.serveOn } : { available: false },
+      phones: s.devices.map((d) => ({ id: d.id, name: d.name, scopes: d.scopes, lastSeenAt: d.lastSeenAt, connected: d.connected })),
+      pairing: s.pairing ? { code: s.pairing.code, url: s.pairing.url, expiresAt: s.pairing.expiresAt, qr: s.pairing.qr } : null,
+    };
+  };
+  if (req.op === 'status') return { status: 'success', ...view() };
+  if (req.op !== 'configure') return { status: 'failure', error: `unknown op ${req.op}` };
+  const a = req.args ?? {};
+  const patch: { publicUrl?: string; ownerLogin?: string } = {};
+  if (typeof a.publicUrl === 'string') {
+    if (a.publicUrl.trim() && !/^https:\/\//i.test(a.publicUrl.trim())) return { status: 'failure', error: 'publicUrl must start with https://' };
+    patch.publicUrl = a.publicUrl.trim();
+  }
+  if (typeof a.ownerLogin === 'string') patch.ownerLogin = a.ownerLogin.trim();
+  if (typeof a.speechKeyFile === 'string' && a.speechKeyFile.trim()) {
+    let raw = '';
+    try { raw = fs.readFileSync(a.speechKeyFile.trim(), 'utf8'); } catch { return { status: 'failure', error: 'cannot read speechKeyFile' }; }
+    const key = parseDotenv(raw)['OPENAI_API_KEY'];
+    if (!key) return { status: 'failure', error: 'no OPENAI_API_KEY in that file' };
+    (patch as { sttKey?: string }).sttKey = key;   // never logged, never returned
+  }
+  if (Object.keys(patch).length) g.updateSettings(patch);
+  if (typeof a.paused === 'boolean') g.setPaused(a.paused);
+  if (a.pair === true) g.startPairing();
+  console.log('[agentsflow][mobile] configured from chat', { conversationId: req.rootConversationId, keys: Object.keys(a) });
+  return { status: 'success', ...view() };
+}
+
 async function handleRoutines(req: RoutinesRequest): Promise<Record<string, unknown>> {
   const scheduler = routineScheduler;
   if (!routinesStore || !scheduler) return { status: 'failure', error: 'routines are still starting — try again in a moment' };
@@ -2312,6 +2433,7 @@ async function handleRoutines(req: RoutinesRequest): Promise<Record<string, unkn
 // this section only loads, saves, pushes and delivers.
 
 function broadcastNotifications(): void {
+  emitNotificationsChanged();
   if (mainWindow && !mainWindow.isDestroyed() && notificationsStore) {
     mainWindow.webContents.send(NOTIFICATIONS_IPC.updated, notificationsStore.snapshot(Date.now()));
   }

@@ -1,0 +1,19 @@
+{
+  "Version": "1.80.0",
+  "BackendState": "Running",
+  "Self": {
+    "ID": "n1",
+    "HostName": "home-hub",
+    "DNSName": "home-hub.tail1234.ts.net.",
+    "UserID": 12345,
+    "Online": true
+  },
+  "User": {
+    "12345": {
+      "ID": 12345,
+      "LoginName": "someone@gmail.com",
+      "DisplayName": "Someone"
+    }
+  },
+  "Peer": {}
+}

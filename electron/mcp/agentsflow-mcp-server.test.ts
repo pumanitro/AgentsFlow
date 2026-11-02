@@ -114,13 +114,13 @@ describe('MCP server on a remote host (bridge, no store)', () => {
   test('tools/list of a casual chat has whoami, the add/remove peer tools and the routine tools, but no notify', async () => {
     const r = await client.call('tools/list');
     const tools = r.result!.tools as { name: string }[];
-    assert.deepEqual(tools.map((t) => t.name).sort(), ['add_local_peer', 'add_remote_peer', 'create_routine', 'delegate', 'delete_routine', 'list_peers', 'list_routines', 'open_file', 'remove_peer', 'run_routine', 'update_routine', 'whoami']);
+    assert.deepEqual(tools.map((t) => t.name).sort(), ['add_local_peer', 'add_remote_peer', 'create_routine', 'delegate', 'delete_routine', 'list_peers', 'list_routines', 'mobile_configure', 'mobile_status', 'open_file', 'remove_peer', 'run_routine', 'update_routine', 'whoami']);
   });
 
   test('tools/list of a routine chat includes notify', async () => {
     const r = await routine.call('tools/list');
     const tools = r.result!.tools as { name: string; inputSchema: { required?: string[] } }[];
-    assert.deepEqual(tools.map((t) => t.name).sort(), ['add_local_peer', 'add_remote_peer', 'create_routine', 'delegate', 'delete_routine', 'list_peers', 'list_routines', 'notify', 'open_file', 'remove_peer', 'run_routine', 'update_routine', 'whoami']);
+    assert.deepEqual(tools.map((t) => t.name).sort(), ['add_local_peer', 'add_remote_peer', 'create_routine', 'delegate', 'delete_routine', 'list_peers', 'list_routines', 'mobile_configure', 'mobile_status', 'notify', 'open_file', 'remove_peer', 'run_routine', 'update_routine', 'whoami']);
     assert.deepEqual(tools.find((t) => t.name === 'notify')!.inputSchema.required, ['title', 'level']);
   });
 

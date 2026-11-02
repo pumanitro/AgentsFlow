@@ -2,6 +2,7 @@ import type { Routine, RoutineInput, RoutinePatch, RoutineRun, RoutinesSnapshot 
 import type { NotificationsSnapshot, UserNotification } from './notifications';   // type-only, cycle is fine
 import type { ServiceActionResult, ServicesMode, ServicesSnapshot } from './services';   // type-only, cycle is fine
 import type { HookGuardsSnapshot } from './hookguards';   // type-only, cycle is fine
+import type { MobileApi } from './mobile';   // type-only, cycle is fine
 
 export type AgentProvider = 'claude' | 'codex';
 
@@ -96,7 +97,7 @@ export type AddRemoteRequest = RemotePeerSpec & { path: string; displayName?: st
 // What a chat is for. Only a routine's chat may reach the user's bell (notify);
 // a casual chat answers in the chat itself. Missing on rows older than this
 // field: resolveChatKind() treats a row a routine run points at as 'routine'.
-export type ChatKind = 'routine' | 'chat';
+export type ChatKind = 'routine' | 'chat' | 'voice';   // 'voice' = a task spoken on the phone (mobile gateway); may notify like a routine
 
 // test
 export interface Conversation {
@@ -709,6 +710,8 @@ export interface RotationStatus {
 }
 
 export interface AgentsFlowApi {
+  // Mobile gateway controls (sidebar Mobile panel). Optional: absent in the browser mock.
+  mobile?: MobileApi;
   listDirectories: () => Promise<TrackedDirectory[]>;
   addDirectory: () => Promise<TrackedDirectory | null>;
   removeDirectory: (id: string) => Promise<void>;

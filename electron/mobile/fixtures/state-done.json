@@ -1,0 +1,13 @@
+{
+  "state": "done",
+  "detail": "",
+  "tempo": "idle",
+  "output": {
+    "result": "All tasks are complete."
+  },
+  "inFlight": {
+    "tasks": 0,
+    "queued": 0,
+    "kinds": []
+  }
+}

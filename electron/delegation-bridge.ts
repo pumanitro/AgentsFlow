@@ -94,6 +94,9 @@ export interface RemovePeerRequest {
 
 // The `*_routine` tools. `args` is the tool call's arguments untouched: main
 // owns the routines store, so it also owns their validation (routines-mcp.ts).
+// The `mobile_*` tools: read / change the phone gateway setup in the running app.
+export interface MobileRequest { type: 'mobile'; id: string; rootConversationId: string; op: string; args: Record<string, unknown> }
+
 export interface RoutinesRequest {
   type: 'routines';
   id: string;
@@ -122,11 +125,12 @@ export interface BridgeHandlers {
   onAddLocalPeer?: (req: AddLocalPeerRequest) => Promise<BridgeEnvelope>;
   onRemovePeer?: (req: RemovePeerRequest) => Promise<BridgeEnvelope>;
   onRoutines?: (req: RoutinesRequest) => Promise<BridgeEnvelope>;
+  onMobile?: (req: MobileRequest) => Promise<BridgeEnvelope>;
   onNotify?: (req: NotifyRequest) => Promise<BridgeEnvelope>;
   onHello?: (req: HelloRequest) => Promise<BridgeEnvelope>;
 }
 
-type BridgeRequest = DelegateRequest | OpenFileRequest | ListPeersRequest | WhoamiRequest | AddRemotePeerRequest | AddLocalPeerRequest | RemovePeerRequest | RoutinesRequest | NotifyRequest | HelloRequest;
+type BridgeRequest = DelegateRequest | OpenFileRequest | ListPeersRequest | WhoamiRequest | AddRemotePeerRequest | AddLocalPeerRequest | RemovePeerRequest | RoutinesRequest | MobileRequest | NotifyRequest | HelloRequest;
 
 function unsupported(type: string): Promise<BridgeEnvelope> {
   return Promise.resolve({ status: 'failure', error: `${type} not supported by this Peers Flow` });
@@ -191,6 +195,8 @@ export function startPeersBridge(
           run = handlers.onRemovePeer ? handlers.onRemovePeer(req as RemovePeerRequest) : unsupported('remove_peer');
         } else if (req.type === 'routines') {
           run = handlers.onRoutines ? handlers.onRoutines(req as RoutinesRequest) : unsupported('routines');
+        } else if (req.type === 'mobile') {
+          run = handlers.onMobile ? handlers.onMobile(req as MobileRequest) : unsupported('mobile');
         } else if (req.type === 'notify') {
           run = handlers.onNotify ? handlers.onNotify(req as NotifyRequest) : unsupported('notify');
         } else if (req.type === 'hello') {

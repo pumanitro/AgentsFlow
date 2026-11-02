@@ -162,6 +162,11 @@ function migrateConversation(c: any): Conversation {
     lastPrompt: c.lastPrompt ?? '',
     delegatedByConversationId:
       typeof c.delegatedByConversationId === 'string' ? c.delegatedByConversationId : undefined,
+    // Dropping these on load erased them on the next save: a routine's or a
+    // voice task's chat silently became a casual chat after every restart (it
+    // lost the bell and its badge). Found by the mobile E2E run, 2026-10-28.
+    chatKind: c.chatKind === 'routine' || c.chatKind === 'voice' || c.chatKind === 'chat' ? c.chatKind : undefined,
+    mcpReadyAt: typeof c.mcpReadyAt === 'string' ? c.mcpReadyAt : undefined,
   };
 }
 

@@ -263,6 +263,19 @@ async function toolRoutines(op: string, args: Record<string, unknown>): Promise<
   return textContent(JSON.stringify(envelope, null, 2), envelope.status === 'failure');
 }
 
+/** The phone gateway setup lives in the running app: one `mobile` bridge request per call. */
+async function toolMobile(op: string, args: Record<string, unknown>): Promise<Record<string, unknown>> {
+  if (!BRIDGE_SOCK) {
+    return textContent(JSON.stringify({ status: 'failure', error: 'The phone setup requires the Peers Flow app (this session has no app bridge).' }, null, 2), true);
+  }
+  const envelope = await bridgeRequest(
+    { type: 'mobile', id: `${Date.now()}-${process.pid}`, rootConversationId: ROOT_CONVERSATION_ID, op, args },
+    20_000,
+  );
+  if (!envelope) return textContent('Peers Flow did not respond (bridge unavailable or timed out).', true);
+  return textContent(JSON.stringify(envelope, null, 2), envelope.status === 'failure');
+}
+
 /**
  * Raise a notification in the app's bell. The app validates the arguments
  * (notifications-mcp.ts), so they travel untouched; like the routines there is
@@ -726,6 +739,10 @@ async function handleToolsCall(id: JsonRpcId, params: Record<string, unknown>): 
     }
     if (Object.prototype.hasOwnProperty.call(ROUTINE_TOOL_OPS, name)) {
       sendResult(id, await toolRoutines(ROUTINE_TOOL_OPS[name], args));
+      return;
+    }
+    if (name === 'mobile_status' || name === 'mobile_configure') {
+      sendResult(id, await toolMobile(name === 'mobile_status' ? 'status' : 'configure', args));
       return;
     }
     sendError(id, -32602, `Unknown tool: ${name}`);

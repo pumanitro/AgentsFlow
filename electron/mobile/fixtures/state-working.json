@@ -1,0 +1,16 @@
+{
+  "state": "working",
+  "detail": "Reading diff…",
+  "tempo": "active",
+  "inFlight": {
+    "tasks": 2,
+    "queued": 0,
+    "kinds": [
+      "agent",
+      "shell"
+    ]
+  },
+  "createdAt": "2026-10-28T09:14:00.000Z",
+  "updatedAt": "2026-10-28T09:15:00.000Z",
+  "output": null
+}

@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+# Lock-serialised Gradle wrapper. Every Android executor runs Gradle ONLY through this script,
+# so parallel agents never run two Gradle builds in this project at the same time.
+LOCK=/Users/iij/.claude/jobs/106e55f3/tmp/gradle.lock
+export JAVA_HOME=/opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home
+mkdir -p /Users/iij/.claude/jobs/106e55f3/tmp
+
+start=$(date +%s)
+last_note=0
+while true; do
+  if mkdir "$LOCK" 2>/dev/null; then
+    break
+  fi
+  holder=$(cat "$LOCK/pid" 2>/dev/null)
+  if [ -n "$holder" ] && ! kill -0 "$holder" 2>/dev/null; then
+    echo "gw: removing stale gradle lock held by dead pid $holder"
+    rm -rf "/Users/iij/.claude/jobs/106e55f3/tmp/gradle.lock"
+    continue
+  fi
+  now=$(date +%s)
+  if [ $((now - start)) -ge 1800 ]; then
+    echo "gw: gave up after 1800 s waiting for gradle lock held by $holder" >&2
+    exit 75
+  fi
+  if [ $((now - last_note)) -ge 15 ]; then
+    echo "waiting for gradle lock held by $holder"
+    last_note=$now
+  fi
+  sleep 5
+done
+echo $$ > "$LOCK/pid"
+trap 'rm -rf "/Users/iij/.claude/jobs/106e55f3/tmp/gradle.lock"' EXIT
+
+cd /Users/iij/Desktop/AgentsFlow/android && ./gradlew "$@"
+rc=$?
+exit $rc

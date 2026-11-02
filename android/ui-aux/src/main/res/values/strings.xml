@@ -1,0 +1,77 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Pairing -->
+    <string name="pair_title">Peers Flow</string>
+    <string name="pair_explain">Open Peers Flow on your Mac → Mobile → Pair a phone</string>
+    <string name="pair_url_label">Server address</string>
+    <string name="pair_code_label">Pairing code</string>
+    <string name="pair_name_label">This phone</string>
+    <string name="pair_scan">Scan QR</string>
+    <string name="pair_submit">Pair</string>
+    <string name="pair_scan_prompt">Scan the QR code shown in Peers Flow → Mobile</string>
+
+    <!-- Common -->
+    <string name="back">Back</string>
+    <string name="refresh">Refresh</string>
+
+    <!-- Settings -->
+    <string name="settings_title">Settings</string>
+    <string name="section_server">Server</string>
+    <string name="section_voice">Voice</string>
+    <string name="section_connection">Connection</string>
+    <string name="section_assistant">Assistant</string>
+    <string name="section_samsung">Samsung checklist</string>
+    <string name="section_about">About</string>
+    <string name="server_name">Server</string>
+    <string name="server_address">Address</string>
+    <string name="server_device">Device id</string>
+    <string name="server_connection">Connection</string>
+    <string name="not_paired">Not paired</string>
+    <string name="unpair">Unpair</string>
+    <string name="unpair_confirm">Forget this Mac and sign out?</string>
+    <string name="unpair_yes">Unpair now</string>
+    <string name="cancel">Cancel</string>
+    <string name="voice_peer_label">Voice assistant peer</string>
+    <string name="voice_peer_default">(default: LISA)</string>
+    <string name="voice_peer_none">No peer found</string>
+    <string name="live_stt">Live transcription (words as you speak)</string>
+    <string name="speak_always">Speak conclusions</string>
+    <string name="quiet_hours">Quiet hours</string>
+    <string name="quiet_off">off</string>
+    <string name="quiet_set">Set</string>
+    <string name="quiet_clear">Turn off</string>
+    <string name="quiet_from">From</string>
+    <string name="quiet_to">To</string>
+    <string name="ok">OK</string>
+    <string name="tts_voice_label">Voice name</string>
+    <string name="tts_voice_helper">OpenAI Realtime voice name</string>
+    <string name="ai_disclosure">LISA\'s voice is AI-generated (OpenAI gpt-realtime-2.1-mini)</string>
+    <string name="stay_connected">Stay connected in the background</string>
+    <string name="stay_connected_helper">Keeps a quiet persistent notification so Android does not put the connection to sleep.</string>
+    <string name="biometric">Unlock before sending</string>
+    <string name="biometric_helper">Fingerprint or screen lock, 5-minute grace</string>
+    <string name="assistant_button">Make Peers Flow the digital assistant</string>
+    <string name="assistant_held">Held</string>
+    <string name="assistant_not_held">Not held — Gemini/Bixby will answer the side button</string>
+    <string name="open">Open</string>
+    <string name="sam_sleep_title">Never sleeping apps</string>
+    <string name="sam_sleep_why">Stops Samsung from killing the connection when the screen is off.</string>
+    <string name="sam_battery_title">Battery: Unrestricted</string>
+    <string name="sam_battery_why">Set the app\'s battery use to Unrestricted so background work is not paused.</string>
+    <string name="sam_assistant_title">Default digital assistant app</string>
+    <string name="sam_assistant_why">Pick Peers Flow so the side button and Hi LISA reach it.</string>
+    <string name="sam_side_title">Side button → Press and hold → Digital assistant</string>
+    <string name="sam_side_why">Settings → Advanced features → Side button.</string>
+    <string name="about_version">App version</string>
+    <string name="about_mac">Mac</string>
+
+    <!-- Outcomes -->
+    <string name="outcomes_title">Outcomes</string>
+    <string name="outcomes_empty">No conclusions yet — start a voice task with Hi LISA</string>
+    <string name="read_all">Read all</string>
+    <string name="play">Play</string>
+    <string name="stop">Stop</string>
+    <string name="open_chat">Open chat</string>
+    <string name="answer_in_chat">Answer in the chat</string>
+    <string name="needs_prefix">needs:</string>
+</resources>

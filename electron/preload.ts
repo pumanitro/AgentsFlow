@@ -4,8 +4,10 @@ import { ROUTINES_IPC, type RoutinesSnapshot } from '../shared/routines';
 import { NOTIFICATIONS_IPC, type NotificationsSnapshot } from '../shared/notifications';
 import { SERVICES_IPC, type ServicesSnapshot } from '../shared/services';
 import { HOOKGUARDS_IPC, type HookGuardsSnapshot } from '../shared/hookguards';
+import { makeMobileApi } from './mobile/preload-api';
 
 const api: AgentsFlowApi = {
+  mobile: makeMobileApi(ipcRenderer),
   codexSnapshot: (id, older) => ipcRenderer.invoke('codex:snapshot', id, older),
   codexSend: (id, prompt, images) => ipcRenderer.invoke('codex:send', id, prompt, images),
   codexReply: (id, requestId, reply) => ipcRenderer.invoke('codex:reply', id, requestId, reply),

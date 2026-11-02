@@ -311,6 +311,32 @@ export const TOOL_DEFS = [
       additionalProperties: false,
     },
   },
+  {
+    name: 'mobile_status',
+    title: 'Read the phone (mobile) setup',
+    description:
+      'Return the Peers Flow phone gateway setup: whether it runs, its port, the public address the phone uses (publicUrl), the owner login, whether mobile access is paused, the paired phones (name, last seen, connected), whether a speech key is set (never the key) and the current pairing code if one is open. Call it before changing the phone setup or when the user asks why the phone cannot connect.',
+    usage: 'No arguments.',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+  },
+  {
+    name: 'mobile_configure',
+    title: 'Change the phone (mobile) setup',
+    description:
+      'Change the Peers Flow phone gateway setup and/or open a pairing code. Pass only what changes. publicUrl must be an https:// address (e.g. the tunnel address) — the pairing QR then points there; "" clears it. ownerLogin is the identity the gateway requires on every request (with the Cloudflare tunnel guard it is "phone@peersflow-tunnel"). pair: true opens a fresh one-time pairing code (2 minutes) and returns the code plus the exact QR text (peersflow://pair?…) for the phone\'s Scan QR. Only call this when the user asks to set up, pair or change phone access.',
+    usage: 'mobile_configure({ publicUrl?, ownerLogin?, paused?, pair?, speechKeyFile? })',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        publicUrl: { type: 'string', description: 'https:// address the phone connects to; "" to clear.' },
+        ownerLogin: { type: 'string', description: 'Identity the gateway requires (tunnel guard: phone@peersflow-tunnel).' },
+        paused: { type: 'boolean', description: 'true pauses all phone access, false resumes it.' },
+        pair: { type: 'boolean', description: 'true opens a new pairing code and returns it with the QR text.' },
+        speechKeyFile: { type: 'string', description: 'Absolute path of a .env file holding OPENAI_API_KEY; the key is stored for the phone and never returned.' },
+      },
+      additionalProperties: false,
+    },
+  },
 ] as const;
 
 export type ToolDef = (typeof TOOL_DEFS)[number];
@@ -323,7 +349,7 @@ export const CHAT_KIND_ENV = 'PEERSFLOW_CHAT_KIND';
 // One string for both refusals (the MCP server's and main's), so a chat that
 // somehow calls notify learns where its question belongs instead.
 export const NOTIFY_REFUSED =
-  'notify is only available to chats started by a routine. This is a casual chat: write your questions and to-dos as plain text in your reply — the user reads them here.';
+  'notify is only available to chats started by a routine or by a voice task from the phone. This is a casual chat: write your questions and to-dos as plain text in your reply — the user reads them here.';
 
 // A row's own chatKind wins; a row older than the field is a routine chat when
 // a routine run points at it.
@@ -332,13 +358,15 @@ export function resolveChatKind(conv: { chatKind?: ChatKind } | undefined, hasRo
 }
 
 export function chatKindFromEnv(env: NodeJS.ProcessEnv): ChatKind {
-  return env[CHAT_KIND_ENV] === 'routine' ? 'routine' : 'chat';
+  const v = env[CHAT_KIND_ENV];
+  return v === 'routine' || v === 'voice' ? v : 'chat';
 }
 
-// Only a routine runs unattended, so only a routine's chat may ring the bell; a
-// casual chat has the user reading it already.
+// Only unattended chats may ring the bell: a routine's, and a voice task spoken
+// on the phone (the user pocketed it and waits for the conclusion). A casual
+// chat has the user reading it already.
 export function mayNotify(kind: ChatKind): boolean {
-  return kind === 'routine';
+  return kind === 'routine' || kind === 'voice';
 }
 
 export function toolDefsFor(kind: ChatKind): readonly ToolDef[] {
@@ -524,7 +552,9 @@ export function renderBootstrapPrompt(reg: Registry, self?: SelfInfo, kind: Chat
   if (mayNotify(kind)) {
     lines.push('## Telling the user something (notifications)');
     lines.push('');
-    lines.push('- This chat was started by a **routine**, so it may reach the user through the bell (`notify`). Casual chats cannot.');
+    lines.push(kind === 'voice'
+      ? '- This chat is a **voice task** spoken on the user\'s phone, so it may reach the user through the bell (`notify`); the phone shows it and reads it aloud. Casual chats cannot.'
+      : '- This chat was started by a **routine**, so it may reach the user through the bell (`notify`). Casual chats cannot.');
     lines.push(
       `- When the work cannot finish without the user — questions only they can answer, a file they must check, something they must do by hand (send an email, approve, pay) — list the questions and the to-dos as plain text in your chat message, then call \`${qualifiedToolName('notify')}\` with level "action", a short pointer body and any files, then END YOUR TURN. The notification only points the user to this chat; they answer by typing here, so the answers arrive as the user's next chat message — continue from there. Never do the user's to-dos yourself.`,
     );

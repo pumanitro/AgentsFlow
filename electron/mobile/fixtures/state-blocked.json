@@ -1,0 +1,28 @@
+{
+  "state": "working",
+  "detail": "starting…",
+  "tempo": "blocked",
+  "needs": "Which option?",
+  "suggestedReply": "commit and push it",
+  "block": {
+    "questions": [
+      {
+        "question": "Which option?",
+        "options": [
+          {
+            "label": "A: keep",
+            "description": "keep the file"
+          },
+          {
+            "label": "B: drop"
+          }
+        ]
+      }
+    ]
+  },
+  "inFlight": {
+    "tasks": 0,
+    "queued": 0,
+    "kinds": []
+  }
+}
