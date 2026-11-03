@@ -73,7 +73,11 @@ object Notifier {
         )
     }
 
+    /** Owner rule 2026-11-03: the app is silent — no notification is posted anywhere. Flip to true to bring them back. */
+    const val NOTIFICATIONS_ENABLED = false
+
     fun canPost(ctx: Context): Boolean {
+        if (!NOTIFICATIONS_ENABLED) return false
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
             ContextCompat.checkSelfPermission(ctx, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
         ) {

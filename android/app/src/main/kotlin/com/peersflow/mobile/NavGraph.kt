@@ -20,6 +20,7 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import com.peersflow.mobile.glue.isAssistantRoleHeld
 import com.peersflow.mobile.glue.requestAssistantRole
+import com.peersflow.mobile.services.Notifier
 import com.peersflow.mobile.services.ConnectionServiceControl
 import com.peersflow.mobile.services.HiLisaActivity
 import com.peersflow.mobile.ui.aux.OutcomesScreen
@@ -108,7 +109,7 @@ fun NavGraph(
                     ConnectionServiceControl.start(ctx)
                     AppGraph.onForeground("paired")
                     AppGraph.onPaired()
-                    if (!PermissionAsks.notifications && !granted(ctx, Manifest.permission.POST_NOTIFICATIONS)) {
+                    if (Notifier.NOTIFICATIONS_ENABLED && !PermissionAsks.notifications && !granted(ctx, Manifest.permission.POST_NOTIFICATIONS)) {
                         PermissionAsks.notifications = true
                         notificationLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
                     }
