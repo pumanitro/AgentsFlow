@@ -152,7 +152,7 @@ function levelMeaning(level: MemLevel, live: boolean): string {
   switch (level) {
     case 'ok': return 'Plenty of room. Nothing is held back.';
     case 'warn': return 'Memory is getting tight. Nothing is held back yet — if it stays like this for 5 minutes, new sub-agents will be asked to wait.';
-    case 'closed': return 'Memory has stayed tight. New sub-agents are asked to wait until it clears; chats that are already running carry on.';
+    case 'closed': return 'Memory is down to the safety reserve (or the kernel says critical). New sub-agents wait until there is room; chats that are already running carry on.';
     case 'critical': return live
       ? 'Memory is critically short. New sub-agents wait, and containers nobody is using are being stopped to free room.'
       : 'Memory is critically short. New sub-agents wait. Practice mode: nothing is stopped — the list below shows what would be.';

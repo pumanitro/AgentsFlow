@@ -29,7 +29,8 @@ import type { TranscriptSignals } from './keeper/transcript-signals';
 // against a ps fixture of dead pids; the guard's exec is a fake that only
 // RECORDS `docker stop`; the Keeper types into a list.
 
-const HOOK = path.join(os.homedir(), '.claude', 'hooks', 'mem-admission.sh');
+// The repo's own copy (the same file Peers Flow installs into ~/.claude/hooks/peersflow).
+const HOOK = path.join(__dirname, '..', '..', '..', 'guards', 'mem-admission.sh');
 const MEMGUARD = path.join(os.homedir(), 'Library', 'Scripts', 'memguard-system.sh');
 const MEM_BUDGET = path.join(os.homedir(), '.claude', 'tools', 'cpu-gate', 'mem-budget.mjs');
 const PS_FIXTURE = path.join(os.homedir(), '.claude', 'tools', 'cpu-gate', 'fixtures', 'ps-2026-09-22.txt');
@@ -121,7 +122,7 @@ function hookPayload(over: { session_id?: string; description?: string } = {}): 
 interface HookRun { dir: string; deferDir: string; log: string; code: number | null; stdout: string; stderr: string; files: string[] }
 
 /** One run of the real hook: fake reading, every path it writes under a temp dir. */
-async function runHook(opts: { availGB: number; payload?: string; closedFile?: string; dir?: string }): Promise<HookRun> {
+async function runHook(opts: { availGB: number; payload?: string; closedFile?: string; dir?: string; env?: Record<string, string> }): Promise<HookRun> {
   const dir = opts.dir ?? tmp('hook');
   const deferDir = path.join(dir, 'mem-deferred');
   const log = path.join(dir, 'mem-admission.log');
@@ -132,6 +133,7 @@ async function runHook(opts: { availGB: number; payload?: string; closedFile?: s
     MEM_ADMISSION_LOG: log,
     MEM_LOCK_DIR: path.join(dir, 'locks'),
     MEM_ADMISSION_CLOSED_FILE: opts.closedFile ?? path.join(dir, 'locks', 'mem-admission-closed'),
+    ...(opts.env ?? {}),
   }), opts.payload ?? hookPayload());
   return { dir, deferDir, log, ...r, files: fs.existsSync(deferDir) ? fs.readdirSync(deferDir).sort() : [] };
 }
@@ -679,25 +681,30 @@ test('guard → Keeper: the guard\'s own level gates the deferred retry — noth
   assert.equal(fs.existsSync(file), false);
 });
 
-test('guard → hook → Keeper: while the guard holds admission closed the real hook refuses even with free memory; the guard reopening lets it through', { skip: SKIP_HOOK }, async () => {
+test('guard → hook → Keeper: the hook goes by its own reading (one shared rule) — a fresh guard file never overrides room; pressure 4 denies; the guard reopening releases the Keeper', { skip: SKIP_HOOK }, async () => {
   const start = Date.now() + 2_000;
   const g = guardHarness(start);
   await g.tick();
   g.state.pressure = '4\n';
   await g.tick(GUARD_TICK_MS);
   assert.equal(await g.tick(GUARD_TICK_MS), 'critical');
-  assert.ok(fs.existsSync(g.admission), 'the guard writes the admission-closed file at critical');
+  assert.ok(fs.existsSync(g.admission), 'the guard writes the admission-closed file at kernel pressure 4 (no room)');
   assert.deepEqual(Object.keys(JSON.parse(fs.readFileSync(g.admission, 'utf8')) as object).sort(), ['level', 'reason', 'since', 'writtenAt']);
 
-  // 60 GB "free" by the hook's own reading: only the guard's file is in the way.
-  const closed = await runHook({ availGB: 60, closedFile: g.admission });
+  // 2026-11-02: 60 GB by the hook's own reading — the guard's file alone no longer denies.
+  const roomy = await runHook({ availGB: 60, closedFile: g.admission });
+  assert.equal(roomy.stdout, '', 'room by the shared rule admits, whatever the app file says');
+  assert.match(fs.readFileSync(roomy.log, 'utf8'), / ALLOW avail=60 state=ok\+app-closed-ignored /);
+
+  // The same kernel-critical reading the guard saw denies in the hook too.
+  const closed = await runHook({ availGB: 60, closedFile: g.admission, env: { MEM_FAKE_PRESSURE: '4' } });
   assert.equal(closed.code, 0);
   assert.equal((JSON.parse(closed.stdout) as { hookSpecificOutput: { permissionDecision: string } }).hookSpecificOutput.permissionDecision, 'deny');
   assert.equal(closed.files.length, 1);
   const marker = parseDeferredMarker(fs.readFileSync(path.join(closed.deferDir, closed.files[0]), 'utf8'));
   assert.ok(marker);
-  assert.equal(marker.state, 'ok');
-  assert.equal(marker.reason, 'admission closed by the Peers Flow memory guard (state ok)');
+  assert.equal(marker.state, 'critical');
+  assert.match(marker.reason, /kernel pressure critical/);
 
   // The Keeper holds that retry for as long as the guard says so…
   const w = world({ startAt: start });

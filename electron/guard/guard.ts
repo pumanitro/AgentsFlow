@@ -18,6 +18,7 @@
 
 import { execFile } from 'child_process';
 import * as fs from 'fs';
+import * as os from 'os';
 import * as path from 'path';
 import type { Conversation, GuardContainerRow, GuardPins, GuardSnapshot, KillLogEntry, MemLevel, MemSample } from '../../shared/types';
 import type { ClaudeAgentJsonRow } from '../claude-cli';
@@ -26,6 +27,7 @@ import { collectInventory } from './docker-inventory';
 import type { ContainerInfo, Exec, InspectRow, StatsRow } from './docker-inventory';
 import { publishedPorts, supabaseProjectDir } from './docker-inventory';
 import { appendKillLog, readKillLogSince } from './kill-log';
+import { admissionVerdict } from './admission-rule';
 import { nextLevel, parseMemSample, swapGrowthGBper5min } from './mem-level';
 import type { LevelState } from './mem-level';
 import { readPins, writePins } from './pins';
@@ -87,6 +89,8 @@ let killOffset: number | null = null;
 let admissionSince: number | null = null;
 let admissionWrittenAt: number | null = null;
 let snapshot: GuardSnapshot | null = null;
+// The last sample's verdict from admission-rule.ts (the hook's rule). null = no sample.
+let lastRoom: boolean | null = null;
 
 function hhmm(ms: number): string {
   const d = new Date(ms);
@@ -103,10 +107,15 @@ async function sampleMemory(exec: Exec, now: number): Promise<MemSample | null> 
   return parseMemSample(vm, pressure ?? '', swap, now);
 }
 
-/** Written every tick while closed/critical (the hook trusts it for 120 s by mtime); removed at ok/warn. */
+/**
+ * Written every tick while the admission rule says NO ROOM (level closed, or critical with no
+ * room); removed whenever there is room — a critical driven only by the compressor or swap
+ * growth makes the actor act but does not hold sub-agents back. The hook no longer obeys this
+ * file (it re-reads memory itself by the same rule); it is the app's record, and the UI's.
+ */
 async function syncAdmissionFile(now: number): Promise<void> {
   const lv = level.level;
-  if (lv === 'closed' || lv === 'critical') {
+  if (lv === 'closed' || (lv === 'critical' && lastRoom === false)) {
     if (admissionSince === null) admissionSince = now;
     const body = JSON.stringify({
       since: new Date(admissionSince).toISOString(),
@@ -126,7 +135,7 @@ async function syncAdmissionFile(now: number): Promise<void> {
     return;
   }
   // 'unknown' leaves the file alone: it simply goes stale after 120 s.
-  if (lv !== 'ok' && lv !== 'warn') return;
+  if (lv !== 'ok' && lv !== 'warn' && lv !== 'critical') return;
   admissionSince = null;
   admissionWrittenAt = null;
   try {
@@ -307,6 +316,7 @@ async function pass(d: GuardDeps): Promise<void> {
 
   const sample = await sampleMemory(exec, now);
   if (sample) samples.push(sample);
+  lastRoom = sample ? admissionVerdict(sample, os.totalmem() / 1024 ** 3).room : null;
   samples = samples.filter((s) => now - s.at <= SAMPLE_KEEP_MS);
   const before = level.level;
   level = nextLevel(level, sample, samples, now);
@@ -427,6 +437,7 @@ export function __resetGuardForTests(): void {
   tick = 0;
   samples = [];
   level = initialLevel();
+  lastRoom = null;
   inventory = null;
   activity.clear();
   notices.clear();

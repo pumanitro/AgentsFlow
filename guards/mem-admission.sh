@@ -17,13 +17,15 @@
 #   1. any other tool                → exit 0, silent, no log line
 #   2. an escape hatch (below)       → OFF, allow
 #   3. read `mem-budget --json`      → any failure: ERR, allow (this hook fails OPEN)
-#   4. room = (state ok) or (state warn and fit.agents >= 1), AND admission is not closed
-#      (closed = $MEM_ADMISSION_CLOSED_FILE exists with now − mtime < 120 s; Peers Flow's memory
-#      guard keeps it fresh while its own level is closed/critical)             → ALLOW
+#   4. room = state is not critical AND fit.agents >= 1                         → ALLOW
+#      (2026-11-02: mem-budget's own fresh reading is the ONLY input. Peers Flow's
+#      $MEM_ADMISSION_CLOSED_FILE is logged as a note but never overrides that reading — a stale
+#      or stricter app state kept agents out all morning with 31 GB available, 0 swap, pressure
+#      normal. The app writes the file by the identical rule anyway.)
 #   5. no room → wait up to $MEM_ADMISSION_WAIT_S with
 #      `mem-budget wait --need <thresholds.MEM_PER_AGENT_GB> --timeout <left> --strict`
-#      (exit 75 = still no room), re-read, re-check the closed file; when only the closed file or
-#      a lane lease is in the way the same budget is spent re-checking every 2 s
+#      (exit 75 = still no room), re-read; when only a lane lease is in the way the same budget is
+#      spent re-checking every 2 s
 #                                                                    → ALLOW-AFTER-WAIT
 #   6. still no room → deny, and write a DeferredMarker             → DENY+DEFER
 #
@@ -178,17 +180,21 @@ closed_fresh() { # 0 while the closed file exists and is younger than CLOSED_FRE
   [ $(( now - m )) -lt "$CLOSED_FRESH_S" ]
 }
 
-# 2026-09-26: "warn" alone does not deny. Swap is a LAGGING signal on macOS — pages swapped
-# out during a night of bulk runs stay in swap until touched, so `swap 9 GB > 8` read "warn"
-# for a whole day while 50+ GB was free. A warn state has room when mem-budget's own fit
-# (avail − 16 GB reserve − live lane leases, ÷ 1.5 GB per agent) says one more agent fits.
+# The ONE admission rule (mem.mjs header; Peers Flow's electron/guard/admission-rule.ts mirrors it):
+# deny only when state is critical (kernel pressure 4, swap > MEM_CRITICAL_SWAP_GB, avail <
+# MEM_CRITICAL_GB) or fit.agents == 0 (avail − max(8 GB, 8 % RAM) reserve − live lane leases,
+# ÷ 1.5 GB per agent). "warn" (compressor, lingering swap, pressure 2, avail < 20) is a note only.
+# 2026-09-26 and 2026-11-02: warn-as-deny kept agents out for a day with 30–50+ GB available.
 has_room() { # → 0 with ROOM_STATE set (for the log); 1 with WHY set (short, for the marker)
-  if closed_fresh; then WHY="admission closed by the Peers Flow memory guard (state ${state})"; return 1; fi
+  local note=""
+  closed_fresh && note="+app-closed-ignored"
   case "$state" in
-    ok) ROOM_STATE=ok; return 0 ;;
-    warn)
-      if [ "${agents_fit:-0}" -ge 1 ] 2>/dev/null; then ROOM_STATE="warn-with-room(${agents_fit})"; return 0; fi
-      WHY="warn with no room for one agent (${reasons})"; return 1 ;;
+    ok|warn)
+      if [ "${agents_fit:-0}" -ge 1 ] 2>/dev/null; then
+        if [ "$state" = ok ]; then ROOM_STATE="ok${note}"; else ROOM_STATE="warn-with-room(${agents_fit})${note}"; fi
+        return 0
+      fi
+      WHY="no room for one agent above the reserve (${reasons:-state ${state}})"; return 1 ;;
     *) WHY="${state} (${reasons})"; return 1 ;;
   esac
 }
@@ -251,7 +257,7 @@ while :; do
     exit 0
   fi
   [ "$wrc" -ne 0 ] && break       # 75 = the whole budget went by without room (anything else: wait itself broke)
-  # mem-budget sees room but the closed file / a lane lease does not: re-check until the budget is spent
+  # mem-budget wait saw room but fit (a lane lease) does not: re-check until the budget is spent
   left=$(( WAIT_S - $(waited) ))
   [ "$left" -le 0 ] && break
   if [ "$left" -lt 2 ]; then sleep "$left"; else sleep 2; fi

@@ -158,23 +158,24 @@ test('tick: the inventory is refreshed every second tick, memory every tick', as
   assert.equal(h.stops().length, 0);
 });
 
-test('admission file: written while closed, rewritten each tick, removed again at ok', async () => {
+test('admission file: a sustained compressor warn never closes; written only while there is no room, removed as soon as there is', async () => {
   const h = harness();
   h.state.vm = fixture('vm_stat-compressed-synthetic.txt');     // compressed 56.8 GB: warn, never critical
-  await h.tick();
-  assert.equal(getMemLevel(), 'warn');
+  for (let i = 0; i < 12; i++) await h.tick(i === 0 ? 0 : GUARD_TICK_MS);   // 5.5 min
+  assert.equal(getMemLevel(), 'warn');                          // 2026-11-02: no longer escalates to closed
   assert.equal(fs.existsSync(h.admission), false);
-  for (let i = 0; i < 9; i++) await h.tick(GUARD_TICK_MS);
-  assert.equal(getMemLevel(), 'warn');                          // 4.5 min
+  assert.equal(getGuardSnapshot().admissionClosed, false);
+
+  h.state.vm = fixture('vm_stat.txt');
+  h.state.swap = 'total = 32768.00M  used = 30720.00M  free = 2048.00M  (encrypted)\n';   // swap 30 GB > 24: no room
   await h.tick(GUARD_TICK_MS);
   assert.equal(getMemLevel(), 'closed');
-  const closedAt = T0 + 10 * GUARD_TICK_MS;
+  const closedAt = T0 + 12 * GUARD_TICK_MS;
   const body = JSON.parse(fs.readFileSync(h.admission, 'utf8'));
   assert.deepEqual(Object.keys(body).sort(), ['level', 'reason', 'since', 'writtenAt']);
   assert.equal(body.level, 'closed');
   assert.equal(body.since, new Date(closedAt).toISOString());
-  assert.equal(body.writtenAt, new Date(closedAt).toISOString());
-  assert.match(body.reason, /compressed 56\.8 GB > 32/);
+  assert.match(body.reason, /swap 30\.0 GB > 24/);
   assert.equal(getGuardSnapshot().admissionClosed, true);
 
   await h.tick(GUARD_TICK_MS);
@@ -182,19 +183,18 @@ test('admission file: written while closed, rewritten each tick, removed again a
   assert.equal(again.since, body.since);
   assert.equal(again.writtenAt, new Date(closedAt + GUARD_TICK_MS).toISOString());
 
-  h.state.vm = fixture('vm_stat.txt');
+  h.state.swap = fixture('swapusage.txt');
   await h.tick(GUARD_TICK_MS);
-  assert.equal(getMemLevel(), 'closed');                        // held for one clean tick
-  assert.equal(fs.existsSync(h.admission), true);
+  assert.notEqual(getMemLevel(), 'closed');                     // room again: not held
+  assert.equal(fs.existsSync(h.admission), false);
   await h.tick(GUARD_TICK_MS);
   assert.equal(getMemLevel(), 'ok');
-  assert.equal(fs.existsSync(h.admission), false);
   assert.equal(getGuardSnapshot().admissionClosed, false);
   assert.deepEqual(fs.readdirSync(path.dirname(h.admission)), []);   // no temp file left behind
   assert.equal(h.stops().length, 0);
 });
 
-test('admission file: written at critical, absent at warn, and a stale one from a previous run is removed at ok', async () => {
+test('admission file: written at kernel pressure 4 (closed, then critical), and a stale one from a previous run is removed at ok', async () => {
   const h = harness();
   fs.mkdirSync(path.dirname(h.admission), { recursive: true });
   fs.writeFileSync(h.admission, '{"level":"closed"}');
@@ -205,8 +205,8 @@ test('admission file: written at critical, absent at warn, and a stale one from 
 
   h.state.pressure = '4\n';
   await h.tick(GUARD_TICK_MS);
-  assert.equal(getMemLevel(), 'warn');
-  assert.equal(fs.existsSync(h.admission), false);
+  assert.equal(getMemLevel(), 'closed');
+  assert.equal(JSON.parse(fs.readFileSync(h.admission, 'utf8')).level, 'closed');
   await h.tick(GUARD_TICK_MS);
   assert.equal(getMemLevel(), 'critical');
   assert.equal(JSON.parse(fs.readFileSync(h.admission, 'utf8')).level, 'critical');
@@ -398,7 +398,7 @@ test('LIVE: a notice is dropped when the level leaves critical, and nothing more
   await driveToCritical(h);
   h.state.pressure = '1\n';
   await h.tick(GUARD_TICK_MS);
-  assert.equal(getMemLevel(), 'closed');
+  assert.equal(getMemLevel(), 'warn');                          // held, never critical; room, so not closed
   await h.tick(GUARD_TICK_MS);
   await h.tick(GUARD_TICK_MS);
   assert.equal(getMemLevel(), 'ok');

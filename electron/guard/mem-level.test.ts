@@ -2,7 +2,7 @@ import { strict as assert } from 'node:assert';
 import { test } from 'node:test';
 import type { MemSample } from '../../shared/types';
 import {
-  CRIT_COMPRESSED_GB, CRIT_CONFIRM_TICKS, OK_CONFIRM_TICKS, WARN_SUSTAINED_MS,
+  CRIT_COMPRESSED_GB, CRIT_CONFIRM_TICKS, OK_CONFIRM_TICKS,
   nextLevel, parseMemSample, swapGrowthGBper5min,
 } from './mem-level';
 import type { LevelState } from './mem-level';
@@ -26,7 +26,7 @@ function walk(from: LevelState, overs: Array<Partial<MemSample> | null>, t0 = T0
     const now = t0 + i * step;
     const s = o === null ? null : sample(now, o);
     if (s) samples.push(s);
-    st = nextLevel(st, s, samples, now);
+    st = nextLevel(st, s, samples, now, 128);
     out.push(st);
   });
   return out;
@@ -39,9 +39,9 @@ test('parseMemSample: the real vm_stat capture (fresh boot: empty compressor, no
   assert.equal(s.pressure, 1);
   assert.equal(s.compressedGB, 0);
   assert.equal(s.swapUsedGB, 0);
-  // (free 1393043 + speculative 589581 + purgeable 104842 + file-backed 1760830) × 16384 B
-  assert.equal(s.availGB, (3848296 * 16384) / 1024 ** 3);
-  assert.ok(Math.abs((s.availGB ?? 0) - 58.72) < 0.01);
+  // (free 1393043 + speculative 589581 + purgeable 104842 + file-backed 1760830 + inactive 2733250) × 16384 B
+  assert.equal(s.availGB, ((3848296 + 2733250) * 16384) / 1024 ** 3);
+  assert.ok(Math.abs((s.availGB ?? 0) - 100.43) < 0.01);
 });
 
 test('parseMemSample: compressor pages × page size, swap in M', () => {
@@ -117,14 +117,15 @@ test('ladder: ok requires OK_CONFIRM_TICKS clean ticks (from unknown at launch)'
 });
 
 test('ladder: each warn signal alone is warn at once — kernel 2, compressed > 32, swap > 8', () => {
-  for (const o of [{ pressure: 2 as const }, { compressedGB: 32.1 }, { swapUsedGB: 8.1 }]) {
+  for (const o of [{ pressure: 2 as const }, { compressedGB: 51.3 }, { swapUsedGB: 8.1 }]) {
     const [st] = walk(start('ok'), [o]);
     assert.equal(st.level, 'warn', JSON.stringify(o));
     assert.equal(st.reasons.length, 1);
     assert.equal(st.warnSince, T0);
   }
   // the thresholds themselves are not over the line
-  assert.equal(walk(start('ok'), [{ compressedGB: 32, swapUsedGB: 8 }, { compressedGB: 32, swapUsedGB: 8 }])[1].level, 'ok');
+  // (compressor note on 128 GB = 40 % = 51.2 GB)
+  assert.equal(walk(start('ok'), [{ compressedGB: 51.2, swapUsedGB: 8 }, { compressedGB: 51.2, swapUsedGB: 8 }])[1].level, 'ok');
 });
 
 test('ladder: leftover swap — over the line, not growing, compressor and kernel calm — is not a reason', () => {
@@ -134,46 +135,47 @@ test('ladder: leftover swap — over the line, not growing, compressor and kerne
   const now = T0 + 12 * TICK;
   const calm = history[history.length - 1];
   const closed = { ...start('closed'), warnSince: T0 };
-  const a = nextLevel(closed, calm, history, now);
-  assert.equal(a.level, 'closed');
+  const a = nextLevel(closed, calm, history, now, 128);
+  assert.equal(a.level, 'warn');                    // room again: closed never lingers
   assert.deepEqual(a.reasons, ['clearing (1/2)']);
-  assert.equal(nextLevel(a, calm, history, now).level, 'ok');
+  assert.equal(nextLevel(a, calm, history, now, 128).level, 'ok');
   // the same swap with a full compressor, a kernel warn, or still growing is live
-  assert.deepEqual(nextLevel(closed, { ...calm, compressedGB: 33 }, history, now).reasons.length, 2);
-  assert.equal(nextLevel(closed, { ...calm, pressure: 2 }, history, now).reasons.length, 2);
+  assert.deepEqual(nextLevel(closed, { ...calm, compressedGB: 52 }, history, now, 128).reasons.length, 2);
+  assert.equal(nextLevel(closed, { ...calm, pressure: 2 }, history, now, 128).reasons.length, 2);
   const growing = history.map((h, i) => ({ ...h, swapUsedGB: 9 + i * 0.1 }));
-  assert.deepEqual(nextLevel(closed, growing[12], growing, now).reasons, ['swap 10.2 GB > 8']);
+  assert.deepEqual(nextLevel(closed, growing[12], growing, now, 128).reasons, ['swap 10.2 GB > 8']);
 });
 
-test('ladder: the 2026-10-11 morning — avail 22–36 GB is never a reason, compressed 56.8 is warn', () => {
-  const [low] = walk(start('ok'), [{ availGB: 2 }, { availGB: 2 }]).slice(-1);
-  assert.equal(low.level, 'ok');
+test('ladder: the 2026-10-11 morning — compressed 56.8 GB with room is a warn note, not closed', () => {
   const [st] = walk(start('ok'), [{ availGB: 30, compressedGB: 56.8 }]);
   assert.equal(st.level, 'warn');
 });
 
-test('ladder: warn → closed once warn has been sustained for 5 minutes', () => {
-  assert.equal(WARN_SUSTAINED_MS, 5 * 60_000);
-  const states = walk(start('ok'), Array.from({ length: 12 }, () => ({ compressedGB: 40 })));
-  // ticks at 0 … 5.5 min: closed from the tick at exactly 5:00 (index 10)
-  assert.deepEqual(states.slice(0, 10).map((s) => s.level), Array(10).fill('warn'));
-  assert.equal(states[10].level, 'closed');
-  assert.equal(states[10].since, T0 + 10 * TICK);
-  assert.equal(states[11].level, 'closed');
-  assert.equal(states[11].since, T0 + 10 * TICK);
+test('ladder: 2026-11-02 — 128 GB, compressor 43, avail 59.5 (inactive counted), swap 0, pressure 1 → ok, never closed', () => {
+  const states = walk(start('ok'), Array.from({ length: 20 }, () => ({ availGB: 59.5, compressedGB: 43, swapUsedGB: 0, pressure: 1 as const })));
+  assert.ok(states.every((s) => s.level !== 'closed' && s.level !== 'critical'), states.map((s) => s.level).join(','));
+  assert.equal(states[19].level, 'ok');
+  // a compressor warn held for 10 minutes never escalates to closed
+  const held = walk(start('ok'), Array.from({ length: 20 }, () => ({ availGB: 30, compressedGB: 55 })));
+  assert.ok(held.every((s) => s.level === 'warn'), held.map((s) => s.level).join(','));
 });
 
-test('ladder: one unreadable sample does not restart the sustained-warn clock', () => {
-  const overs: Array<Partial<MemSample> | null> = Array.from({ length: 11 }, () => ({ compressedGB: 40 }));
-  overs[5] = null;
-  const states = walk(start('ok'), overs);
-  assert.equal(states[5].level, 'unknown');
-  assert.equal(states[10].level, 'closed');
+test('ladder: closed = no room by the admission rule, at once', () => {
+  // (c) avail below reserve + one agent: 11 − 10.24 < 1.5
+  assert.equal(walk(start('ok'), [{ availGB: 11 }])[0].level, 'closed');
+  assert.ok(walk(start('ok'), [{ availGB: 11 }])[0].reasons[0].startsWith('no room for one agent'));
+  assert.equal(walk(start('ok'), [{ availGB: 12 }])[0].level, 'ok');   // 12 − 10.24 = 1.76 → one agent fits (held ok)
+  // (d) swap above 24 → closed (not growing: no actor critical)
+  assert.equal(walk(start('ok'), [{ swapUsedGB: 30 }])[0].level, 'closed');
+  // (b) pressure 4 → closed on the first tick, critical once confirmed
+  assert.deepEqual(walk(start('ok'), [{ pressure: 4 }, { pressure: 4 }]).map((s) => s.level), ['closed', 'critical']);
+  // room returns → closed clears on the next tick
+  assert.deepEqual(walk(start('ok'), [{ availGB: 5 }, { availGB: 40 }, { availGB: 40 }]).map((s) => s.level), ['closed', 'warn', 'ok']);
 });
 
 test('ladder: critical requires CRIT_CONFIRM_TICKS consecutive ticks', () => {
   assert.equal(CRIT_CONFIRM_TICKS, 2);
-  const [a, b] = walk(start('ok'), [{ pressure: 4 }, { pressure: 4 }]);
+  const [a, b] = walk(start('ok'), [{ compressedGB: 61 }, { compressedGB: 61 }]);
   assert.equal(a.level, 'warn');
   assert.equal(a.critTicks, 1);
   assert.ok(a.reasons.some((r) => r.includes('confirming critical (1/2)')));
@@ -182,7 +184,7 @@ test('ladder: critical requires CRIT_CONFIRM_TICKS consecutive ticks', () => {
 });
 
 test('ladder: a single critical blip between calm ticks never reaches critical', () => {
-  const states = walk(start('ok'), [{ pressure: 4 }, {}, { pressure: 4 }, {}, { pressure: 4 }]);
+  const states = walk(start('ok'), [{ compressedGB: 61 }, {}, { compressedGB: 61 }, {}, { compressedGB: 61 }]);
   assert.ok(states.every((s) => s.level !== 'critical'), states.map((s) => s.level).join(','));
 });
 
@@ -219,24 +221,15 @@ test('ladder: growth under the line (1.875 GB / 5 min) is not critical', () => {
 
 test('ladder: leaving critical — the held level is never critical, and ok takes two clean ticks', () => {
   const states = walk(start('ok'), [{ pressure: 4 }, { pressure: 4 }, {}, {}]);
-  assert.deepEqual(states.map((s) => s.level), ['warn', 'critical', 'closed', 'ok']);
+  assert.deepEqual(states.map((s) => s.level), ['closed', 'critical', 'warn', 'ok']);
   assert.deepEqual(states[2].reasons, ['clearing (1/2)']);
 });
 
-test('ladder: critical easing to warn signals reads closed, and re-entering critical needs two ticks again', () => {
-  const states = walk(start('ok'), [{ pressure: 4 }, { pressure: 4 }, { pressure: 2 }, { pressure: 4 }, { pressure: 4 }]);
-  assert.deepEqual(states.map((s) => s.level), ['warn', 'critical', 'closed', 'closed', 'critical']);
+test('ladder: critical easing to warn signals reads warn (room), and re-entering critical needs two ticks again', () => {
+  const states = walk(start('ok'), [{ compressedGB: 61 }, { compressedGB: 61 }, { pressure: 2 }, { compressedGB: 61 }, { compressedGB: 61 }]);
+  assert.deepEqual(states.map((s) => s.level), ['warn', 'critical', 'warn', 'warn', 'critical']);
 });
 
-test('ladder: closed holds through one clean tick, then ok clears the warn clock', () => {
-  const overs: Array<Partial<MemSample>> = [...Array.from({ length: 11 }, () => ({ compressedGB: 33 })), {}, {}, { compressedGB: 33 }];
-  const states = walk(start('ok'), overs);
-  assert.equal(states[10].level, 'closed');
-  assert.equal(states[11].level, 'closed');
-  assert.equal(states[12].level, 'ok');
-  assert.equal(states[13].level, 'warn');           // a fresh warn, not straight back to closed
-  assert.equal(states[13].warnSince, T0 + 13 * TICK);
-});
 
 test('ladder: `since` moves only when the level changes', () => {
   const states = walk(start('ok'), [{}, {}, { pressure: 2 }, { pressure: 2 }]);

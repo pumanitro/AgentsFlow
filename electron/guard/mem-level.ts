@@ -1,5 +1,11 @@
 // The memory ladder: ok → warn → closed → critical.
 //
+// 2026-11-02: 'closed' (sub-agents held back, the admission-closed file written) now
+// means exactly "admission-rule.ts says no room" — the same rule as mem.mjs and the
+// hook. It used to be "warn sustained 5 min", and a compressor over 32 GB alone kept
+// agents out all morning with 31 GB available, 0 swap and kernel pressure normal.
+// warn is a note; critical (what the pressure actor acts on) is unchanged.
+//
 // Why not "available GB": on the morning this was written a vitest herd took
 // the machine from fine to frozen in nine minutes while `avail` never left
 // 22–36 GB. What moved was the compressor (34.6 → 56.8 GB) and, late, the
@@ -10,9 +16,14 @@
 // confirmation ticks, so one odd sample cannot flip the level. Thresholds
 // mirror ~/.claude/tools/cpu-gate/mem.mjs DEFAULTS where they overlap.
 
+import os from 'node:os';
 import type { MemLevel, MemSample } from '../../shared/types';
+import { admissionVerdict } from './admission-rule';
 
-export const WARN_COMPRESSED_GB = 32;
+// A compressor note scaled to RAM (mem.mjs MEM_WARN_COMPRESSED_PCT); below the actor's
+// CRIT_COMPRESSED_GB line it only colours the pill, it never closes admission.
+export const WARN_COMPRESSED_PCT = 40;
+export const WARN_COMPRESSED_GB = 32; // floor for small machines
 export const WARN_SWAP_GB = 8;
 export const CRIT_COMPRESSED_GB = 60;
 export const CRIT_SWAP_GROWTH_GB_PER_5MIN = 2;
@@ -22,13 +33,13 @@ export const CRIT_SWAP_GROWTH_GB_PER_5MIN = 2;
 // a leftover (10.7 GB, draining 0.1 GB / 10 min) kept sub-agents closed for
 // hours with 63 GB available.
 export const STALE_SWAP_MAX_GROWTH_GB_PER_5MIN = 0.5;
-export const WARN_SUSTAINED_MS = 5 * 60_000;
 export const CRIT_CONFIRM_TICKS = 2;
 export const OK_CONFIRM_TICKS = 2;
 
 export interface LevelState { level: MemLevel; since: number; reasons: string[]; warnSince: number | null; critTicks: number; okTicks: number }
 
 const GIB = 1024 ** 3;
+const MACHINE_TOTAL_GB = os.totalmem() / GIB;
 const GROWTH_WINDOW_MS = 5 * 60_000;
 // A baseline older than this is a sampling gap (sleep, a stalled tick), not a
 // trend: no growth figure rather than one stretched over the gap.
@@ -74,9 +85,11 @@ export function parseMemSample(vmStat: string, pressure: string, swapusage: stri
   const speculative = vmPages(vmStat, 'Pages speculative');
   const purgeable = vmPages(vmStat, 'Pages purgeable');
   const fileBacked = vmPages(vmStat, 'File-backed pages');
+  const inactive = vmPages(vmStat, 'Pages inactive');
+  // Same formula as mem.mjs: inactive pages are what macOS hands out first without swapping.
   const availGB = free === null
     ? null
-    : ((free + (speculative ?? 0) + (purgeable ?? 0) + (fileBacked ?? 0)) * pageSize) / GIB;
+    : ((free + (speculative ?? 0) + (purgeable ?? 0) + (fileBacked ?? 0) + (inactive ?? 0)) * pageSize) / GIB;
 
   const p = Number.parseInt((pressure || '').trim(), 10);
   return {
@@ -113,15 +126,17 @@ function gb(n: number): string {
 
 /**
  * critical: pressure===4 || compressedGB>60 || growth>2, after CRIT_CONFIRM_TICKS consecutive;
- * warn: pressure===2 || compressed>32 || swap>8 (unless it is a leftover: not growing, compressor
- * and kernel calm); closed: warn sustained ≥ WARN_SUSTAINED_MS;
+ * closed: admissionVerdict() says no room (pressure 4, swap > 24, avail < 10, or not one agent
+ * above the reserve) — at once, and gone as soon as there is room again;
+ * warn: pressure===2 || compressed > max(32, 40 % RAM) || swap>8 (unless it is a leftover: not
+ * growing, compressor and kernel calm) — a note only;
  * ok: none of the above for OK_CONFIRM_TICKS; unknown: sample null.
  *
  * A level that is only being HELD while a change confirms is never 'critical':
  * the actor acts on 'critical', so it must not act on a signal that has already
- * gone. A held critical reads as 'closed'.
+ * gone. A held critical reads as 'warn' (or 'closed' when there is no room).
  */
-export function nextLevel(prev: LevelState, s: MemSample | null, samples: MemSample[], now: number): LevelState {
+export function nextLevel(prev: LevelState, s: MemSample | null, samples: MemSample[], now: number, totalGB: number = MACHINE_TOTAL_GB): LevelState {
   const at = (level: MemLevel): number => (level === prev.level ? prev.since : now);
 
   if (!s) {
@@ -134,25 +149,31 @@ export function nextLevel(prev: LevelState, s: MemSample | null, samples: MemSam
   if (s.pressure === 4) crit.push('kernel memory pressure critical');
   if (s.compressedGB > CRIT_COMPRESSED_GB) crit.push(`compressed ${gb(s.compressedGB)} GB > ${CRIT_COMPRESSED_GB}`);
   if (growth !== null && growth > CRIT_SWAP_GROWTH_GB_PER_5MIN) crit.push(`swap growing ${gb(growth)} GB / 5 min > ${CRIT_SWAP_GROWTH_GB_PER_5MIN}`);
+  const warnCompressed = Math.max(WARN_COMPRESSED_GB, (WARN_COMPRESSED_PCT / 100) * totalGB);
   const warn: string[] = [];
   if (s.pressure === 2) warn.push('kernel memory pressure warn');
-  if (s.compressedGB > WARN_COMPRESSED_GB && s.compressedGB <= CRIT_COMPRESSED_GB) warn.push(`compressed ${gb(s.compressedGB)} GB > ${WARN_COMPRESSED_GB}`);
+  if (s.compressedGB > warnCompressed && s.compressedGB <= CRIT_COMPRESSED_GB) warn.push(`compressed ${gb(s.compressedGB)} GB > ${gb(warnCompressed)}`);
   // Unknown growth (the first five minutes) counts as live swap, not a leftover.
-  const staleSwap = s.pressure !== 2 && s.pressure !== 4 && s.compressedGB <= WARN_COMPRESSED_GB
+  const staleSwap = s.pressure !== 2 && s.pressure !== 4 && s.compressedGB <= warnCompressed
     && growth !== null && growth <= STALE_SWAP_MAX_GROWTH_GB_PER_5MIN;
   if (s.swapUsedGB > WARN_SWAP_GB && !staleSwap) warn.push(`swap ${gb(s.swapUsedGB)} GB > ${WARN_SWAP_GB}`);
+
+  const adm = admissionVerdict(s, totalGB);
+  if (!adm.room) {
+    for (const r of adm.reasons) if (!crit.includes(r)) warn.unshift(r);
+  }
 
   if (crit.length === 0 && warn.length === 0) {
     const okTicks = prev.okTicks + 1;
     if (okTicks >= OK_CONFIRM_TICKS) {
       return { level: 'ok', since: at('ok'), reasons: [], warnSince: null, critTicks: 0, okTicks };
     }
-    const held: MemLevel = prev.level === 'critical' ? 'closed' : prev.level;
+    const held: MemLevel = prev.level === 'critical' || prev.level === 'closed' ? 'warn' : prev.level;
     return { level: held, since: at(held), reasons: [`clearing (${okTicks}/${OK_CONFIRM_TICKS})`], warnSince: prev.warnSince, critTicks: 0, okTicks };
   }
 
   const warnSince = prev.warnSince ?? now;
-  const sustained: MemLevel = now - warnSince >= WARN_SUSTAINED_MS || prev.level === 'closed' || prev.level === 'critical' ? 'closed' : 'warn';
+  const sustained: MemLevel = adm.room ? 'warn' : 'closed';
 
   if (crit.length > 0) {
     const critTicks = prev.critTicks + 1;

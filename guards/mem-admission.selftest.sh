@@ -104,50 +104,59 @@ grep -Eq " ALLOW avail=60 state=ok waited=[01] " "$LOGF" && ok || bad "case2 log
 check_eq "case2 no marker" "$(nmarkers "$DEFER")" "0"
 
 # ---------------------------------------------------------------------------------- case 3
-# warn via compressed memory but WITH room (25 GB avail, 40 GB compressed): since 2026-09-26 a
-# warn state admits when mem-budget's fit says another agent fits (25 − 16 reserve = 9 GB → 6).
+# warn (avail 18 < 20) with a big compressor but WITH room: a warn state admits when mem-budget's
+# fit says another agent fits (18 − 10.24 reserve = 7.76 GB → 5). Compressor 40 GB is no warn on 128 GB.
 newcase
-run "$AGENT_PAYLOAD" MEM_FAKE_AVAIL_GB=25 MEM_FAKE_COMPRESSED_GB=40
+run "$AGENT_PAYLOAD" MEM_FAKE_AVAIL_GB=18 MEM_FAKE_COMPRESSED_GB=40
 check_eq "case3 exit code" "$RC" "0"
 check_eq "case3 stdout empty (warn with room admits)" "$OUT" ""
 grep -q " ALLOW .*warn-with-room" "$LOGF" && ok || bad "case3 log line missing ALLOW warn-with-room"
 check_eq "case3 no marker" "$(nmarkers "$DEFER")" "0"
 
 # ---------------------------------------------------------------------------------- case 3b
-# warn via swap with NO room (17 GB avail, 12 GB swap): 17 − 16 reserve = 1 GB < 1.5 → deny + marker
+# (c) avail below reserve + one agent: 11 GB avail, 128 GB RAM → reserve max(8, 8%·128)=10.24,
+# 11 − 10.24 = 0.76 < 1.5 → no room → deny + marker (state warn: avail 11 < 20, not < 10)
 newcase
-run "$AGENT_PAYLOAD" MEM_FAKE_AVAIL_GB=17 MEM_FAKE_SWAP_GB=12
+run "$AGENT_PAYLOAD" MEM_FAKE_AVAIL_GB=11
 check_eq "case3b exit code" "$RC" "0"
-check_deny "case3b (warn, no room)" "$OUT"
+check_deny "case3b (below reserve, no room)" "$OUT"
 grep -q " DENY+DEFER .*state=warn " "$LOGF" && ok || bad "case3b log line missing DENY+DEFER"
 check_eq "case3b one marker" "$(nmarkers "$DEFER")" "1"
-jq -e '.schema==1 and .state == "warn" and .availGB == 17 and (.reason | test("no room"))' "$(marker_of "$DEFER")" >/dev/null 2>&1 && ok || bad "case3b marker wrong: $(cat "$(marker_of "$DEFER")" 2>/dev/null)"
+jq -e '.schema==1 and .state == "warn" and .availGB == 11 and (.reason | test("no room"))' "$(marker_of "$DEFER")" >/dev/null 2>&1 && ok || bad "case3b marker wrong: $(cat "$(marker_of "$DEFER")" 2>/dev/null)"
 
-# ---------------------------------------------------------------------------------- closed file
-# c1: a FRESH closed file denies even at ok memory, with a marker
+# ---------------------------------------------------------------------------------- 2026-11-02 cases
+# (a) the morning of 2026-11-02: 128 GB, compressor 43 GB, free 9 + spec 0.3 + purg 0.2 +
+# file-backed 18 + inactive 32 (= 59.5 avail), swap 0, pressure normal → ADMIT
+TODAY=(MEM_FAKE_TOTAL_GB=128 MEM_FAKE_COMPRESSED_GB=43 MEM_FAKE_FREE_GB=9 MEM_FAKE_SPECULATIVE_GB=0.3 MEM_FAKE_PURGEABLE_GB=0.2 MEM_FAKE_FILE_BACKED_GB=18 MEM_FAKE_INACTIVE_GB=32 MEM_FAKE_SWAP_GB=0 MEM_FAKE_PRESSURE=1)
+newcase
+run "$AGENT_PAYLOAD" "${TODAY[@]}"
+check_eq "today stdout empty (admitted)" "$OUT" ""
+grep -Eq " ALLOW avail=59\.5 state=ok " "$LOGF" && ok || bad "today log line missing ALLOW avail=59.5 state=ok: $(cat "$LOGF")"
+# (a') same, with a FRESH Peers Flow closed file: the hook's own reading wins
 newcase
 touch "$LOCKS/mem-admission-closed"
-run "$AGENT_PAYLOAD" MEM_FAKE_AVAIL_GB=60
-check_eq "closed-fresh exit code" "$RC" "0"
-check_deny "closed-fresh at ok" "$OUT"
-grep -q " DENY+DEFER avail=60 state=ok " "$LOGF" && ok || bad "closed-fresh log line missing DENY+DEFER state=ok: $(cat "$LOGF")"
-check_eq "closed-fresh one marker" "$(nmarkers "$DEFER")" "1"
-jq -e '.schema==1 and .state == "ok" and .availGB == 60 and (.reason | test("closed"))' "$(marker_of "$DEFER")" >/dev/null 2>&1 && ok || bad "closed-fresh marker wrong: $(cat "$(marker_of "$DEFER")" 2>/dev/null)"
-
-# c2: a closed file older than 120 s (mtime forced back 3 minutes) is ignored -> allow
+run "$AGENT_PAYLOAD" "${TODAY[@]}"
+check_eq "today + fresh app closed file still admits" "$OUT" ""
+grep -q " ALLOW .*state=ok+app-closed-ignored " "$LOGF" && ok || bad "closed file not noted as ignored: $(cat "$LOGF")"
+# (a'') compressor 43 GB is no longer even a warn on 128 GB (warn note starts above 60 % = 76.8 GB)
 newcase
-touch "$LOCKS/mem-admission-closed"
-touch -t "$(date -v-3M '+%Y%m%d%H%M.%S')" "$LOCKS/mem-admission-closed"
-run "$AGENT_PAYLOAD" MEM_FAKE_AVAIL_GB=60
-check_eq "closed-stale stdout empty (allow)" "$OUT" ""
-grep -Eq " ALLOW avail=60 state=ok waited=[01] " "$LOGF" && ok || bad "closed-stale log line missing ALLOW"
-check_eq "closed-stale no marker" "$(nmarkers "$DEFER")" "0"
-
-# c3: MEM_ADMISSION_CLOSED_FILE overrides the path
+run "$AGENT_PAYLOAD" MEM_FAKE_AVAIL_GB=40 MEM_FAKE_COMPRESSED_GB=80
+check_eq "compressor 80 GB (warn note) admits" "$OUT" ""
+grep -q " ALLOW .*warn-with-room" "$LOGF" && ok || bad "compressor 80 not warn-with-room: $(cat "$LOGF")"
+# (b) kernel pressure 4 with plenty of avail → DENY (critical)
 newcase
-touch "$ROOT/elsewhere-closed"
-run "$AGENT_PAYLOAD" MEM_FAKE_AVAIL_GB=60 MEM_ADMISSION_CLOSED_FILE="$ROOT/elsewhere-closed"
-check_deny "closed file via MEM_ADMISSION_CLOSED_FILE" "$OUT"
+run "$AGENT_PAYLOAD" "${TODAY[@]}" MEM_FAKE_PRESSURE=4
+check_deny "pressure 4" "$OUT"
+grep -q " DENY+DEFER .*state=critical " "$LOGF" && ok || bad "pressure 4 not DENY critical: $(cat "$LOGF")"
+# (b') kernel pressure 2 → warn note, admitted
+newcase
+run "$AGENT_PAYLOAD" "${TODAY[@]}" MEM_FAKE_PRESSURE=2
+check_eq "pressure 2 admits" "$OUT" ""
+# (d) swap above critical (30 > 24) → DENY
+newcase
+run "$AGENT_PAYLOAD" "${TODAY[@]}" MEM_FAKE_SWAP_GB=30
+check_deny "swap 30 > 24" "$OUT"
+grep -q " DENY+DEFER .*state=critical " "$LOGF" && ok || bad "swap 30 not DENY critical: $(cat "$LOGF")"
 
 # ---------------------------------------------------------------------------------- the wait
 # w1: room appears DURING the wait. MEM_NODE is a wrapper that answers the first mem-budget call
@@ -168,15 +177,6 @@ check_eq "wait-room stdout empty (allowed after the wait)" "$OUT" ""
 grep -Eq " ALLOW-AFTER-WAIT avail=60 state=ok waited=[0-9]+ " "$LOGF" && ok || bad "wait-room log line missing ALLOW-AFTER-WAIT: $(cat "$LOGF")"
 check_eq "wait-room no marker" "$(nmarkers "$DEFER")" "0"
 check_eq "wait-room: mem-budget ran 3 times (read, wait, re-read)" "$(cat "$ROOT/flip.count" 2>/dev/null)" "3"
-
-# w2: the closed file goes stale during the wait (mtime 117 s ago, 8 s budget) -> ALLOW-AFTER-WAIT
-newcase
-touch "$LOCKS/mem-admission-closed"
-touch -t "$(date -v-117S '+%Y%m%d%H%M.%S')" "$LOCKS/mem-admission-closed"
-run "$AGENT_PAYLOAD" MEM_FAKE_AVAIL_GB=60 MEM_ADMISSION_WAIT_S=8
-check_eq "closed-ages-out stdout empty" "$OUT" ""
-grep -Eq " ALLOW-AFTER-WAIT avail=60 state=ok waited=[2-8] " "$LOGF" && ok || bad "closed-ages-out log line missing ALLOW-AFTER-WAIT: $(cat "$LOGF")"
-check_eq "closed-ages-out no marker" "$(nmarkers "$DEFER")" "0"
 
 # w3: MEM_ADMISSION_WAIT_S=0 denies at once
 newcase
