@@ -207,6 +207,15 @@ describe('readAppended / hasUserTextAfter', () => {
     assert.equal(hasUserTextAfter(SAMPLE, 0, '12 tests passed'), true);   // tool_result content
     assert.equal(hasUserTextAfter(SAMPLE, 0, 'not in the file'), false);
   });
+  test('hasUserTextAfter counts a message queued behind a busy turn (real 2026-11-06 shape)', () => {
+    const file = path.join(TMP, 'queued.jsonl');
+    fs.writeFileSync(file, line({ type: 'assistant', uuid: 'a1', message: { content: [{ type: 'text', text: 'working' }] } }));
+    const from = fs.statSync(file).size;
+    fs.appendFileSync(file, line({ type: 'queue-operation', operation: 'enqueue', timestamp: '2026-11-06T07:25:15.374Z',
+      sessionId: 's', content: 'create new artifact for these new ideas' }));
+    assert.equal(hasUserTextAfter(file, from, 'create new artifact for these new ideas'), true);
+    assert.equal(hasUserTextAfter(file, from, 'something else'), false);
+  });
 });
 
 describe('createTailer', () => {

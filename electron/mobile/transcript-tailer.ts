@@ -273,9 +273,33 @@ export function hasUserTextAfter(file: string, from: number, text: string): bool
   const needle = text.trim();
   if (!needle) return false;
   const needleFlat = normaliseText(needle);
+  const matches = (s: string): boolean => s.includes(needle) || normaliseText(s).includes(needleFlat);
   const { entries } = readAppended(file, from);
-  return entries.some((e) => (e.kind === 'user.text' || e.kind === 'tool_result')
-    && (e.text.includes(needle) || normaliseText(e.text).includes(needleFlat)));
+  if (entries.some((e) => (e.kind === 'user.text' || e.kind === 'tool_result') && matches(e.text))) return true;
+  // A chat that is mid-turn does not write a user line for typed input: Claude
+  // queues it ({"type":"queue-operation","operation":"enqueue","content":…})
+  // and absorbs it later. That IS accepted — missing it made the phone retype
+  // the message dozens of times and report "Not sent" (2026-11-06).
+  return queuedTextsAfter(file, from).some(matches);
+}
+
+function queuedTextsAfter(file: string, from: number): string[] {
+  let size: number;
+  try { size = fs.statSync(file).size; } catch { return []; }
+  let start = Math.max(0, from);
+  if (size < start) start = 0;
+  if (size === start) return [];
+  let raw: string;
+  try { raw = readRange(file, start, size - start).toString('utf8'); } catch { return []; }
+  const out: string[] = [];
+  for (const l of raw.split('\n')) {
+    if (!l.includes('"queue-operation"') || !l.includes('"enqueue"')) continue;
+    try {
+      const d = JSON.parse(l) as { type?: string; operation?: string; content?: unknown };
+      if (d.type === 'queue-operation' && d.operation === 'enqueue' && typeof d.content === 'string') out.push(d.content);
+    } catch { /* partial line */ }
+  }
+  return out;
 }
 
 export function createTailer(o: { intervalMs?: number; log: LogFn }): Tailer {
