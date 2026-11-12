@@ -327,8 +327,14 @@ function AccountRow({
               <span className="text-[9px] uppercase tracking-wider text-err shrink-0">sign in again</span>
             )}
             {meter ? (
-              <span className="ml-auto text-[11px] font-mono shrink-0" style={{ color }}>
-                {meter.percent}%
+              <span
+                className="ml-auto text-[11px] font-mono shrink-0"
+                style={{ color }}
+                title={usage?.ok && usage.snapshot.source === 'token-probe'
+                  ? (usage.snapshot.meters.some((m) => m.group === 'session') ? 'from a 1-year-token probe' : 'from a 1-year-token probe; session meter unknown')
+                  : undefined}
+              >
+                {usage?.ok && usage.snapshot.source === 'token-probe' ? '~' : ''}{meter.percent}%
               </span>
             ) : usage ? (
               // Blind is not fine: an account whose meters cannot be read is

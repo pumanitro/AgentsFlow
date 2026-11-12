@@ -336,6 +336,10 @@ export interface UsageSnapshot {
   fetchedAt: string;
   // Plan tag, e.g. 'Max (20x)' — best-effort from the stored subscription info.
   plan?: string;
+  // Where the numbers came from. Absent = the usage endpoint. 'token-probe' =
+  // the rate-limit headers of a tiny message sent with the one-year token;
+  // weekly only unless a 5h header came back.
+  source?: 'token-probe';
 }
 
 export type UsageResult =

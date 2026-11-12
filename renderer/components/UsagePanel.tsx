@@ -247,7 +247,9 @@ function UsageSection({
             : <>
               {result.snapshot.meters.length ? result.snapshot.meters.map(meter => <MeterRow key={meter.key} meter={meter} />)
                 : <div className="px-3 py-2 text-[11px] text-muted">No usage limits reported.</div>}
-              <div className="px-3 py-1 text-[10px] text-subtle">Updated {fetchedAgo(result.snapshot.fetchedAt)}</div>
+              <div className="px-3 py-1 text-[10px] text-subtle">Updated {fetchedAgo(result.snapshot.fetchedAt)}{result.snapshot.source === 'token-probe'
+                ? (result.snapshot.meters.some((m) => m.group === 'session') ? ' · from a 1-year-token probe' : ' · from a 1-year-token probe; session meter unknown')
+                : ''}</div>
             </>}
         </div>
       )}

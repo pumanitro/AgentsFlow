@@ -57,6 +57,7 @@ function resolveGuardsDir(): string {
 
 import { store } from './store';
 import { getUsage, getUsageForService, getUsageForToken, resetUsageCache } from './usage';
+import { getUsageFromTokenProbe, needsProbe } from './usage-probe';
 import * as accounts from './accounts';
 import * as llt from './long-lived-token';
 import { cancelMint, mintTokenFor } from './token-mint';
@@ -1452,7 +1453,19 @@ ipcMain.handle('codexAccounts:saveCurrent', (_e, label?: string): SwitchCodexRes
 // Runs the same switchTo() the button calls, on a threshold. Lives here rather
 // than in the renderer so an overnight run keeps rotating with the window shut.
 
+// The usage endpoint stays primary. When it cannot answer (dead or revoked
+// sign-in, scope 403, a standing 429 or a stale snapshot) and the account has a
+// one-year token, the rate-limit headers of a 1-token message fill in — weekly
+// meter only, and it runs for revoked accounts too.
 async function accountUsage(account: Account, force: boolean): Promise<UsageResult> {
+  const primary = await endpointUsage(account, force);
+  const token = llt.tokenFor(account.id);
+  if (!token || !needsProbe(primary)) return primary;
+  const probed = await getUsageFromTokenProbe(account.id, token, force, account.subscriptionType);
+  return probed.ok ? probed : primary;
+}
+
+async function endpointUsage(account: Account, force: boolean): Promise<UsageResult> {
   const token = llt.tokenFor(account.id);
   if (TOKEN_READS_USAGE && token) return getUsageForToken(account.id, token, force, account.subscriptionType);
   const service = accounts.serviceNameFor(account.configDir);
