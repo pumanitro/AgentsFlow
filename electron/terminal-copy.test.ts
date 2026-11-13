@@ -72,3 +72,17 @@ test('xterm soft wraps join with no separator and keep their leading cells', () 
 test('a single-row selection is just trimmed', () => {
   assert.equal(cleanTerminalCopy([row('hello world   ')], COLS), 'hello world');
 });
+
+// Claude Code's own mouse selection reaches us as one OSC 52 string, not rows.
+test('OSC 52 copy of a quoted reply: gutters stripped', async () => {
+  const { cleanOsc52Copy } = await import('../shared/terminal-copy');
+  const text = 'Here it is, point by point:\n\n  ▎ To be precise, this is intended.\n  ▎\n  ▎ ❌Resets every season:\n  ▎ - Golden Keys (back to zero)\n  ▎\n  ▎ ✅Never resets:\n  ▎ - Your Codex';
+  assert.equal(cleanOsc52Copy(text, COLS),
+    'Here it is, point by point:\n\nTo be precise, this is intended.\n\n❌Resets every season:\n- Golden Keys (back to zero)\n\n✅Never resets:\n- Your Codex');
+});
+
+test('OSC 52 copy without a gutter is left byte-for-byte alone (vim, code)', async () => {
+  const { cleanOsc52Copy } = await import('../shared/terminal-copy');
+  const code = '    if (x) {\n        y();\n    }';
+  assert.equal(cleanOsc52Copy(code, COLS), code);
+});

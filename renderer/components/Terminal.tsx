@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { api } from '../lib/ipc';
 import { createPathLinkProvider } from '../lib/path-links';
-import { cleanTerminalCopy, type CopyRow } from '../../shared/terminal-copy';
+import { cleanTerminalCopy, cleanOsc52Copy, type CopyRow } from '../../shared/terminal-copy';
 import { decodeOsc52 } from '../../shared/terminal-osc52';
 import type { RemoteHostStatus } from '../../shared/types';
 
@@ -332,7 +332,8 @@ export default function Terminal({ conversationId, remote = false, remoteHostLab
       // remote peer it is the only route back to this Mac (pbcopy there fills
       // the other machine's clipboard). Read requests are never answered.
       const osc52 = term.parser.registerOscHandler(52, (payload: string) => {
-        const text = decodeOsc52(payload);
+        const decoded = decodeOsc52(payload);
+        const text = decoded === null ? null : cleanOsc52Copy(decoded, term.cols);
         if (text) {
           const a = api();
           if (a.copyTextToClipboard) void a.copyTextToClipboard(text).catch(() => undefined);

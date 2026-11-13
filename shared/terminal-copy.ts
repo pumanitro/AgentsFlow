@@ -75,3 +75,16 @@ function isHardWrap(prevWidth: number, prev: string, next: string, cols: number)
   const firstWord = word.split(/\s/, 1)[0];
   return prevWidth + 1 + firstWord.length > cols - EDGE_SLACK;
 }
+
+// Claude Code's own mouse selection (`claude attach` grabs the mouse) never
+// touches xterm's selection: it arrives as one OSC 52 string with the same
+// quote gutter on every line. Clean it the same way — but only when a gutter is
+// there, so a vim/tmux/printf copy passes through byte-for-byte.
+export function cleanOsc52Copy(text: string, cols: number): string {
+  const lines = text.split('\n');
+  if (!lines.some((l) => GUTTER.test(l))) return text;
+  return cleanTerminalCopy(
+    lines.map((l) => ({ selected: l, width: l.replace(/\s+$/, '').length, wrapped: false })),
+    cols,
+  );
+}
