@@ -246,6 +246,14 @@ export async function getUsage(force = false): Promise<UsageResult> {
 const byService = new Map<string, { result: UsageResult; atMs: number }>();
 const inflightByService = new Map<string, Promise<UsageResult>>();
 
+// A still-fresh GOOD reading for one keychain slot, or null. Lets callers skip
+// the work they do before a fetch (keychain reads, token freshening) when the
+// fetch would only return this cached value anyway.
+export function freshServiceUsage(service: string): UsageResult | null {
+  const hit = byService.get(service);
+  return hit && hit.result.ok && Date.now() - hit.atMs < MIN_FETCH_INTERVAL_MS ? hit.result : null;
+}
+
 export async function getUsageForService(service: string, force = false): Promise<UsageResult> {
   const hit = byService.get(service);
   if (!force && hit && Date.now() - hit.atMs < MIN_FETCH_INTERVAL_MS) return hit.result;

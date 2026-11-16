@@ -56,7 +56,7 @@ function resolveGuardsDir(): string {
 }
 
 import { store } from './store';
-import { getUsage, getUsageForService, getUsageForToken, resetUsageCache } from './usage';
+import { freshServiceUsage, getUsage, getUsageForService, getUsageForToken, resetUsageCache } from './usage';
 import { getUsageFromTokenProbe, needsProbe } from './usage-probe';
 import * as accounts from './accounts';
 import * as llt from './long-lived-token';
@@ -1633,6 +1633,11 @@ const rotationDeps: rotation.RotationDeps = {
   },
 };
 
+  // Cache first: freshening reads the keychain (a `security` spawn) on every
+  // call, which cost 0.4–26 s per account per tick on a loaded machine just to
+  // return the 25 s-cached reading below anyway.
+  const cached = force ? null : freshServiceUsage(service);
+  if (cached) return cached;
 // ----- A login that died under us -----
 // A revoked token family is a wall with no reset time: every daemon on that
 // account is stuck at "Please run /login" until the credentials in the main
