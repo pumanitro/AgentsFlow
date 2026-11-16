@@ -1584,6 +1584,11 @@ async function endpointUsage(account: Account, force: boolean): Promise<UsageRes
   // positive "this is not it".
   if (!activeId && !accounts.provablyNotTheLogin(account)) return getUsageForService(service, force);
 
+  // Cache first: freshening reads the keychain (a `security` spawn) on every
+  // call, which cost 0.4–26 s per account per tick on a loaded machine just to
+  // return the 25 s-cached reading below anyway.
+  const cached = force ? null : freshServiceUsage(service);
+  if (cached) return cached;
   await accounts.freshenAccountToken(account, { force });
   const result = await getUsageForService(service, force);
   // A network blip is not a token problem, and an account with no credentials
@@ -1633,11 +1638,6 @@ const rotationDeps: rotation.RotationDeps = {
   },
 };
 
-  // Cache first: freshening reads the keychain (a `security` spawn) on every
-  // call, which cost 0.4–26 s per account per tick on a loaded machine just to
-  // return the 25 s-cached reading below anyway.
-  const cached = force ? null : freshServiceUsage(service);
-  if (cached) return cached;
 // ----- A login that died under us -----
 // A revoked token family is a wall with no reset time: every daemon on that
 // account is stuck at "Please run /login" until the credentials in the main
