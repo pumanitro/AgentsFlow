@@ -219,6 +219,28 @@ export const TOOL_DEFS = [
     },
   },
   {
+    name: 'connect_session',
+    title: 'Connect to an existing session',
+    description:
+      'Open a Claude Code session that ALREADY EXISTS on a remote peer\'s machine as a Peers Flow chat: it adds a pinned conversation under that peer which resumes the session, with its real history, when opened. `cwd` is the directory on that machine the session was created in (it must be inside the peer\'s directory; defaults to the peer\'s directory). `fork: true` opens a branched copy and leaves the original untouched; `fork: true` with `readOnly: true` makes that copy view-only (Read, Grep, Glob). `launcher` is an optional command prefix run on the remote in place of bare `claude` (e.g. a lock wrapper); the text {conversationId} inside it is replaced with the new conversation\'s id. Opening the real, writable session needs the user\'s approval in a Peers Flow dialog, so only call this when the user asked in this chat to connect to that session. Calling it again for the same session returns the existing conversation.',
+    usage: 'connect_session({ peer, sessionId, title, cwd?, fork?, readOnly?, focus?, launcher? })',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        peer: { type: 'string', description: 'Remote peer the chat goes under: name, absolute path or id, as shown by list_peers.' },
+        sessionId: { type: 'string', description: 'The existing Claude Code session id (a uuid) on that machine.' },
+        title: { type: 'string', description: 'Title of the new chat row.' },
+        cwd: { type: 'string', description: 'Absolute directory on that machine the session was created in. Defaults to the peer\'s directory.' },
+        fork: { type: 'boolean', description: 'Open a branched copy instead of the original session. Default false.' },
+        readOnly: { type: 'boolean', description: 'With fork: true, make the copy view-only (Read, Grep, Glob). Default false.' },
+        focus: { type: 'boolean', description: 'Show the chat at once. Default true.' },
+        launcher: { type: 'array', items: { type: 'string' }, description: 'Optional argv prefix run on the remote instead of bare `claude`; {conversationId} is replaced with the new conversation\'s id.' },
+      },
+      required: ['peer', 'sessionId', 'title'],
+      additionalProperties: false,
+    },
+  },
+  {
     name: 'list_routines',
     title: 'List routines',
     description:

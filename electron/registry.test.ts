@@ -171,3 +171,15 @@ describe('chat kind: routine-only notify', () => {
     assert.equal(chatKindFromEnv({ PEERSFLOW_CHAT_KIND: 'bogus' }), 'chat');
   });
 });
+
+describe('connect_session tool', () => {
+  test('is listed for both chat kinds and requires peer / sessionId / title', () => {
+    for (const kind of ['chat', 'routine'] as const) {
+      const def = toolDefsFor(kind).find((t) => t.name === 'connect_session');
+      assert.ok(def, `connect_session missing for ${kind}`);
+      assert.deepEqual((def!.inputSchema as unknown as { required?: readonly string[] }).required, ['peer', 'sessionId', 'title']);
+    }
+    const names = TOOL_DEFS.map((t) => t.name);
+    assert.equal(names.indexOf('connect_session'), names.indexOf('remove_peer') + 1);
+  });
+});

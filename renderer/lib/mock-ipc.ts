@@ -1038,6 +1038,7 @@ export function createMockApi(): AgentsFlowApi {
     onHookGuardsUpdated: () => () => undefined,
     // No real bridge in the browser mock — nothing ever asks to open a file.
     onOpenFile: () => () => undefined,
+    onOpenConversation: () => () => undefined,
 
     gitStatus: async (): Promise<GitStatusResult> => ({
       isRepo: true,

@@ -10,6 +10,7 @@ import { buildResumeArgs, redactResumeArgs } from './resume-args';
 import { codexResumeArgs } from './codex-resume-args';
 import { pinnedCodexCli } from './codex-cli';
 import { appendBuffer, replayText, type ReplayBuffer } from './replay-buffer';
+import { launcherExitReason } from './connect-session';
 import { allowReattach, findChatExit, LEFT_CHAT_GRACE_MS, type ScreenWatch } from './attach-guard';
 import { liveWorkOf } from './pty-busy';
 import { getRemoteHosts } from './remote/remote-hosts';
@@ -405,6 +406,12 @@ export async function attach(opts: {
   // above it (attach-guard, replay buffers, subscribers) is unchanged.
   host?: string;
   remoteCwd?: string;
+  // connect_session overrides (resume only). The launcher is an argv prefix run
+  // on the remote host before claude, already expanded by the caller.
+  permissionMode?: 'bypassPermissions' | 'manual';
+  tools?: string[];
+  strictMcpConfig?: boolean;
+  launcher?: string[];
 }): Promise<string> {
   startPtyReaper();
   const mode = opts.mode ?? 'attach';
@@ -576,6 +583,12 @@ async function attachResume(opts: {
   // `ssh -tt`, in `remoteCwd` there.
   host?: string;
   remoteCwd?: string;
+  // connect_session overrides (resume only). The launcher is an argv prefix run
+  // on the remote host before claude, already expanded by the caller.
+  permissionMode?: 'bypassPermissions' | 'manual';
+  tools?: string[];
+  strictMcpConfig?: boolean;
+  launcher?: string[];
 }): Promise<string> {
   const isCodex = Boolean(opts.codexSocket);
   const label = isCodex ? 'codex' : 'resume';
@@ -594,7 +607,7 @@ async function attachResume(opts: {
     let cwd = opts.cwd || os.homedir();
     if (opts.host && !isCodex) {
       const remoteArgs = args;
-      const spec = getRemoteHosts()?.ptyCommand(opts.host, [claudeBinFor(opts.host), ...remoteArgs], { cwd: opts.remoteCwd });
+      const spec = getRemoteHosts()?.ptyCommand(opts.host, [...(opts.launcher ?? []), claudeBinFor(opts.host), ...remoteArgs], { cwd: opts.remoteCwd });
       if (!spec) return failAttach(opts.win, opts.channelId, 'remote', new Error(`host ${opts.host} is not ready`));
       bin = spec.bin;
       args = spec.args;
@@ -603,7 +616,7 @@ async function attachResume(opts: {
       cwd = os.homedir();
       // Log the remote argv redacted: the ssh argv embeds the whole remote
       // command, system prompt included (see the log-storm freeze).
-      console.log(`[agentsflow][pty] spawning ${label}`, { bin, host: opts.host, remoteArgs: redactResumeArgs(remoteArgs), remoteCwd: opts.remoteCwd, cols: opts.cols, rows: opts.rows });
+      console.log(`[agentsflow][pty] spawning ${label}`, { bin, host: opts.host, remoteArgs: redactResumeArgs(remoteArgs), launcher: opts.launcher, remoteCwd: opts.remoteCwd, cols: opts.cols, rows: opts.rows });
     } else {
       console.log(`[agentsflow][pty] spawning ${label}`, { bin, args: redactResumeArgs(args), cwd, cols: opts.cols, rows: opts.rows });
     }
@@ -657,9 +670,11 @@ async function attachResume(opts: {
       if (!s || s.pty !== pty) return;
       // A viewer that dies at once never attached: say so, with what it printed,
       // instead of the pane's "closing only detaches the view".
-      const reason = isCodex && e.exitCode !== 0 && Date.now() - spawnedAt < FAILED_ATTACH_MS
+      let reason = isCodex && e.exitCode !== 0 && Date.now() - spawnedAt < FAILED_ATTACH_MS
         ? `Codex could not attach (${bin} exited ${e.exitCode}).\n${plainText(replayText(s)).slice(-600)}`.trim()
         : undefined;
+      // A connect_session lock wrapper exits 75 when the session is busy remotely.
+      if (reason === undefined) reason = launcherExitReason(e.exitCode, opts.launcher, plainText(replayText(s)).slice(-400));
       for (const sub of s.subscribers.values()) {
         safeSend(sub.win, 'terminal:exit', sub.channelId, reason);
         resumeChannelToSessionId.delete(sub.channelId);

@@ -27,12 +27,21 @@ export interface ResumeArgsOpts {
   forkFrom?: string;
   mcpConfigPath?: string;
   appendSystemPrompt?: string;
+  // Default 'bypassPermissions'; 'manual' for read-only connected copies.
+  permissionMode?: 'bypassPermissions' | 'manual';
+  // Non-empty → '--tools', tools.join(',') (restricts the built-in tool set).
+  tools?: string[];
+  // true → '--strict-mcp-config' (only servers from --mcp-config, none from settings).
+  strictMcpConfig?: boolean;
 }
 
 export function buildResumeArgs(opts: ResumeArgsOpts): string[] {
+  const mode = opts.permissionMode ?? 'bypassPermissions';
   const args = opts.forkFrom
-    ? ['--resume', opts.forkFrom, '--fork-session', '--session-id', opts.sessionId, '--permission-mode', 'bypassPermissions']
-    : ['--resume', opts.sessionId, '--permission-mode', 'bypassPermissions'];
+    ? ['--resume', opts.forkFrom, '--fork-session', '--session-id', opts.sessionId, '--permission-mode', mode]
+    : ['--resume', opts.sessionId, '--permission-mode', mode];
+  if (opts.tools && opts.tools.length > 0) args.push('--tools', opts.tools.join(','));
+  if (opts.strictMcpConfig) args.push('--strict-mcp-config');
   if (opts.mcpConfigPath) args.push('--mcp-config', opts.mcpConfigPath);
   if (opts.appendSystemPrompt) args.push('--append-system-prompt', opts.appendSystemPrompt);
   return args;

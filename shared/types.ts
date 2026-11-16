@@ -167,7 +167,25 @@ export interface Conversation {
   // predates the hello protocol; the routine scheduler warns on a routine run's.
   mcpReadyAt?: string;
   chatKind?: ChatKind;
+  // Set only on rows created by the connect_session MCP tool (see
+  // ConversationConnect). Undefined for every other conversation.
+  connect?: ConversationConnect;
 }
+
+// A row created by the connect_session MCP tool: it opens a Claude session that
+// already exists on a remote peer's machine. ONLY rows carrying this record get
+// the cwd override / launcher / read-only flags; every other row is untouched.
+export interface ConversationConnect {
+  sourceSessionId: string;   // the session named in connect_session
+  cwd: string;               // absolute dir on conv.host the session was created in (inside the peer's path)
+  fork?: true;               // conv.sessionId is a NEW pre-assigned uuid branched from sourceSessionId
+  readOnly?: true;           // only with fork: --permission-mode manual --tools Read,Grep,Glob --strict-mcp-config, no peersflow MCP
+  launcher?: string[];       // argv prefix run instead of bare claude; "{conversationId}" is substituted at spawn
+  connectedAt: string;       // ISO
+}
+
+// Pushed on 'navigate:openConversation' to open a chat (e.g. after connect_session).
+export interface OpenConversationNavPayload { conversationId: string; directoryId: string }
 
 export interface PinnedDivider {
   id: string;
@@ -892,6 +910,9 @@ export interface AgentsFlowApi {
   // file up in its file view. The renderer responds by navigating to that
   // directory's Preview page and opening the file.
   onOpenFile: (cb: (payload: OpenFileNavPayload) => void) => () => void;
+  // Push 'navigate:openConversation' — main asks the UI to open a chat. Optional
+  // so older preload builds still satisfy the type.
+  onOpenConversation?: (cb: (payload: OpenConversationNavPayload) => void) => () => void;
 
   listDividers: () => Promise<PinnedDivider[]>;
   addDivider: (afterRef: PinnedItemRef | null) => Promise<PinnedDivider>;

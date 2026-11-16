@@ -81,7 +81,7 @@ describe('MCP server on a remote host (bridge, no store)', () => {
         if (nl < 0) return;
         const req = JSON.parse(buf.slice(0, nl)) as { type: string; id: string };
         received.push(req);
-        const envelope = req.type === 'list_peers' ? { status: 'success', markdown: '# Peers Flow — peer registry\n\nfrom the bridge' } : req.type === 'whoami' ? WHOAMI : req.type === 'add_remote_peer' ? { status: 'success', peer: { displayName: 'studio' } } : req.type === 'add_local_peer' ? { status: 'success', peer: { id: 'd-1', displayName: 'arrow', path: (req as { path?: string }).path } } : req.type === 'remove_peer' ? { status: 'success', removed: { id: 'd-1', displayName: 'arrow' } } : req.type === 'routines' ? { status: (req as { op?: string }).op === 'delete' ? 'failure' : 'success', op: (req as { op?: string }).op } : req.type === 'notify' ? { status: 'success', id: 'n-1' } : { status: 'failure', error: 'unexpected' };
+        const envelope = req.type === 'list_peers' ? { status: 'success', markdown: '# Peers Flow — peer registry\n\nfrom the bridge' } : req.type === 'whoami' ? WHOAMI : req.type === 'add_remote_peer' ? { status: 'success', peer: { displayName: 'studio' } } : req.type === 'add_local_peer' ? { status: 'success', peer: { id: 'd-1', displayName: 'arrow', path: (req as { path?: string }).path } } : req.type === 'remove_peer' ? { status: 'success', removed: { id: 'd-1', displayName: 'arrow' } } : req.type === 'routines' ? { status: (req as { op?: string }).op === 'delete' ? 'failure' : 'success', op: (req as { op?: string }).op } : req.type === 'notify' ? { status: 'success', id: 'n-1' } : req.type === 'connect_session' ? { status: 'success', conversationId: 'c-new', reused: false } : { status: 'failure', error: 'unexpected' };
         c.end(`${JSON.stringify({ type: 'result', id: req.id, envelope })}\n`);
       });
     });
@@ -114,13 +114,13 @@ describe('MCP server on a remote host (bridge, no store)', () => {
   test('tools/list of a casual chat has whoami, the add/remove peer tools and the routine tools, but no notify', async () => {
     const r = await client.call('tools/list');
     const tools = r.result!.tools as { name: string }[];
-    assert.deepEqual(tools.map((t) => t.name).sort(), ['add_local_peer', 'add_remote_peer', 'create_routine', 'delegate', 'delete_routine', 'list_peers', 'list_routines', 'mobile_configure', 'mobile_status', 'open_file', 'remove_peer', 'run_routine', 'update_routine', 'whoami']);
+    assert.deepEqual(tools.map((t) => t.name).sort(), ['add_local_peer', 'add_remote_peer', 'connect_session', 'create_routine', 'delegate', 'delete_routine', 'list_peers', 'list_routines', 'mobile_configure', 'mobile_status', 'open_file', 'remove_peer', 'run_routine', 'update_routine', 'whoami']);
   });
 
   test('tools/list of a routine chat includes notify', async () => {
     const r = await routine.call('tools/list');
     const tools = r.result!.tools as { name: string; inputSchema: { required?: string[] } }[];
-    assert.deepEqual(tools.map((t) => t.name).sort(), ['add_local_peer', 'add_remote_peer', 'create_routine', 'delegate', 'delete_routine', 'list_peers', 'list_routines', 'mobile_configure', 'mobile_status', 'notify', 'open_file', 'remove_peer', 'run_routine', 'update_routine', 'whoami']);
+    assert.deepEqual(tools.map((t) => t.name).sort(), ['add_local_peer', 'add_remote_peer', 'connect_session', 'create_routine', 'delegate', 'delete_routine', 'list_peers', 'list_routines', 'mobile_configure', 'mobile_status', 'notify', 'open_file', 'remove_peer', 'run_routine', 'update_routine', 'whoami']);
     assert.deepEqual(tools.find((t) => t.name === 'notify')!.inputSchema.required, ['title', 'level']);
   });
 
@@ -212,6 +212,22 @@ describe('MCP server on a remote host (bridge, no store)', () => {
     assert.equal(req.rootConversationId, 'conv-1');
   });
 
+  test('connect_session sends exactly its fields; a missing sessionId sends nothing', async () => {
+    const before = received.length;
+    const bad = textOf(await client.call('tools/call', { name: 'connect_session', arguments: { peer: 'bcfc', title: 'T' } }));
+    assert.equal(bad.isError, true);
+    assert.equal(received.length, before);
+    const args = { peer: 'bcfc', sessionId: '11111111-2222-3333-4444-555555555555', title: 'BCFC Connect 7', cwd: '/Users/demo/bcfc/w', fork: true, readOnly: false, focus: true, launcher: ['node', 'x.js', '--who', 'peersflow:{conversationId}', '--'] };
+    const r = textOf(await client.call('tools/call', { name: 'connect_session', arguments: args }));
+    assert.equal(r.isError, false);
+    assert.deepEqual(JSON.parse(r.text), { status: 'success', conversationId: 'c-new', reused: false });
+    const req = received.find((q) => q.type === 'connect_session') as Record<string, unknown> | undefined;
+    assert.ok(req, 'bridge never saw connect_session');
+    const { id: reqId, ...rest } = req!;
+    assert.equal(typeof reqId, 'string');
+    assert.deepEqual(rest, { type: 'connect_session', rootConversationId: 'conv-1', ...args });
+  });
+
   test('each routine tool is one `routines` bridge request with its arguments untouched', async () => {
     const args = { name: 'Reddit daily', prompt: '/reddit-daily-routine', time: '09:00', month_days: [1, 15] };
     const r = textOf(await client.call('tools/call', { name: 'create_routine', arguments: args }));
@@ -278,6 +294,9 @@ describe('MCP server with no bridge', () => {
     const rm = textOf(await client.call('tools/call', { name: 'remove_peer', arguments: { name: 'arrow' } }));
     assert.equal(rm.isError, true);
     assert.match(rm.text, /Removing a peer requires the Peers Flow app/);
+    const cs = textOf(await client.call('tools/call', { name: 'connect_session', arguments: { peer: 'bcfc', sessionId: 's', title: 't' } }));
+    assert.equal(cs.isError, true);
+    assert.match(cs.text, /Connecting a session requires the Peers Flow app/);
   });
 
   test('whoami falls back to what the process can see', async () => {

@@ -8,6 +8,7 @@ import { DEFAULT_POLICY } from './rotation';
 import { placePinnedRefAfter, placePinnedRefAtEndOfFirstSection } from './pinned-order';
 import { makeIndexer } from './conv-index';
 import * as perf from './perf';
+import { sanitizeConnect } from './connect-session';
 
 interface StoreShape {
   directories: TrackedDirectory[];
@@ -167,6 +168,8 @@ function migrateConversation(c: any): Conversation {
     // lost the bell and its badge). Found by the mobile E2E run, 2026-10-28.
     chatKind: c.chatKind === 'routine' || c.chatKind === 'voice' || c.chatKind === 'chat' ? c.chatKind : undefined,
     mcpReadyAt: typeof c.mcpReadyAt === 'string' ? c.mcpReadyAt : undefined,
+    // Dropping this would reopen a connected chat in the peer's folder without its lock wrapper.
+    connect: sanitizeConnect(c.connect),
   };
 }
 

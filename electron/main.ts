@@ -103,7 +103,9 @@ import { ensureWorkspaceTrusted } from './workspace-trust';
 import { applyRemoteJobState, getLastAgentRows, refreshNow, setPollerForeground, startPoller, stopPoller, syncWatchers, unwatchConversation, watchConversation, watcherStats } from './poller';
 import { bridgeSocketPath, buildBootstrapSystemPrompt, getMcpServerInfo, writeMcpConfigForConversation, writeRemoteMcpConfig } from './mcp-bridge';
 import { buildDelegatePrompt, buildRegistry, mayNotify, NOTIFY_REFUSED, renderRegistryMarkdown, resolveChatKind } from './registry';
-import { startPeersBridge, type AddLocalPeerRequest, type AddRemotePeerRequest, type RemovePeerRequest, type DelegateRequest, type HelloRequest, type ListPeersRequest, type NotifyRequest, type OpenFileRequest, type PeersBridge, type RoutinesRequest, type WhoamiRequest, type MobileRequest } from './delegation-bridge';
+import { startPeersBridge, type AddLocalPeerRequest, type AddRemotePeerRequest, type RemovePeerRequest, type DelegateRequest, type HelloRequest, type ListPeersRequest, type NotifyRequest, type OpenFileRequest, type PeersBridge, type RoutinesRequest, type WhoamiRequest, type MobileRequest, type ConnectSessionRequest } from './delegation-bridge';
+import { planConnect, connectAttachOpts, transcriptProbeArgv, expandLauncher } from './connect-session';
+import { resolveTrackedDirectory } from './local-peers';
 import { RemoteHosts, setRemoteHosts } from './remote/remote-hosts';
 import { remoteCommand, runRemote } from './remote/remote-exec';
 import { hostKeyOf } from '../shared/remote';
@@ -633,6 +635,7 @@ app.whenReady().then(() => {
       onAddRemotePeer: handleAddRemotePeer,
       onAddLocalPeer: handleAddLocalPeer,
       onRemovePeer: handleRemovePeer,
+      onConnectSession: handleConnectSession,
       onRoutines: handleRoutines,
       onMobile: handleMobile,
       onNotify: handleNotify,
@@ -913,6 +916,104 @@ ipcMain.handle('dirs:remove', (_e, id: string) => {
   // A host that owned only this dir is disconnected.
   remoteHosts?.syncFromDirectories();
 });
+
+/**
+ * `connect_session` (MCP): ask before a chat opens an existing session as a row
+ * — the opened chat can write in that folder. Same rules as approvePeerAdd:
+ * default/cancel refuse, unanswered in 120 s = no.
+ */
+const SESSION_CONNECT_APPROVAL_MS = 120_000;
+async function approveSessionConnect(
+  what: { title: string; peer: string; host: string; cwd: string; sessionId: string; fork: boolean; launcher?: string[] },
+  rootConversationId: string,
+): Promise<boolean> {
+  const conv = rootConversationId ? store.getConversation(rootConversationId) : null;
+  const asker = conv ? `${conv.title || 'Untitled chat'} (in ${conv.directoryPath})` : 'An agent';
+  const abort = new AbortController();
+  const timer = setTimeout(() => abort.abort(), SESSION_CONNECT_APPROVAL_MS);
+  try {
+    const win = mainWindow && !mainWindow.isDestroyed() ? mainWindow : null;
+    const launcherLine = what.launcher && what.launcher.length ? `\nIt starts through: ${what.launcher.join(' ')}` : '';
+    const opts: Electron.MessageBoxOptions = {
+      type: 'question',
+      buttons: ["Don't connect", 'Connect'],
+      defaultId: 0,
+      cancelId: 0,
+      noLink: true,
+      title: 'An agent wants to open an existing session',
+      message: `An AI chat wants to open "${what.title}" on ${what.peer} (${what.host})\nFolder: ${what.cwd}\nSession: ${what.sessionId}${what.fork ? ' (as a fork)' : ''}`,
+      detail: `Asked by: ${asker}\n\nThe opened chat can write in that folder.${launcherLine}\n\nOnly allow this if you asked for it. It is refused automatically in ${SESSION_CONNECT_APPROVAL_MS / 1000} s.`,
+      signal: abort.signal,
+    };
+    const { response } = win ? await dialog.showMessageBox(win, opts) : await dialog.showMessageBox(opts);
+    const approved = response === 1 && !abort.signal.aborted;
+    console.log('[agentsflow] session connect over MCP', { host: what.host, sessionId: what.sessionId, rootConversationId, approved });
+    return approved;
+  } catch (err) {
+    console.warn('[agentsflow] session connect approval failed; refusing', err);
+    return false;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** `connect_session` (MCP): open an existing remote session as a pinned row. */
+async function handleConnectSession(req: ConnectSessionRequest): Promise<Record<string, unknown>> {
+  try {
+    const plan = planConnect(
+      { peer: req.peer, sessionId: req.sessionId, title: req.title, cwd: req.cwd, fork: req.fork, readOnly: req.readOnly, focus: req.focus, launcher: req.launcher },
+      {
+        directories: store.getDirectories(),
+        conversations: store.getConversations(),
+        resolvePeer: resolveTrackedDirectory,
+        hostKeyFor: remoteHostKeyForDir,
+        newId: uuid,
+        now: () => new Date().toISOString(),
+      },
+    );
+    if (plan.kind === 'failure') return { status: 'failure', stage: plan.stage, error: plan.error };
+    let conv: Conversation;
+    let reused: boolean;
+    if (plan.kind === 'reuse') {
+      reused = true;
+      conv = plan.conversation;
+      if (plan.patch) {
+        conv = store.updateConversation(conv.id, plan.patch) ?? conv;
+        broadcastConversations();
+      }
+    } else {
+      reused = false;
+      const row = plan.row;
+      if (plan.needsApproval) {
+        const ok = await approveSessionConnect({
+          title: row.title, peer: plan.peer.displayName, host: row.host ?? '', cwd: row.connect?.cwd ?? row.directoryPath,
+          sessionId: row.connect?.sourceSessionId ?? row.sessionId, fork: !!row.connect?.fork, launcher: row.connect?.launcher,
+        }, req.rootConversationId);
+        if (!ok) return { status: 'failure', refused: true, error: 'The user did not approve connecting to this session. Do not retry; ask the user in chat.' };
+      }
+      store.addConversation(row);
+      store.flushSync();
+      broadcastConversations();
+      broadcastPinnedOrder();
+      console.log('[agentsflow] connected session over MCP', { id: row.id, host: row.host, sessionId: row.sessionId, cwd: row.connect?.cwd, fork: !!row.connect?.fork, readOnly: !!row.connect?.readOnly });
+      conv = row;
+    }
+    if (req.focus !== false && mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('navigate:openConversation', { conversationId: conv.id, directoryId: conv.directoryId });
+      try {
+        if (mainWindow.isMinimized()) mainWindow.restore();
+        mainWindow.show();
+        mainWindow.focus();
+      } catch { /* best-effort focus */ }
+    }
+    return {
+      status: 'success', conversationId: conv.id, sessionId: conv.sessionId, reused,
+      peer: conv.displayName, host: conv.host, fork: !!conv.connect?.fork, readOnly: !!conv.connect?.readOnly,
+    };
+  } catch (err) {
+    return { status: 'failure', error: (err as Error)?.message ?? String(err) };
+  }
+}
 
 /**
  * `add_local_peer` (MCP): the "Add directory" button without the folder picker.
@@ -3107,6 +3208,34 @@ async function waitForRemoteHost(host: string): Promise<void> {
   }
 }
 
+/**
+ * term:attach for a connect_session row. Running → re-subscribe to our PTY;
+ * else spawn `--resume` (or the pending fork) in connect.cwd on the host.
+ */
+async function attachConnected(
+  conv: Conversation & { host: string; connect: NonNullable<Conversation['connect']> },
+  channelId: string, cols: number, rows: number, win: BrowserWindow,
+): Promise<string> {
+  const running = pty.hasResumeSession(conv.sessionId);
+  let materialized = true;
+  if (conv.connect.fork && !running) {
+    if (!remoteHosts) throw new Error('remote peers are not available in this build');
+    materialized = (await remoteHosts.exec(conv.host, transcriptProbeArgv(conv.sessionId), { timeoutMs: 10_000 })).code === 0;
+  }
+  const o = connectAttachOpts(conv, materialized);
+  const awareness = o.peerAwareness && !running ? await remoteResumePeerAwareness(conv) : {};
+  console.log('[agentsflow][remote] attaching connected session', {
+    host: conv.host, sessionId: conv.sessionId, cwd: o.remoteCwd, fork: !!conv.connect.fork, readOnly: !!conv.connect.readOnly, materialized, running,
+  });
+  return pty.attach({
+    channelId, sessionId: conv.sessionId, cols, rows, win, mode: 'resume',
+    cwd: conv.directoryPath, host: conv.host, remoteCwd: o.remoteCwd,
+    forkFrom: o.forkFrom, launcher: expandLauncher(o.launcher, conv.id),
+    permissionMode: o.permissionMode, tools: o.tools, strictMcpConfig: o.strictMcpConfig,
+    ...awareness,
+  });
+}
+
 ipcMain.handle('term:attach', async (_e, conversationId: string, cols: number, rows: number) => {
   console.log('[agentsflow] term:attach received', { conversationId, cols, rows });
   let conv = store.getConversations().find((c) => c.id === conversationId);
@@ -3155,6 +3284,14 @@ ipcMain.handle('term:attach', async (_e, conversationId: string, cols: number, r
   }
 
   const attachId = conv.daemonShort || conv.sessionId.slice(0, 8);
+
+  // Rows made by connect_session: always our own resume PTY in the session's own
+  // folder, through the row's launcher. Never `claude attach` (that would step
+  // around the remote lock wrapper and the read-only flags).
+  if (conv.host && conv.connect) {
+    const replay = await attachConnected({ ...conv, host: conv.host, connect: conv.connect }, channelId, cols, rows, win);
+    return { channelId, replay };
+  }
 
   // An in-app `claude --resume` PTY already runs this session → re-subscribe
   // to it. This must be checked BEFORE daemon residency: our own resume child

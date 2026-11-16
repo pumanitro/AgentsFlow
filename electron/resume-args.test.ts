@@ -75,3 +75,50 @@ test.describe('redactResumeArgs', () => {
     assert.deepEqual(redactResumeArgs(args), args);
   });
 });
+
+test.describe('buildResumeArgs — connect_session overrides', () => {
+  const NEW = '0b3c7f6e-1d2a-4e5f-8a9b-0c1d2e3f4a5b';
+
+  test("permissionMode 'manual' replaces the default mode", () => {
+    assert.deepEqual(buildResumeArgs({ sessionId: SESSION, permissionMode: 'manual' }), [
+      '--resume', SESSION, '--permission-mode', 'manual',
+    ]);
+  });
+
+  test('tools become one comma-joined --tools argument', () => {
+    assert.deepEqual(buildResumeArgs({ sessionId: SESSION, tools: ['Read', 'Grep', 'Glob'] }), [
+      '--resume', SESSION, '--permission-mode', 'bypassPermissions', '--tools', 'Read,Grep,Glob',
+    ]);
+  });
+
+  test('tools: [] adds nothing', () => {
+    assert.deepEqual(buildResumeArgs({ sessionId: SESSION, tools: [] }), [
+      '--resume', SESSION, '--permission-mode', 'bypassPermissions',
+    ]);
+  });
+
+  test('strictMcpConfig adds --strict-mcp-config', () => {
+    assert.deepEqual(buildResumeArgs({ sessionId: SESSION, strictMcpConfig: true }), [
+      '--resume', SESSION, '--permission-mode', 'bypassPermissions', '--strict-mcp-config',
+    ]);
+  });
+
+  test('full read-only fork argv', () => {
+    assert.deepEqual(buildResumeArgs({
+      sessionId: NEW, forkFrom: SESSION, permissionMode: 'manual',
+      tools: ['Read', 'Grep', 'Glob'], strictMcpConfig: true,
+    }), [
+      '--resume', SESSION, '--fork-session', '--session-id', NEW,
+      '--permission-mode', 'manual', '--tools', 'Read,Grep,Glob', '--strict-mcp-config',
+    ]);
+  });
+
+  test('system prompt stays last with everything set', () => {
+    const args = buildResumeArgs({
+      sessionId: NEW, forkFrom: SESSION, permissionMode: 'manual', tools: ['Read'],
+      strictMcpConfig: true, mcpConfigPath: CONFIG, appendSystemPrompt: 'P',
+    });
+    assert.deepEqual(args.slice(-6), ['Read', '--strict-mcp-config', '--mcp-config', CONFIG, '--append-system-prompt', 'P']);
+    assert.equal(args[args.length - 1], 'P');
+  });
+});

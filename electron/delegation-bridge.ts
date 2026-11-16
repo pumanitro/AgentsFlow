@@ -16,6 +16,7 @@
  *   • add_remote_peer — track a directory on another machine.
  *   • add_local_peer — track a directory on this machine ("Add directory").
  *   • remove_peer — untrack a peer (files are never touched).
+ *   • connect_session — open an existing remote Claude session as a pinned chat.
  *   • routines  — list / create / update / delete / run a routine (`op`).
  *   • notify    — raise a notification in the app's bell (the `notify` tool).
  *   • hello     — the MCP server announcing it started, so main can stamp the
@@ -92,6 +93,22 @@ export interface RemovePeerRequest {
   name?: string;
 }
 
+// Open a Claude session that already exists on a remote peer's machine as a
+// pinned chat (main validates and plans it: connect-session.ts).
+export interface ConnectSessionRequest {
+  type: 'connect_session';
+  id: string;
+  rootConversationId: string;
+  peer: string;
+  sessionId: string;
+  title: string;
+  cwd?: string;
+  fork?: boolean;
+  readOnly?: boolean;
+  focus?: boolean;
+  launcher?: string[];
+}
+
 // The `*_routine` tools. `args` is the tool call's arguments untouched: main
 // owns the routines store, so it also owns their validation (routines-mcp.ts).
 // The `mobile_*` tools: read / change the phone gateway setup in the running app.
@@ -124,13 +141,14 @@ export interface BridgeHandlers {
   onAddRemotePeer?: (req: AddRemotePeerRequest) => Promise<BridgeEnvelope>;
   onAddLocalPeer?: (req: AddLocalPeerRequest) => Promise<BridgeEnvelope>;
   onRemovePeer?: (req: RemovePeerRequest) => Promise<BridgeEnvelope>;
+  onConnectSession?: (req: ConnectSessionRequest) => Promise<BridgeEnvelope>;
   onRoutines?: (req: RoutinesRequest) => Promise<BridgeEnvelope>;
   onMobile?: (req: MobileRequest) => Promise<BridgeEnvelope>;
   onNotify?: (req: NotifyRequest) => Promise<BridgeEnvelope>;
   onHello?: (req: HelloRequest) => Promise<BridgeEnvelope>;
 }
 
-type BridgeRequest = DelegateRequest | OpenFileRequest | ListPeersRequest | WhoamiRequest | AddRemotePeerRequest | AddLocalPeerRequest | RemovePeerRequest | RoutinesRequest | MobileRequest | NotifyRequest | HelloRequest;
+type BridgeRequest = DelegateRequest | OpenFileRequest | ListPeersRequest | WhoamiRequest | AddRemotePeerRequest | AddLocalPeerRequest | RemovePeerRequest | ConnectSessionRequest | RoutinesRequest | MobileRequest | NotifyRequest | HelloRequest;
 
 function unsupported(type: string): Promise<BridgeEnvelope> {
   return Promise.resolve({ status: 'failure', error: `${type} not supported by this Peers Flow` });
@@ -193,6 +211,8 @@ export function startPeersBridge(
           run = handlers.onAddLocalPeer ? handlers.onAddLocalPeer(req as AddLocalPeerRequest) : unsupported('add_local_peer');
         } else if (req.type === 'remove_peer') {
           run = handlers.onRemovePeer ? handlers.onRemovePeer(req as RemovePeerRequest) : unsupported('remove_peer');
+        } else if (req.type === 'connect_session') {
+          run = handlers.onConnectSession ? handlers.onConnectSession(req as ConnectSessionRequest) : unsupported('connect_session');
         } else if (req.type === 'routines') {
           run = handlers.onRoutines ? handlers.onRoutines(req as RoutinesRequest) : unsupported('routines');
         } else if (req.type === 'mobile') {

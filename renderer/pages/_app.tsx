@@ -46,6 +46,15 @@ export default function App({ Component, pageProps }: AppProps) {
     return () => { off(); };
   }, [router]);
 
+  // `connect_session` (MCP) opened an existing session as a row → show it.
+  useEffect(() => {
+    const off = api().onOpenConversation?.(({ conversationId, directoryId }) => {
+      saveUIState({ selectedDirId: directoryId });
+      router.push({ pathname: '/session', query: { id: conversationId } });
+    });
+    return () => { off?.(); };
+  }, [router]);
+
   return (
     <NotificationsProvider>
       <Component {...pageProps} />

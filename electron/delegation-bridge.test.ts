@@ -47,6 +47,7 @@ describe('delegation bridge with every handler', () => {
     onAddRemotePeer: async (r) => { seen.push(`add_remote_peer:${r.user}@${r.host}:${r.path}`); return { status: 'success', peer: { displayName: 'pf-peer' } }; },
     onAddLocalPeer: async (r) => { seen.push(`add_local_peer:${r.path}:${r.testOnly}`); return { status: 'success', via: 'add_local_peer' }; },
     onRemovePeer: async (r) => { seen.push(`remove_peer:${r.name}`); return { status: 'success', via: 'remove_peer' }; },
+    onConnectSession: async (r) => { seen.push(`connect_session:${r.peer}:${r.sessionId}:${r.fork}:${(r.launcher ?? []).join(' ')}`); return { status: 'success', via: 'connect_session' }; },
     onRoutines: async (r) => { seen.push(`routines:${r.op}:${JSON.stringify(r.args)}`); return { status: 'success', via: 'routines' }; },
     onNotify: async (r) => { seen.push(`notify:${r.rootConversationId}:${JSON.stringify(r.args)}`); return { status: 'success', via: 'notify' }; },
     onHello: async (r) => { seen.push(`hello:${r.rootConversationId}:${r.pid}:${r.startedAt}`); return { status: 'success' }; },
@@ -98,6 +99,12 @@ describe('delegation bridge with every handler', () => {
     assert.equal(seen[seen.length - 1], 'remove_peer:arrow');
   });
 
+  test('connect_session routes to its handler with every field', async () => {
+    const r = await ask(JSON.stringify({ type: 'connect_session', id: 'cs1', rootConversationId: 'conv-9', peer: 'bcfc', sessionId: 's-1', title: 'T', fork: true, launcher: ['x', '--'] }));
+    assert.deepEqual(r, { type: 'result', id: 'cs1', envelope: { status: 'success', via: 'connect_session' } });
+    assert.equal(seen[seen.length - 1], 'connect_session:bcfc:s-1:true:x --');
+  });
+
   test('routines', async () => {
     const r = await ask(JSON.stringify({ type: 'routines', id: 'r1', rootConversationId: 'conv-9', op: 'create', args: { name: 'Reddit daily' } }));
     assert.deepEqual(r, { type: 'result', id: 'r1', envelope: { status: 'success', via: 'routines' } });
@@ -137,7 +144,7 @@ describe('delegation bridge with every handler', () => {
   });
 
   test('every request reached exactly its handler', () => {
-    assert.deepEqual(seen, ['delegate:arrow', 'delegate:legacy', 'open_file:README.md', 'list_peers:conv-9', 'whoami:conv-9', 'add_remote_peer:patryk@h:/p', 'add_local_peer:/p/arrow:true', 'remove_peer:arrow', 'routines:create:{"name":"Reddit daily"}', 'notify:conv-9:{"title":"  Timesheet  ","level":"action","questions":[{"text":"Days off?","kind":"yesno","extra":1}]}', 'hello:conv-9:4242:2026-10-23T05:57:00.000Z']);
+    assert.deepEqual(seen, ['delegate:arrow', 'delegate:legacy', 'open_file:README.md', 'list_peers:conv-9', 'whoami:conv-9', 'add_remote_peer:patryk@h:/p', 'add_local_peer:/p/arrow:true', 'remove_peer:arrow', 'connect_session:bcfc:s-1:true:x --', 'routines:create:{"name":"Reddit daily"}', 'notify:conv-9:{"title":"  Timesheet  ","level":"action","questions":[{"text":"Days off?","kind":"yesno","extra":1}]}', 'hello:conv-9:4242:2026-10-23T05:57:00.000Z']);
   });
 });
 
@@ -173,6 +180,8 @@ describe('delegation bridge without the optional handlers', () => {
     assert.deepEqual(n.envelope, { status: 'failure', error: 'notify not supported by this Peers Flow' });
     const h = await askOn(JSON.stringify({ type: 'hello', id: 'h', rootConversationId: 'c', pid: 1, startedAt: '2026-10-23T05:57:00.000Z' }));
     assert.deepEqual(h.envelope, { status: 'failure', error: 'hello not supported by this Peers Flow' });
+    const cs = await askOn(JSON.stringify({ type: 'connect_session', id: 'cs', rootConversationId: 'c', peer: 'p', sessionId: 's', title: 't' }));
+    assert.deepEqual(cs.envelope, { status: 'failure', error: 'connect_session not supported by this Peers Flow' });
     assert.equal(delegated, 0);
   });
 

@@ -16,6 +16,7 @@
  *   • whoami     — this session's identity: machine, peer, conversation/session ids.
  *   • add_remote_peer — track a directory on another machine (ssh), like the app's form.
  *   • add_local_peer / remove_peer — track / untrack a peer, like "Add directory"
+ *   • connect_session — open an existing remote Claude session as a pinned chat
  *                  and a card's "Remove" (bridge only; never deletes files).
  *   • list_routines / create_routine / update_routine / delete_routine / run_routine
  *                — the app's Routines tab (scheduled prompts), bridge only.
@@ -214,6 +215,33 @@ async function toolRemovePeer(raw: RemovePeerArgs): Promise<Record<string, unkno
     { type: 'remove_peer', id: `${Date.now()}-${process.pid}`, rootConversationId: ROOT_CONVERSATION_ID, name, path: dirPath, peerId },
     20_000,
   );
+  if (!envelope) return textContent('Peers Flow did not respond (bridge unavailable or timed out).', true);
+  return textContent(JSON.stringify(envelope, null, 2), envelope.status === 'failure');
+}
+
+interface ConnectSessionArgs { peer?: unknown; sessionId?: unknown; title?: unknown; cwd?: unknown; fork?: unknown; readOnly?: unknown; focus?: unknown; launcher?: unknown }
+
+/** Open an existing remote session as a pinned chat. Shape checks only; the app validates the rest. */
+async function toolConnectSession(raw: ConnectSessionArgs): Promise<Record<string, unknown>> {
+  const fail = (error: string) => textContent(JSON.stringify({ status: 'failure', error }, null, 2), true);
+  const str = (v: unknown) => (typeof v === 'string' && v.trim() ? v.trim() : undefined);
+  const peer = str(raw.peer), sessionId = str(raw.sessionId), title = str(raw.title);
+  if (!peer || !sessionId || !title) return fail('Pass `peer`, `sessionId` and `title` as non-empty strings.');
+  if (raw.cwd !== undefined && typeof raw.cwd !== 'string') return fail('`cwd` must be a string.');
+  for (const k of ['fork', 'readOnly', 'focus'] as const) {
+    if (raw[k] !== undefined && typeof raw[k] !== 'boolean') return fail(`\`${k}\` must be a boolean.`);
+  }
+  if (raw.launcher !== undefined && !(Array.isArray(raw.launcher) && raw.launcher.every((a) => typeof a === 'string'))) {
+    return fail('`launcher` must be an array of strings.');
+  }
+  if (!BRIDGE_SOCK) return fail('Connecting a session requires the Peers Flow app (this session has no app bridge).');
+  const req: Record<string, unknown> = { type: 'connect_session', id: `${Date.now()}-${process.pid}`, rootConversationId: ROOT_CONVERSATION_ID, peer, sessionId, title };
+  if (raw.cwd !== undefined) req.cwd = raw.cwd;
+  if (raw.fork !== undefined) req.fork = raw.fork;
+  if (raw.readOnly !== undefined) req.readOnly = raw.readOnly;
+  if (raw.focus !== undefined) req.focus = raw.focus;
+  if (raw.launcher !== undefined) req.launcher = raw.launcher;
+  const envelope = await bridgeRequest(req as Parameters<typeof bridgeRequest>[0], 150_000);
   if (!envelope) return textContent('Peers Flow did not respond (bridge unavailable or timed out).', true);
   return textContent(JSON.stringify(envelope, null, 2), envelope.status === 'failure');
 }
@@ -717,6 +745,10 @@ async function handleToolsCall(id: JsonRpcId, params: Record<string, unknown>): 
     }
     if (name === 'remove_peer') {
       sendResult(id, await toolRemovePeer(args as RemovePeerArgs));
+      return;
+    }
+    if (name === 'connect_session') {
+      sendResult(id, await toolConnectSession(args as ConnectSessionArgs));
       return;
     }
     if (name === 'delegate') {

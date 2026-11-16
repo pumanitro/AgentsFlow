@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer, IpcRendererEvent } from 'electron';
-import type { TrackedDirectory, AccountsSnapshot, AgentsFlowApi, Conversation, GuardSnapshot, KeeperSnapshot, OpenFileNavPayload, PinnedDivider, PinnedItemRef, PinnedTodo, RemoteHostStatus, RotationStatus, SpawnRequest, WorktreeInfo } from '../shared/types';
+import type { TrackedDirectory, AccountsSnapshot, AgentsFlowApi, Conversation, GuardSnapshot, KeeperSnapshot, OpenFileNavPayload, OpenConversationNavPayload, PinnedDivider, PinnedItemRef, PinnedTodo, RemoteHostStatus, RotationStatus, SpawnRequest, WorktreeInfo } from '../shared/types';
 import { ROUTINES_IPC, type RoutinesSnapshot } from '../shared/routines';
 import { NOTIFICATIONS_IPC, type NotificationsSnapshot } from '../shared/notifications';
 import { SERVICES_IPC, type ServicesSnapshot } from '../shared/services';
@@ -160,6 +160,11 @@ const api: AgentsFlowApi = {
     const listener = (_e: IpcRendererEvent, payload: OpenFileNavPayload) => cb(payload);
     ipcRenderer.on('navigate:openFile', listener);
     return () => ipcRenderer.removeListener('navigate:openFile', listener);
+  },
+  onOpenConversation: (cb) => {
+    const listener = (_e: IpcRendererEvent, payload: OpenConversationNavPayload) => cb(payload);
+    ipcRenderer.on('navigate:openConversation', listener);
+    return () => ipcRenderer.removeListener('navigate:openConversation', listener);
   },
 
   listDividers: () => ipcRenderer.invoke('dividers:list'),
