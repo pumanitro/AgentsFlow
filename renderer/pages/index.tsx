@@ -206,7 +206,9 @@ export default function Home() {
   useEffect(() => {
     if (!globalNoteFile) return;
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') { e.preventDefault(); setGlobalNoteFile(null); }
+      // An Esc already handled inside the editor (e.g. clearing a row
+      // selection) must not also close the note.
+      if (e.key === 'Escape' && !e.defaultPrevented) { e.preventDefault(); setGlobalNoteFile(null); }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);

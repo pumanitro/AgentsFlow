@@ -10,6 +10,7 @@ import {
   useSelectedBlocks,
 } from '@blocknote/react';
 import { BlockNoteView } from '@blocknote/ariakit';
+import { useNotionBlockSelection, NOTION_SELECTION_CSS } from './blockSelection';
 import { api } from '../lib/ipc';
 import { parseWidthFragment, stripWidthFragment, withWidthFragment } from '../../shared/md-image-width';
 
@@ -537,6 +538,11 @@ function Inner({
 
   const editor = useCreateBlockNote({ initialContent: initialBlocks, uploadFile, pasteHandler });
 
+  // Notion-style row selection (rectangle / multi-row text → whole rows) and
+  // drag of the whole selection. See blockSelection.tsx.
+  const hostRef = useRef<HTMLDivElement | null>(null);
+  const blockSel = useNotionBlockSelection(editor, hostRef);
+
   useEffect(() => {
     if (!autoFocus) return;
     try { editor.focus(); } catch {}
@@ -672,7 +678,7 @@ function Inner({
         </button>
       </header>
 
-      <div className="flex-1 min-h-0 overflow-y-auto blocknote-host">
+      <div ref={hostRef} className="flex-1 min-h-0 overflow-y-auto blocknote-host">
         <BlockNoteView editor={editor} theme="dark" formattingToolbar={false}>
           {/* Default toolbar plus a "Copy image" button when an image is selected. */}
           <FormattingToolbarController
@@ -684,6 +690,9 @@ function Inner({
             )}
           />
         </BlockNoteView>
+        {blockSel.overlay}
+        {blockSel.ghost}
+        <style>{NOTION_SELECTION_CSS}</style>
       </div>
     </div>
   );
