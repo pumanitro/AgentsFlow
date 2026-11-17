@@ -97,6 +97,7 @@ import {
   respawnAgent,
   jobStateMtimeMs,
   resumeBackground,
+  suggestChatTitle,
   type ClaudeAgentJsonRow,
 } from './claude-cli';
 import { ensureWorkspaceTrusted } from './workspace-trust';
@@ -2066,6 +2067,19 @@ async function copyAttachmentsToRemote(rh: RemoteHosts, host: string, conversati
   return rewriteAttachmentPaths(prompt, map);
 }
 
+async function applyAutoTitle(conversationId: string, createdTitle: string, prompt: string): Promise<void> {
+  try {
+    const suggested = await suggestChatTitle(prompt);
+    const conv = store.getConversation(conversationId);
+    // Only if nobody renamed it meanwhile — a manual title always wins.
+    if (!suggested || !conv || conv.title !== createdTitle) return;
+    store.updateConversation(conversationId, { title: suggested });
+    broadcastConversations();
+  } catch (error) {
+    console.warn('[agentsflow][auto-title] failed', { error: (error as Error).message });
+  }
+}
+
 /**
  * Spawns a tracked background session in `dir` and returns its ids. Shared by
  * the user-initiated `convs:spawn` IPC and the delegation bridge.
@@ -2141,6 +2155,11 @@ async function spawnConversation(opts: {
   store.addConversation(optimistic, opts.afterConversationId ? { afterConversationId: opts.afterConversationId } : undefined);
   broadcastConversations();
   broadcastPinnedOrder();
+  // A chat started from a typed prompt gets a 1–4 word Haiku title, once.
+  // Delegations and routines pass their own title and are left alone.
+  if (opts.title === undefined && !opts.delegatedByConversationId && optimistic.chatKind !== 'routine') {
+    void applyAutoTitle(conversationId, title, prompt);
+  }
 
   if (provider === 'codex') {
     // The Codex app-server runs on this machine only; a remote peer has none.

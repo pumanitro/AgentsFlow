@@ -1,3 +1,4 @@
+import { AUTO_TITLE_SYSTEM_PROMPT, autoTitleInput, sanitizeAutoTitle } from './auto-title';
 import { spawn } from 'child_process';
 import * as fs from 'fs';
 import * as os from 'os';
@@ -633,4 +634,22 @@ export async function removeAgent(daemonShort: string, host?: string): Promise<v
     return;
   }
   await runCmd(['rm', daemonShort], { timeoutMs: 5000 });
+}
+
+/**
+ * One short `claude -p` call on Haiku that returns a 1–4 word chat title, or
+ * null on any failure (no tools, no MCP, no settings/hooks, no saved session).
+ */
+export async function suggestChatTitle(prompt: string): Promise<string | null> {
+  const input = autoTitleInput(prompt);
+  if (input.length < 3) return null;
+  const args = [
+    '-p', '--model', 'haiku', '--no-session-persistence', '--tools', '',
+    '--strict-mcp-config', '--setting-sources', '', '--disable-slash-commands',
+    '--system-prompt', AUTO_TITLE_SYSTEM_PROMPT,
+    `Title this request:\n${input}`,
+  ];
+  const { code, stdout, timedOut } = await runCmd(args, { cwd: os.tmpdir(), timeoutMs: 30000 });
+  if (code !== 0 || timedOut) return null;
+  return sanitizeAutoTitle(stripAnsi(stdout));
 }
