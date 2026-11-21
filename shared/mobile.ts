@@ -33,7 +33,7 @@ export interface JobSlice {
 }
 export interface ConversationDetail { summary: ConversationSummary; job: JobSlice | null }
 
-export type MessageKind = 'user.text' | 'assistant.text' | 'tool_use' | 'tool_result' | 'thinking' | 'subagent';
+export type MessageKind = 'user.text' | 'assistant.text' | 'tool_use' | 'tool_result' | 'thinking' | 'subagent' | 'notice';
 export interface MessageEntry {
   id: string;                     // `${entry.uuid}:${partIndex}`
   kind: MessageKind; at: string;  // ISO timestamp of the entry ('' when absent)

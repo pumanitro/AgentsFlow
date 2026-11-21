@@ -259,3 +259,11 @@ test('a slash command shows as the user typed it, not as CLI markup', () => {
   const entries = entriesFromJsonl([line]);
   assert.equal(entries[0].text.startsWith('/voice-task sprawdź'), true);
 });
+
+test('task-notification becomes a one-line notice; system-reminder is stripped', () => {
+  const { noticeText, stripHarnessBlocks } = require('./transcript-tailer');
+  const raw = '<task-notification>\n<task-id>a64</task-id>\n<output-file>/tmp/x</output-file>\n<status>completed</status>\n<summary>Agent "Verify Nov 19 items" finished</summary>\n<result>```json\n[]```</result>\n</task-notification>';
+  assert.equal(noticeText(raw), 'Agent "Verify Nov 19 items" finished · completed');
+  assert.equal(noticeText('hello'), null);
+  assert.equal(stripHarnessBlocks('hi <system-reminder>x\ny</system-reminder>'), 'hi');
+});

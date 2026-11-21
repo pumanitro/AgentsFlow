@@ -5,7 +5,7 @@ import kotlinx.serialization.Serializable
 object ConvStates { const val STARTING = "starting"; const val WORKING = "working"; const val BLOCKED = "blocked"; const val DONE = "done"; const val FAILED = "failed"; const val IDLE = "idle" }
 object Scopes { const val VIEW = "view"; const val TALK = "talk"; const val ADMIN = "admin" }
 object Sources { const val DESKTOP = "desktop"; const val PHONE = "phone"; const val VOICE = "voice" }
-object MessageKinds { const val USER = "user.text"; const val ASSISTANT = "assistant.text"; const val TOOL_USE = "tool_use"; const val TOOL_RESULT = "tool_result"; const val THINKING = "thinking"; const val SUBAGENT = "subagent" }
+object MessageKinds { const val USER = "user.text"; const val ASSISTANT = "assistant.text"; const val TOOL_USE = "tool_use"; const val TOOL_RESULT = "tool_result"; const val THINKING = "thinking"; const val SUBAGENT = "subagent"; const val NOTICE = "notice" }
 
 @Serializable data class PeerSummary(val id: String, val name: String, val path: String, val remote: Boolean = false)
 @Serializable data class ConversationSummary(

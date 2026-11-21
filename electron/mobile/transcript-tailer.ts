@@ -38,6 +38,24 @@ export function readableUserText(text: string): string {
   const head = [name.startsWith('/') || !name ? name : '/' + name, stripSpokenAt(args)].filter(Boolean).join(' ');
   return [head, rest].filter(Boolean).join('\n');
 }
+// A background agent finishing reaches the transcript as a user turn of raw XML
+// (<task-notification><task-id>…<summary>Agent "x" finished</summary><result>…).
+// The phone shows one short line instead: 'Agent "x" finished · completed'.
+// Returns null when the text is not such a notification.
+const TAG = (t: string, name: string): string =>
+  new RegExp(`<${name}>([\\s\\S]*?)</${name}>`).exec(t)?.[1]?.trim() ?? '';
+export function noticeText(text: string): string | null {
+  const t = text.trim();
+  if (!t.startsWith('<task-notification>')) return null;
+  const summary = TAG(t, 'summary') || 'Background task update';
+  const status = TAG(t, 'status');
+  return status && !summary.toLowerCase().includes(status.toLowerCase()) ? `${summary} · ${status}` : summary;
+}
+// Strip harness-only blocks the user never typed.
+export function stripHarnessBlocks(text: string): string {
+  return text.replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, '').trim();
+}
+
 // The gateway appends "spokenAt: <iso>" to a voice task for the agent; the user never said it.
 export function stripSpokenAt(s: string): string {
   return s.replace(/\s*\n\s*spokenAt:\s*\S+\s*$/, '').trim();
@@ -132,8 +150,11 @@ function parseTagged(lines: string[], sources?: Map<string, MessageSource>): Tag
       const id = `${uuid}:${i}`;
       if (e.type === 'user') {
         if (p.type === 'text' && typeof p.text === 'string') {
-          if (!p.text.trim()) return;
-          const entry: MessageEntry = { id, kind: 'user.text', at, text: readableUserText(p.text) };
+          const notice = noticeText(p.text);
+          if (notice) { out.push({ entry: { id, kind: 'notice', at, text: notice }, line: li }); return; }
+          const clean = stripHarnessBlocks(p.text);
+          if (!clean) return;
+          const entry: MessageEntry = { id, kind: 'user.text', at, text: readableUserText(clean) };
           const src = sources?.get(normaliseText(p.text));
           if (src) entry.source = src;
           out.push({ entry, line: li });

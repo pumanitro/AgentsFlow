@@ -1,8 +1,5 @@
 package com.peersflow.mobile.ui.main
 
-import android.content.ClipData
-import android.content.ClipboardManager
-import android.content.Context
 import android.util.TypedValue
 import android.widget.TextView
 import androidx.compose.foundation.BorderStroke
@@ -28,7 +25,13 @@ import androidx.compose.material.icons.outlined.Hub
 import androidx.compose.material.icons.outlined.Mic
 import androidx.compose.material.icons.outlined.PhoneAndroid
 import androidx.compose.material.icons.outlined.Terminal
+import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.material.icons.outlined.NotificationsNone
 import androidx.compose.material3.Icon
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
@@ -60,7 +63,10 @@ import io.noties.markwon.ext.tables.TablePlugin
 fun MessageRow(entry: MessageEntry, toolExpanded: Boolean = false, onToggleTool: () -> Unit = {}) {
     val tag = Modifier.testTag("chat_msg_${entry.id}")
     when (entry.kind) {
-        MessageKinds.USER -> UserBubble(entry, tag)
+        MessageKinds.USER -> {
+            val notice = taskNoticeText(entry.text)
+            if (notice != null) NoticeLine(entry.copy(text = notice), tag) else UserBubble(entry, tag)
+        }
         MessageKinds.ASSISTANT -> AssistantBubble(entry, tag)
         MessageKinds.TOOL_USE -> ToolUseLine(entry, toolExpanded, onToggleTool, tag)
         MessageKinds.TOOL_RESULT -> ToolResultBlock(entry, tag)
@@ -72,6 +78,7 @@ fun MessageRow(entry: MessageEntry, toolExpanded: Boolean = false, onToggleTool:
             modifier = tag.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
         )
         MessageKinds.SUBAGENT -> SubagentCard(entry, tag)
+        MessageKinds.NOTICE -> NoticeLine(entry, tag)
         else -> Text(entry.text, color = UiColors.muted, fontSize = 13.sp, modifier = tag.padding(horizontal = 16.dp, vertical = 4.dp))
     }
 }
@@ -97,7 +104,7 @@ private fun UserBubble(entry: MessageEntry, tag: Modifier) {
                 Icon(icon, entry.source, tint = UiColors.secondary, modifier = Modifier.size(16.dp).padding(top = 2.dp))
                 Spacer(Modifier.width(6.dp))
             }
-            Text(entry.text, color = UiColors.onBg, fontSize = 15.sp)
+            SelectionContainer { Text(entry.text, color = UiColors.onBg, fontSize = 15.sp) }
         }
     }
 }
@@ -120,28 +127,26 @@ private fun AssistantBubble(entry: MessageEntry, tag: Modifier) {
     }
 }
 
-/** Markdown through Markwon in a TextView; long-press copies the raw text. */
+/**
+ * Markdown through Markwon in a selectable TextView: long-press selects a word, drag the
+ * handles, and the system bar offers Copy / Select all / Share.
+ */
 @Composable
 private fun MarkdownText(markdown: String) {
     val ctx = LocalContext.current
     val markwon = remember(ctx) { Markwon.builder(ctx).usePlugin(TablePlugin.create(ctx)).build() }
-    val copied = stringResource(R.string.chat_copied)
     AndroidView(
         factory = { c ->
             TextView(c).apply {
                 setTextColor(Palette.ON_BG.toInt())
                 setLinkTextColor(Palette.SECONDARY.toInt())
+                setHighlightColor(0x665B8DEF)
                 setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
+                setTextIsSelectable(true)
             }
         },
         update = { tv ->
-            markwon.setMarkdown(tv, markdown)
-            tv.setOnLongClickListener {
-                val cm = tv.context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                cm.setPrimaryClip(ClipData.newPlainText("message", markdown))
-                android.widget.Toast.makeText(tv.context, copied, android.widget.Toast.LENGTH_SHORT).show()
-                true
-            }
+            if (tv.tag != markdown) { markwon.setMarkdown(tv, markdown); tv.tag = markdown }
         },
         modifier = Modifier.fillMaxWidth(),
     )
@@ -173,8 +178,12 @@ private fun ToolUseLine(entry: MessageEntry, expanded: Boolean, onToggle: () -> 
     }
 }
 
+private const val RESULT_PREVIEW_LINES = 6
+
 @Composable
 private fun ToolResultBlock(entry: MessageEntry, tag: Modifier) {
+    var open by rememberSaveable(entry.id) { mutableStateOf(false) }
+    val long = entry.text.lineSequence().count() > RESULT_PREVIEW_LINES || entry.text.length > 400
     Column(
         tag
             .fillMaxWidth()
@@ -182,10 +191,41 @@ private fun ToolResultBlock(entry: MessageEntry, tag: Modifier) {
             .background(UiColors.surfaceVariant, RoundedCornerShape(6.dp))
             .padding(8.dp),
     ) {
-        Text(entry.text, color = UiColors.onBg, fontFamily = FontFamily.Monospace, fontSize = 11.sp)
-        if (entry.truncated) {
+        SelectionContainer {
+            Text(
+                entry.text,
+                color = UiColors.onBg,
+                fontFamily = FontFamily.Monospace,
+                fontSize = 11.sp,
+                maxLines = if (open || !long) Int.MAX_VALUE else RESULT_PREVIEW_LINES,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+        if (long) {
+            Text(
+                if (open) "show less" else "show more",
+                color = UiColors.secondary,
+                fontSize = 12.sp,
+                modifier = Modifier.clickable { open = !open }.heightIn(min = 32.dp).padding(top = 6.dp),
+            )
+        }
+        if (entry.truncated && (open || !long)) {
             Text(stringResource(R.string.chat_more_on_desktop), color = UiColors.muted, fontFamily = FontFamily.Monospace, fontSize = 11.sp)
         }
+    }
+}
+
+/** A background agent finished etc.: one quiet line, not a bubble of raw XML. */
+@Composable
+private fun NoticeLine(entry: MessageEntry, tag: Modifier) {
+    Row(
+        tag.fillMaxWidth().padding(horizontal = 24.dp, vertical = 4.dp),
+        horizontalArrangement = Arrangement.Center,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(Icons.Outlined.NotificationsNone, null, tint = UiColors.muted, modifier = Modifier.size(14.dp))
+        Spacer(Modifier.width(6.dp))
+        Text(entry.text, color = UiColors.muted, fontSize = 12.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
     }
 }
 
@@ -204,4 +244,17 @@ private fun SubagentCard(entry: MessageEntry, tag: Modifier) {
         Spacer(Modifier.width(8.dp))
         Text(stringResource(R.string.chat_subagent, entry.text), color = UiColors.onBg, fontSize = 12.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
     }
+}
+
+/**
+ * Phone-side twin of the gateway's noticeText(): messages cached before the gateway learned
+ * the `notice` kind still arrive as user.text holding raw <task-notification> XML.
+ */
+internal fun taskNoticeText(text: String): String? {
+    val t = text.trim()
+    if (!t.startsWith("<task-notification>")) return null
+    fun tag(name: String) = Regex("<$name>([\\s\\S]*?)</$name>").find(t)?.groupValues?.get(1)?.trim().orEmpty()
+    val summary = tag("summary").ifEmpty { "Background task update" }
+    val status = tag("status")
+    return if (status.isNotEmpty() && !summary.contains(status, ignoreCase = true)) "$summary · $status" else summary
 }
